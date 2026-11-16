@@ -1,7 +1,8 @@
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { claudeBlockHash, hasBlock, upsertBlock } from "./claude-md.ts";
 import type { Command, PackageManagerAdapter } from "./pm/types.ts";
 
 export interface Options {
@@ -72,6 +73,8 @@ async function listTemplates(dir: string, rel = ""): Promise<string[]> {
   return out.sort();
 }
 
+const fill0 = (text: string, scope: string) => text.replaceAll("__SCOPE__", scope);
+
 function toRange(pkg: string, version: string): string {
   return `${pkg === "typescript" ? "~" : "^"}${version}`;
 }
@@ -84,9 +87,20 @@ export async function scaffold(options: Options, deps: Deps): Promise<Result> {
     src: join(TEMPLATES_DIR, "root", src),
     dest: destinationOf(src),
   }));
-  const files = [...templates.map((t) => t.dest), pm.workspaceFile].sort();
-  const missing = files.filter((f) => !existsSync(join(target, f)));
-  const skipped = files.filter((f) => !missing.includes(f));
+  const claudeMdPath = join(target, "CLAUDE.md");
+  const existingClaudeMd = existsSync(claudeMdPath)
+    ? await readFile(claudeMdPath, "utf8")
+    : undefined;
+  const claudeMdMissing = existingClaudeMd === undefined || !hasBlock(existingClaudeMd);
+  const files = [
+    ...templates.map((t) => t.dest),
+    pm.workspaceFile,
+    ...(claudeMdMissing ? ["CLAUDE.md"] : []),
+  ].sort();
+  const missing = files.filter((f) => f === "CLAUDE.md" || !existsSync(join(target, f)));
+  const skipped = [...files, ...(claudeMdMissing ? [] : ["CLAUDE.md"])]
+    .filter((f) => !missing.includes(f))
+    .sort();
 
   // Everything that can fail on the network happens before the first write.
   const contents = new Map<string, string>();
@@ -101,6 +115,12 @@ export async function scaffold(options: Options, deps: Deps): Promise<Result> {
     contents.set(pm.workspaceFile, pm.renderWorkspaceFile(catalog));
   }
 
+  // The CLAUDE.md block, then the hash recorded in architecture.json (same code as arch-check).
+  const block = fill0(await readFile(join(TEMPLATES_DIR, "claude-md", "block.md"), "utf8"), scope);
+  const claudeMd = upsertBlock(existingClaudeMd, block);
+  if (claudeMdMissing) contents.set("CLAUDE.md", claudeMd);
+  const claudeSha = claudeBlockHash(claudeMd) ?? "";
+
   const packageManager = pm.packageManagerField(await pm.version());
   const fill = (text: string) =>
     text
@@ -108,9 +128,16 @@ export async function scaffold(options: Options, deps: Deps): Promise<Result> {
       .replaceAll("__SCOPE_RE__", scope)
       .replaceAll("__SCOPE__", scope)
       .replaceAll("__NODE_MAJOR__", String(nodeMajor))
+      .replaceAll("__CLAUDE_SHA__", claudeSha)
       .replaceAll("__PACKAGE_MANAGER__", packageManager);
   for (const t of templates) {
     if (missing.includes(t.dest)) contents.set(t.dest, fill(await readFile(t.src, "utf8")));
+  }
+
+  const modes = new Map<string, number>();
+  for (const t of templates) {
+    const mode = (await stat(t.src)).mode & 0o777;
+    if (mode & 0o100) modes.set(t.dest, mode);
   }
 
   await mkdir(target, { recursive: true });
@@ -118,6 +145,8 @@ export async function scaffold(options: Options, deps: Deps): Promise<Result> {
     const path = join(target, file);
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, contents.get(file) as string);
+    const mode = modes.get(file);
+    if (mode) await chmod(path, mode);
   }
 
   const git = await deps.run("git", ["rev-parse", "--git-dir"], target);

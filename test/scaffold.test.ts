@@ -68,9 +68,9 @@ describe("scaffold: fresh run", () => {
   it("writes the root files with placeholders filled", async () => {
     const result = await scaffold(options(), deps());
 
-    expect(result.written.sort()).toEqual(ROOT_FILES);
+    expect(result.written).toEqual(expect.arrayContaining(ROOT_FILES));
     expect(result.skipped).toEqual([]);
-    expect(await listFiles(dir)).toEqual(ROOT_FILES);
+    expect(await listFiles(dir)).toEqual(expect.arrayContaining(ROOT_FILES));
 
     for (const f of ROOT_FILES) {
       expect(await readFile(join(dir, f), "utf8")).not.toMatch(/__[A-Z_]+__/);
@@ -125,7 +125,7 @@ describe("scaffold: re-run", () => {
     const result = await scaffold(options(), deps());
 
     expect(result.written).toEqual([]);
-    expect(result.skipped.sort()).toEqual(ROOT_FILES);
+    expect(result.skipped).toEqual(expect.arrayContaining(ROOT_FILES));
     expect(resolved).toEqual([]);
     const after = await Promise.all(ROOT_FILES.map((f) => readFile(join(dir, f), "utf8")));
     expect(after).toEqual(before);

@@ -1,0 +1,140 @@
+import { execFile, spawn } from "node:child_process";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { scaffoldFixture, stubDeclaredPackages } from "./support/fixture.ts";
+
+const execFileAsync = promisify(execFile);
+
+let dir: string;
+let cleanup: () => Promise<void>;
+beforeAll(async () => {
+  ({ dir, cleanup } = await scaffoldFixture());
+  await stubDeclaredPackages(dir);
+});
+afterAll(() => cleanup());
+
+/** Runs the generated guard hook as Claude Code would: JSON on stdin, exit 2 blocks. */
+function guard(toolName: string, toolInput: Record<string, unknown>) {
+  return new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
+    const child = spawn("node", [".claude/hooks/guard.mjs"], {
+      cwd: dir,
+      env: { ...process.env, CLAUDE_PROJECT_DIR: dir },
+    });
+    let stderr = "";
+    child.stderr.on("data", (d) => {
+      stderr += d;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stderr }));
+    child.stdin.end(JSON.stringify({ tool_name: toolName, tool_input: toolInput, cwd: dir }));
+  });
+}
+const bash = (command: string) => guard("Bash", { command });
+const write = (file_path: string) => guard("Write", { file_path, content: "x" });
+
+describe("generated arch-check", () => {
+  it("passes on a fresh scaffold", async () => {
+    const { stdout } = await execFileAsync("node", ["scripts/arch-check.mjs"], { cwd: dir });
+    expect(stdout).toContain("Architecture check passed");
+  });
+
+  it("fails when the CLAUDE.md block was modified", async () => {
+    const path = join(dir, "CLAUDE.md");
+    const original = await readFile(path, "utf8");
+    await writeFile(path, original.replace("# Project rules", "# Changed rules"));
+    try {
+      await expect(
+        execFileAsync("node", ["scripts/arch-check.mjs"], { cwd: dir }),
+      ).rejects.toMatchObject({
+        stderr: expect.stringContaining("scaffold block was modified"),
+      });
+    } finally {
+      await writeFile(path, original);
+    }
+  });
+
+  it("fails on an undeclared package folder", async () => {
+    await mkdir(join(dir, "packages/auth"), { recursive: true });
+    await writeFile(join(dir, "packages/auth/index.ts"), "export const a = 1;\n");
+    try {
+      await expect(
+        execFileAsync("node", ["scripts/arch-check.mjs"], { cwd: dir }),
+      ).rejects.toMatchObject({
+        stderr: expect.stringContaining("packages/auth: not declared"),
+      });
+    } finally {
+      await (await import("node:fs/promises")).rm(join(dir, "packages/auth"), { recursive: true });
+    }
+  });
+});
+
+describe("generated guard hook", () => {
+  it("blocks writes to protected paths", async () => {
+    for (const p of [
+      "architecture.json",
+      "docs/adr/0001-x.md",
+      "biome.json",
+      ".githooks/pre-commit",
+    ]) {
+      const r = await write(p);
+      expect(r.code, p).toBe(2);
+      expect(r.stderr).toContain("protected");
+    }
+  });
+
+  it("allows the ADR proposal folder and ordinary files", async () => {
+    expect((await write("docs/adr/proposed/0004-x.md")).code).toBe(0);
+    expect((await write("packages/domain/src/money.ts")).code).toBe(0);
+  });
+
+  it("blocks undeclared and deferred packages", async () => {
+    const undeclared = await write("packages/widgets/index.ts");
+    expect(undeclared.code).toBe(2);
+    expect(undeclared.stderr).toContain("not a package declared");
+    const deferred = await write("packages/auth/index.ts");
+    expect(deferred.code).toBe(2);
+    expect(deferred.stderr).toContain('deferred "auth"');
+  });
+
+  it("blocks installing deferred dependencies", async () => {
+    const r = await bash("pnpm add better-auth --filter @acme/core");
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain('"better-auth" cannot be installed');
+    expect((await bash("pnpm add zod --filter @acme/contracts")).code).toBe(0);
+  });
+
+  it("blocks --no-verify and git commit -n", async () => {
+    expect((await bash("git commit --no-verify -m x")).code).toBe(2);
+    expect((await bash("git commit -n -m x")).code).toBe(2);
+    expect((await bash("git commit -m x")).code).toBe(0);
+  });
+
+  it("blocks edits inside the CLAUDE.md block but not outside it", async () => {
+    const inside = await guard("Edit", {
+      file_path: join(dir, "CLAUDE.md"),
+      old_string: "# Project rules",
+      new_string: "# Mine",
+    });
+    expect(inside.code).toBe(2);
+    const outside = await guard("Write", {
+      file_path: join(dir, "CLAUDE.md"),
+      content: `before\n${await readFile(join(dir, "CLAUDE.md"), "utf8")}`,
+    });
+    expect(outside.code).toBe(0);
+  });
+});
+
+describe("generated file modes", () => {
+  it("marks scripts, hooks and the git hook executable", async () => {
+    for (const f of [
+      "scripts/arch-check.mjs",
+      ".claude/hooks/guard.mjs",
+      ".claude/hooks/stop-check.mjs",
+      ".githooks/pre-commit",
+    ]) {
+      expect((await stat(join(dir, f))).mode & 0o111, f).not.toBe(0);
+    }
+  });
+});
