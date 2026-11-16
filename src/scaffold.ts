@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Command, PackageManagerAdapter } from "./pm/types.ts";
@@ -51,6 +51,9 @@ const CATALOG_PACKAGES = [
   "@vitejs/plugin-react",
   "@tanstack/react-query",
 ];
+
+/** Generated files that must be executable. */
+const EXECUTABLE = new Set(["scripts/worktree.mjs"]);
 
 const TEMPLATES_DIR = fileURLToPath(new URL("../templates/", import.meta.url));
 
@@ -127,6 +130,7 @@ export async function scaffold(options: Options, deps: Deps): Promise<Result> {
     const path = join(target, file);
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, contents.get(file) as string);
+    if (EXECUTABLE.has(file)) await chmod(path, 0o755);
   }
 
   const git = await deps.run("git", ["rev-parse", "--git-dir"], target);

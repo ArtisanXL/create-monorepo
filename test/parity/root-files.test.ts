@@ -70,14 +70,23 @@ const WORKSPACE_FILES = [
   "packages/domain/tsconfig.json",
 ];
 
+const WORKTREE_FILES = [
+  "paseo.json",
+  ".worktreeinclude",
+  "scripts/worktree-lib.mjs",
+  "scripts/worktree-lib.test.mjs",
+  "scripts/worktree.mjs",
+  "docs/adr/0004-worktree-isolation.md",
+];
+
 let tmp: string;
 beforeEach(async () => {
   tmp = await mkdtemp(join(tmpdir(), "parity-"));
 });
 afterEach(() => rm(tmp, { recursive: true, force: true }));
 
-describe.skipIf(!parityEnabled)("bash parity: root, packages and apps", () => {
-  it("TS output matches bash output for the root, packages and apps subset", async () => {
+describe.skipIf(!parityEnabled)("bash parity: root, worktree, packages and apps", () => {
+  it("TS output matches bash output for the root, worktree, packages and apps subset", async () => {
     const bashDir = join(tmp, "bash");
     const tsDir = join(tmp, "ts");
     await runBash(bashDir, await createPnpmShim());
@@ -98,6 +107,8 @@ describe.skipIf(!parityEnabled)("bash parity: root, packages and apps", () => {
       },
     );
 
-    expect(await diffTrees(bashDir, tsDir, [...ROOT_FILES, ...WORKSPACE_FILES])).toEqual([]);
+    expect(
+      await diffTrees(bashDir, tsDir, [...ROOT_FILES, ...WORKTREE_FILES, ...WORKSPACE_FILES]),
+    ).toEqual([]);
   });
 });
