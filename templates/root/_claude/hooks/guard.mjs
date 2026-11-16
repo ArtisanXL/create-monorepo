@@ -96,6 +96,19 @@ if (tool === "Bash") {
   if (/\bgit\s+(clean|checkout\s+--|restore|rm)\b/.test(cmd) && touchesProtected)
     block("Command touches a protected path via git; only humans may change it.");
 
+  // pm-guard:begin
+  const chosenPm = arch.package_manager;
+  if (chosenPm) {
+    for (const pm of ["pnpm", "npm", "yarn", "bun"].filter((x) => x !== chosenPm)) {
+      const install = new RegExp(
+        `(^|[;&|(]\\s*)${pm}(\\s*($|[;&|)])|\\s+(install|i|add|ci|update|up|upgrade)\\b)`,
+      );
+      if (cmd.split("\n").some((l) => install.test(l)))
+        block(`This project uses ${chosenPm} (architecture.json > package_manager); "${pm}" installs would create a second lockfile. Use ${chosenPm} instead.`);
+    }
+  }
+  // pm-guard:end
+
   if (/\b(pnpm|npm|yarn|bun)\s+(add|install|i|update|up)\b/.test(cmd)) {
     for (const d of deferred)
       for (const dep of d.deps ?? [])

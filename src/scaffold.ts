@@ -147,7 +147,8 @@ export async function scaffold(options: Options, deps: Deps): Promise<Result> {
       .replaceAll("__SCOPE__", scope)
       .replaceAll("__NODE_MAJOR__", String(nodeMajor))
       .replaceAll("__CLAUDE_SHA__", claudeSha)
-      .replaceAll("__PACKAGE_MANAGER__", packageManager);
+      .replaceAll("__PACKAGE_MANAGER__", packageManager)
+      .replaceAll("__PM__", pm.name);
   for (const t of templates) {
     if (missing.includes(t.dest)) contents.set(t.dest, fill(await readFile(t.src, "utf8")));
   }
