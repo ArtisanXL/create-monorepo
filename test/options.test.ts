@@ -111,7 +111,7 @@ describe("resolveOptions: prompting", () => {
 
   it("defaults the scope to @<dir-name> and derives the db prefix from the answer", async () => {
     const { options } = await resolve(["some/My-App"], {}, true, []);
-    expect(options.scope).toBe("@My-App");
+    expect(options.scope).toBe("@my-app");
     expect(options.dbPrefix).toBe("my_app");
     expect(options.install).toBe(true);
   });
@@ -203,8 +203,38 @@ describe("resolveOptions: validation", () => {
   });
 
   it("derives the db prefix from the scope", async () => {
-    const { options } = await resolve(["proj", "--scope", "@My-Shop"]);
+    const { options } = await resolve(["proj", "--scope", "@my-shop"]);
     expect(options.dbPrefix).toBe("my_shop");
+  });
+
+  it("repairs a derived db prefix so the CLI never rejects a flag the user did not pass", async () => {
+    for (const [scope, expected] of [
+      ["@1app", "db_1app"],
+      ["@-", "db__"],
+      [`@${"a".repeat(40)}`, "a".repeat(30)],
+    ] as const) {
+      const { options } = await resolve(["proj", "--scope", scope]);
+      expect(options.dbPrefix, scope).toBe(expected);
+    }
+  });
+
+  it("rejects scopes that are not valid npm scopes", async () => {
+    for (const scope of [
+      "@",
+      "@A",
+      '@a"b',
+      "@a b",
+      "@a/b",
+      "@a$&",
+      "@.a",
+      "@_a",
+      "@a\\b",
+      "@a\nb",
+    ]) {
+      expect(await failure(["proj", "--scope", scope]), scope).toMatchObject({
+        message: expect.stringContaining("--scope"),
+      });
+    }
   });
 
   it("errors on unknown flags", async () => {

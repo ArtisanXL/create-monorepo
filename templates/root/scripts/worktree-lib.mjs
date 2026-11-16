@@ -33,7 +33,7 @@ export function databaseOf(url) {
 
 export function setLine(text, key, value) {
   const line = new RegExp(`^${key}=.*$`, "m");
-  if (line.test(text)) return text.replace(line, `${key}=${value}`);
+  if (line.test(text)) return text.replace(line, () => `${key}=${value}`);
   const base = text === "" || text.endsWith("\n") ? text : `${text}\n`;
   return `${base}${key}=${value}\n`;
 }

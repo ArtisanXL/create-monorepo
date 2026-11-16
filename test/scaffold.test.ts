@@ -53,7 +53,8 @@ const deps = (over: Partial<Deps> = {}): Deps => ({
   },
   run: async (cmd, args) => {
     commands.push([cmd, ...args].join(" "));
-    return { code: cmd === "git" && args[0] === "rev-parse" ? 128 : 0 };
+    // `git rev-parse` would report an enclosing repository; the scaffold must not rely on it.
+    return { code: 0 };
   },
   pm: createPnpmAdapter(async () => "9.9.9"),
   ...over,
@@ -130,6 +131,33 @@ describe("scaffold: fresh run", () => {
   it("initialises git when the target is not a repository", async () => {
     await scaffold(options(), deps());
     expect(commands).toContain("git init -q -b main");
+  });
+
+  it("initialises git in a target nested inside another repository", async () => {
+    await scaffold(options(), deps()); // the fake reports an enclosing repo: rev-parse exits 0
+    expect(commands).toContain("git init -q -b main");
+  });
+
+  it("does not re-initialise a target that has its own .git", async () => {
+    await mkdir(join(dir, ".git"));
+    await scaffold(options(), deps());
+    expect(commands.some((c) => c.startsWith("git init"))).toBe(false);
+  });
+
+  it("still succeeds when the git binary is missing", async () => {
+    const run: Deps["run"] = async (cmd) => {
+      if (cmd === "git") throw new Error("spawn git ENOENT");
+      return { code: 0 };
+    };
+    await expect(scaffold(options(), deps({ run }))).resolves.toBeDefined();
+  });
+
+  it("writes a scope with regex and replacement characters literally and escaped", async () => {
+    await scaffold(options({ scope: "@a.b$&" }), deps());
+    const tsdown = await readFile(join(dir, "apps/api/tsdown.config.ts"), "utf8");
+    expect(tsdown).toContain("noExternal: [/^@a\\.b\\$&\\//]");
+    const pkg = JSON.parse(await readFile(join(dir, "apps/api/package.json"), "utf8"));
+    expect(pkg.name).toBe("@a.b$&/api");
   });
 
   it("makes no install or verify calls with install off", async () => {

@@ -10,8 +10,10 @@ const root = process.env.CLAUDE_PROJECT_DIR || input.cwd || process.cwd();
 const run = (cmd, args) => spawnSync(cmd, args, { cwd: root, encoding: "utf8" });
 
 const checks = [["architecture", run(process.execPath, ["scripts/arch-check.mjs"])]];
-const biome = path.join(root, "node_modules", ".bin", "biome");
-if (existsSync(biome)) checks.push(["lint", run(biome, ["check", "."])]);
+// node_modules/.bin/biome is a shell/cmd shim on Windows and cannot be spawned directly: run the
+// package's JS entry with this Node instead.
+const biome = path.join(root, "node_modules", "@biomejs", "biome", "bin", "biome");
+if (existsSync(biome)) checks.push(["lint", run(process.execPath, [biome, "check", "."])]);
 
 const failed = checks.filter(([, r]) => r.status !== 0);
 if (failed.length) {

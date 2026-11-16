@@ -32,4 +32,18 @@ describe("api", () => {
     });
     expect(res.status).toBe(400);
   });
+
+  it("answers 400, not 500, for a malformed currency or locale", async () => {
+    for (const body of [
+      { amount: "1", currency: "US1" },
+      { amount: "1", currency: "USD", locale: "not a locale" },
+    ]) {
+      const res = await app.request("/api/format-price", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(400);
+    }
+  });
 });

@@ -75,13 +75,15 @@ if (tool === "Bash") {
   const cmd = String(ti.command ?? "");
   // Path-like tokens resolved against the project root; paths outside the project are ignored.
   const home = process.env.HOME ?? "~";
-  const relTokens = [...cmd.matchAll(/[^\s"'<>|;&()]+/g)]
-    .map((m) => m[0].replace(/^~(?=\/)/, home))
-    .map((t) => path.relative(root, path.resolve(root, t)).split(path.sep).join("/"))
-    .filter((r) => r && !r.startsWith("..") && !path.isAbsolute(r));
-  const touchesProtected = relTokens.some(
-    (r) => isProtected(r) || protectedPaths.some((p) => p.endsWith("/") && r === p.slice(0, -1)),
-  );
+  const toRels = (tokens) =>
+    tokens
+      .map((t) => t.replace(/^~(?=\/)/, home))
+      .map((t) => path.relative(root, path.resolve(root, t)).split(path.sep).join("/"))
+      .filter((r) => r && !r.startsWith("..") && !path.isAbsolute(r));
+  const isProtectedOrDir = (r) =>
+    isProtected(r) || protectedPaths.some((p) => p.endsWith("/") && r === p.slice(0, -1));
+  const relTokens = toRels([...cmd.matchAll(/[^\s"'<>|;&()]+/g)].map((m) => m[0]));
+  const touchesProtected = relTokens.some(isProtectedOrDir);
 
   if (
     relTokens.includes("CLAUDE.md") &&
@@ -99,9 +101,12 @@ if (tool === "Bash") {
   // pm-guard:begin
   const chosenPm = arch.package_manager;
   if (chosenPm) {
+    // Optional command prefixes: sudo/time/env/corepack..., their flags and VAR=value assignments.
+    const wrappers =
+      "(?:(?:sudo|time|env|command|exec|nohup|nice|corepack)\\s+|-\\S+\\s+|[A-Za-z_]\\w*=\\S*\\s+)*";
     for (const pm of ["pnpm", "npm", "yarn", "bun"].filter((x) => x !== chosenPm)) {
       const install = new RegExp(
-        `(^|[;&|(]\\s*)${pm}(\\s*($|[;&|)])|\\s+(install|i|add|ci|update|up|upgrade)\\b)`,
+        `(^|[;&|(])\\s*${wrappers}${pm}(\\s*($|[;&|)])|\\s+(install|i|add|ci|update|up|upgrade)\\b)`,
       );
       if (cmd.split("\n").some((l) => install.test(l)))
         block(`This project uses ${chosenPm} (architecture.json > package_manager); "${pm}" installs would create a second lockfile. Use ${chosenPm} instead.`);
@@ -109,7 +114,8 @@ if (tool === "Bash") {
   }
   // pm-guard:end
 
-  if (/\b(pnpm|npm|yarn|bun)\s+(add|install|i|update|up)\b/.test(cmd)) {
+  // Flags and their values may sit between the PM and the verb (`pnpm --filter x add`, `pnpm -w add`).
+  if (/\b(pnpm|npm|yarn|bun)\b[^|;&\n]*\s(add|install|i|update|up)\b/.test(cmd)) {
     for (const d of deferred)
       for (const dep of d.deps ?? [])
         if (new RegExp(`(^|[\\s"'])${esc(dep)}(@[^\\s"']*)?(?=$|[\\s"'])`).test(cmd))
@@ -117,7 +123,15 @@ if (tool === "Bash") {
   }
 
   const redirects = cmd.replace(/\d*>&\d/g, "").replace(/\d*>\s*\/dev\/null/g, "");
-  const writes = /\b(mkdir|touch|cp|mv|rm|tee|truncate|ln|install)\b|\bsed\s+-i|\bperl\s+-p?i|>/.test(redirects);
+  const writes = /\b(mkdir|touch|cp|mv|rm|tee|truncate|ln|install)\b|\bsed\s+-i|\bperl\s+-p?i/.test(redirects);
+  // A redirect writes only to its target; reading a protected file into a redirect is fine.
+  const redirectRels = toRels(
+    [...redirects.matchAll(/\d*>>?\s*["']?([^\s"'<>|;&()]+)/g)].map((m) => m[1]),
+  );
+  if (!writes && redirectRels.length) {
+    if (redirectRels.some(isProtectedOrDir)) block("Command touches a protected path; only humans may change it.");
+    for (const r of redirectRels) if (/^(apps|packages)\/[^/]+/.test(r)) checkPath(r);
+  }
   if (writes) {
     if (touchesProtected) block("Command touches a protected path; only humans may change it.");
     for (const r of relTokens) if (/^(apps|packages)\/[^/]+/.test(r)) checkPath(r);
