@@ -1,0 +1,32 @@
+{
+  "name": "__SCOPE__/root",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=__NODE_MAJOR__" },
+  "packageManager": "__PACKAGE_MANAGER__",
+  "scripts": {
+    "prepare": "git config core.hooksPath .githooks || true",
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "vitest run",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "arch": "node scripts/arch-check.mjs",
+    "verify": "pnpm arch && pnpm lint && pnpm typecheck && pnpm test",
+    "db:generate": "pnpm --filter __SCOPE__/db generate",
+    "db:migrate": "pnpm --filter __SCOPE__/db migrate",
+    "worktree:setup": "node scripts/worktree.mjs setup",
+    "worktree:teardown": "node scripts/worktree.mjs teardown",
+    "worktree:info": "node scripts/worktree.mjs info",
+    "worktree:gc": "node scripts/worktree.mjs gc"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:",
+    "@types/node": "catalog:",
+    "postgres": "catalog:",
+    "turbo": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
