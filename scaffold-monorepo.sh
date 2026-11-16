@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# Modern TS monorepo scaffold — "orta yol" + ajan korkulukları
+# Modern TypeScript monorepo scaffold with agent guardrails
 #
-#   ./scaffold-monorepo.sh <hedef-klasör> [--scope @app] [--no-install]
+#   ./scaffold-monorepo.sh <target-dir> [--scope @app] [--no-install]
 #
-# Üretilen yapı:
+# Generates:
 #   apps/{api,web,worker}  packages/{domain,contracts,db,core}
-#   architecture.json      → izinli paketler, bağımlılık matrisi, ertelenmiş paketler
-#   scripts/arch-check.mjs → matrisi package.json + import seviyesinde zorlar
-#   .claude/hooks          → ajan: korunan dosyalar / tanımsız paket / ertelenmiş bağımlılık engeli
-#   .githooks + CI         → aynı kontroller her ajan/insan için
-# Sürümler scaffold anında npm'den en güncel stabil olarak çekilir (pnpm catalog).
+#   architecture.json      → allowed packages, dependency matrix, deferred packages
+#   scripts/arch-check.mjs → enforces the matrix at package.json and import level
+#   .claude/hooks          → blocks agents from protected files / undeclared packages / deferred deps
+#   .githooks + CI         → same checks for every agent and human
+# Idempotent: existing files are never touched; a marked rules block is added to CLAUDE.md once.
+# Versions are resolved from npm at scaffold time (pnpm catalog).
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -21,19 +22,17 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --scope) SCOPE="$2"; shift 2 ;;
     --no-install) INSTALL=0; shift ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) TARGET="$1"; shift ;;
   esac
 done
-[[ -n "$TARGET" ]] || { echo "Kullanım: $0 <hedef-klasör> [--scope @app] [--no-install]" >&2; exit 1; }
-[[ "$SCOPE" == @* ]] || { echo "--scope '@' ile başlamalı" >&2; exit 1; }
+[[ -n "$TARGET" ]] || { echo "Usage: $0 <target-dir> [--scope @app] [--no-install]" >&2; exit 1; }
+[[ "$SCOPE" == @* ]] || { echo "--scope must start with '@'" >&2; exit 1; }
 
-# İdempotent: mevcut dosyalara asla dokunulmaz; yalnızca eksikler oluşturulur.
-# CLAUDE.md'ye işaretli bir blok bir kez eklenir; mevcut içerik korunur.
 WRITTEN=()
-emit() { # kullanım: emit <yol> <<'EOF' ... EOF
+emit() { # usage: emit <path> <<'EOF' ... EOF  — skips existing files
   if [[ -e "$1" ]]; then
-    echo "  = $1 (mevcut, atlandı)"
+    echo "  = $1 (exists, skipped)"
     cat >/dev/null
     return 0
   fi
@@ -42,14 +41,14 @@ emit() { # kullanım: emit <yol> <<'EOF' ... EOF
   WRITTEN+=("$1")
 }
 
-CLAUDE_BEGIN="<!-- scaffold:begin — bu blok scaffold-monorepo.sh tarafından eklendi -->"
+CLAUDE_BEGIN="<!-- scaffold:begin — managed by scaffold-monorepo.sh -->"
 CLAUDE_END="<!-- scaffold:end -->"
-upsert_claude_md() { # blok stdin'den; varsa tekrar yazılmaz
+upsert_claude_md() { # block from stdin; appended once, existing content preserved
   local block
   block="$(cat)"
   block="${block//__SCOPE__/$SCOPE}"
   if [[ -f CLAUDE.md ]] && grep -qF "<!-- scaffold:begin" CLAUDE.md; then
-    echo "  = CLAUDE.md (scaffold bloğu zaten var, atlandı)"
+    echo "  = CLAUDE.md (scaffold block present, skipped)"
     return 0
   fi
   {
@@ -59,52 +58,49 @@ upsert_claude_md() { # blok stdin'den; varsa tekrar yazılmaz
     fi
     printf '%s\n%s\n%s\n' "$CLAUDE_BEGIN" "$block" "$CLAUDE_END"
   } >>CLAUDE.md
-  echo "  + CLAUDE.md (scaffold bloğu eklendi)"
+  echo "  + CLAUDE.md (scaffold block appended)"
 }
 
 for bin in node pnpm git perl; do
-  command -v "$bin" >/dev/null || { echo "Gerekli araç yok: $bin" >&2; exit 1; }
+  command -v "$bin" >/dev/null || { echo "Missing required tool: $bin" >&2; exit 1; }
 done
 NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
-(( NODE_MAJOR >= 24 )) || { echo "Node >= 24 gerekli (bulunan: $NODE_MAJOR)" >&2; exit 1; }
+(( NODE_MAJOR >= 24 )) || { echo "Node >= 24 required (found: $NODE_MAJOR)" >&2; exit 1; }
 PNPM_VERSION="$(pnpm -v)"
 
 mkdir -p "$TARGET"
 cd "$TARGET"
 
-# --- Sürümler (pnpm catalog) ------------------------------------------------
+# --- Versions (pnpm catalog) -----------------------------------------------------
 CATALOG_YAML=""
 if [[ ! -e pnpm-workspace.yaml ]]; then
-echo "→ Güncel sürümler çözülüyor..."
-CATALOG_PKGS=(
-  typescript @biomejs/biome turbo vitest tsx tsdown
-  zod hono @hono/node-server @hono/zod-validator
-  drizzle-orm drizzle-kit postgres pg-boss
-  react react-dom @types/react @types/react-dom vite @vitejs/plugin-react @tanstack/react-query
-)
-for p in "${CATALOG_PKGS[@]}"; do
-  v="$(pnpm view "$p" version 2>/dev/null | tail -n1)"
-  [[ -n "$v" ]] || { echo "Sürüm çözülemedi: $p" >&2; exit 1; }
-  if [[ "$p" == typescript ]]; then spec="~$v"; else spec="^$v"; fi
-  CATALOG_YAML+="  \"$p\": \"$spec\""$'\n'
-done
-CATALOG_YAML+="  \"@types/node\": \"^$NODE_MAJOR\""$'\n'
+  echo "→ Resolving latest versions..."
+  CATALOG_PKGS=(
+    typescript @biomejs/biome turbo vitest tsx tsdown
+    zod hono @hono/node-server @hono/zod-validator
+    drizzle-orm drizzle-kit postgres pg-boss
+    react react-dom @types/react @types/react-dom vite @vitejs/plugin-react @tanstack/react-query
+  )
+  for p in "${CATALOG_PKGS[@]}"; do
+    v="$(pnpm view "$p" version 2>/dev/null | tail -n1)"
+    [[ -n "$v" ]] || { echo "Could not resolve version: $p" >&2; exit 1; }
+    if [[ "$p" == typescript ]]; then spec="~$v"; else spec="^$v"; fi
+    CATALOG_YAML+="  \"$p\": \"$spec\""$'\n'
+  done
+  CATALOG_YAML+="  \"@types/node\": \"^$NODE_MAJOR\""$'\n'
 fi
 
-mkdir -p apps/{api,web,worker}/src packages/{domain,contracts,db,core}/src \
-  scripts docs/adr/proposed .claude/hooks .githooks .github/workflows
-
-# --- Kök dosyalar -----------------------------------------------------------
+# --- Root files ---------------------------------------------------------------------
 emit pnpm-workspace.yaml <<EOF
 packages:
   - "apps/*"
   - "packages/*"
 
-# Tüm harici sürümler burada; package.json'larda yalnızca "catalog:" kullanılır.
+# All external versions live here; package.json files only use "catalog:".
 catalogMode: strict
 catalog:
 ${CATALOG_YAML}
-# Kurulum script'i çalıştırmasına izin verilen paketler
+# Packages allowed to run install scripts
 allowBuilds:
   esbuild: true
 EOF
@@ -251,49 +247,49 @@ volumes:
   pgdata: {}
 EOF
 
-# --- Mimari sözleşme ----------------------------------------------------------
+# --- Architecture contract -----------------------------------------------------------
 emit architecture.json <<'EOF'
 {
-  "$comment": "Tek doğruluk kaynağı. Yalnızca insanlar değiştirir (ajan hook'u + CODEOWNERS). Her değişiklik kabul edilmiş bir ADR gerektirir.",
+  "$comment": "Single source of truth. Humans only (agent hook + CODEOWNERS). Every change requires an accepted ADR.",
   "scope": "__SCOPE__",
   "test_allow": ["vitest"],
   "packages": {
     "packages/domain": {
-      "adr": "docs/adr/0001-paket-sinirlari.md",
-      "role": "Saf iş kuralları ve değer nesneleri (Money vb.). I/O yok.",
+      "adr": "docs/adr/0001-package-boundaries.md",
+      "role": "Pure business rules and value objects (Money etc.). No I/O.",
       "may_depend_on": [],
       "external_allow": []
     },
     "packages/contracts": {
-      "adr": "docs/adr/0001-paket-sinirlari.md",
-      "role": "API girdi/çıktı Zod şemaları. Doğrulama kuralları yalnızca burada.",
+      "adr": "docs/adr/0001-package-boundaries.md",
+      "role": "API input/output Zod schemas. Validation rules live only here.",
       "may_depend_on": [],
       "external_allow": ["zod"]
     },
     "packages/db": {
-      "adr": "docs/adr/0001-paket-sinirlari.md",
-      "role": "Drizzle şeması, migration'lar, DB istemcisi.",
+      "adr": "docs/adr/0001-package-boundaries.md",
+      "role": "Drizzle schema, migrations, DB client.",
       "may_depend_on": ["packages/domain"],
       "external_allow": ["drizzle-orm", "drizzle-kit", "postgres"]
     },
     "packages/core": {
-      "adr": "docs/adr/0001-paket-sinirlari.md",
-      "role": "Use-case'ler (actions/queries). HTTP/kuyruk bilmez.",
+      "adr": "docs/adr/0001-package-boundaries.md",
+      "role": "Use cases (actions/queries). Knows nothing about HTTP or queues.",
       "may_depend_on": ["packages/domain", "packages/contracts", "packages/db"]
     },
     "apps/api": {
-      "adr": "docs/adr/0001-paket-sinirlari.md",
-      "role": "Hono HTTP katmanı: doğrulama + core çağrısı. İş kuralı yazılmaz.",
+      "adr": "docs/adr/0001-package-boundaries.md",
+      "role": "Hono HTTP layer: validation + core calls. No business rules.",
       "may_depend_on": ["packages/core", "packages/contracts", "packages/domain", "packages/db"]
     },
     "apps/worker": {
-      "adr": "docs/adr/0003-is-kuyrugu-pg-boss.md",
-      "role": "pg-boss arka plan işleri: core çağrısı. İş kuralı yazılmaz.",
+      "adr": "docs/adr/0003-job-queue-pg-boss.md",
+      "role": "pg-boss background jobs: core calls only. No business rules.",
       "may_depend_on": ["packages/core", "packages/domain", "packages/db"]
     },
     "apps/web": {
-      "adr": "docs/adr/0001-paket-sinirlari.md",
-      "role": "React SPA. API'ye yalnızca hc<AppType> istemcisiyle erişir.",
+      "adr": "docs/adr/0001-package-boundaries.md",
+      "role": "React SPA. Talks to the API only through the hc<AppType> client.",
       "may_depend_on": ["packages/contracts", "packages/domain"],
       "type_only": ["apps/api"]
     }
@@ -302,49 +298,49 @@ emit architecture.json <<'EOF'
     {
       "name": "auth",
       "path": "packages/auth",
-      "trigger": "Gerçek kullanıcı girişi bir gereksinim olduğunda (tercih: better-auth).",
+      "trigger": "When real user sign-in becomes a requirement (preferred: better-auth).",
       "deps": ["better-auth", "lucia", "next-auth", "@auth/core", "passport", "jsonwebtoken", "jose"]
     },
     {
       "name": "i18n",
       "path": "packages/i18n",
-      "trigger": "İkinci bir arayüz dili istendiğinde.",
+      "trigger": "When a second UI language is requested.",
       "deps": ["i18next", "react-i18next", "@lingui/core", "@lingui/react", "react-intl", "@inlang/paraglide-js"]
     },
     {
       "name": "ui",
       "path": "packages/ui",
-      "trigger": "Aynı bileşenleri kullanan ikinci bir uygulama oluştuğunda.",
+      "trigger": "When a second app needs the same components.",
       "deps": []
     },
     {
       "name": "config",
       "path": "packages/config",
-      "trigger": "Aynı env şeması üçüncü bir uygulamada tekrarlandığında.",
+      "trigger": "When the same env schema is duplicated in a third app.",
       "deps": ["@t3-oss/env-core", "dotenv", "convict"]
     },
     {
       "name": "integrations",
       "path": "packages/integrations",
-      "trigger": "İlk üçüncü parti API entegrasyonu onaylandığında.",
+      "trigger": "When the first third-party API integration is approved.",
       "deps": []
     },
     {
       "name": "crawler",
       "path": "apps/crawler",
-      "trigger": "Resmi API ile karşılanamayan bir veri ihtiyacı (ToS) onaylandığında.",
+      "trigger": "When a data need that the official API cannot cover (ToS) is approved.",
       "deps": ["crawlee", "playwright", "puppeteer", "cheerio"]
     },
     {
       "name": "e2e",
       "path": "apps/e2e",
-      "trigger": "İlk kritik kullanıcı akışı tamamlandığında.",
+      "trigger": "When the first critical user flow is complete.",
       "deps": ["@playwright/test", "cypress"]
     },
     {
       "name": "redis-queue",
       "path": null,
-      "trigger": "pg-boss ölçülmüş bir throughput sınırına takıldığında.",
+      "trigger": "When pg-boss hits a measured throughput limit.",
       "deps": ["bullmq", "bull", "ioredis", "redis"]
     }
   ],
@@ -353,6 +349,7 @@ emit architecture.json <<'EOF'
     "docs/adr/",
     "scripts/arch-check.mjs",
     ".claude/settings.json",
+    ".claude/settings.local.json",
     ".claude/hooks/",
     ".githooks/",
     ".github/",
@@ -363,7 +360,7 @@ emit architecture.json <<'EOF'
   ],
   "agent_writable_exceptions": ["docs/adr/proposed/"],
   "claude_md_block": {
-    "$comment": "CLAUDE.md'deki scaffold bloğu korunur; bloğun dışı serbesttir. Bloğu bir insan değiştirirse sha256 da güncellenir.",
+    "$comment": "The scaffold block in CLAUDE.md is protected; everything outside it is free. If a human changes the block, update sha256 (pnpm arch --claude-hash).",
     "begin": "<!-- scaffold:begin",
     "end": "<!-- scaffold:end -->",
     "sha256": "__CLAUDE_SHA__"
@@ -371,122 +368,125 @@ emit architecture.json <<'EOF'
 }
 EOF
 
-# --- ADR'ler ------------------------------------------------------------------
+# --- ADRs ------------------------------------------------------------------------------
 emit docs/adr/TEMPLATE.md <<'EOF'
-# NNNN. Başlık
+# NNNN. Title
 
-- Durum: önerildi | kabul edildi | yerini aldı: NNNN
-- Tarih: YYYY-AA-GG
+- Status: proposed | accepted | superseded by NNNN
+- Date: YYYY-MM-DD
 
-## Bağlam
-## Karar
-## Sonuçlar
-## architecture.json değişikliği
+## Context
+## Decision
+## Consequences
+## architecture.json change
 ```json
 ```
 EOF
 
-emit docs/adr/0001-paket-sinirlari.md <<'EOF'
-# 0001. Paket sınırları
+emit docs/adr/0001-package-boundaries.md <<'EOF'
+# 0001. Package boundaries
 
-- Durum: kabul edildi
+- Status: accepted
 
-## Karar
-Monorepo yalnızca `architecture.json`'da listelenen paketlerden oluşur. Bağımlılık yönü:
+## Decision
+The monorepo consists only of the packages listed in `architecture.json`. Dependency direction:
 
 ```
-web ──(yalnızca import type)──▶ api ──▶ core ──▶ db ──▶ domain
- │                               │       └────▶ contracts
- └──▶ contracts, domain          └──▶ contracts
+web ──(import type only)──▶ api ──▶ core ──▶ db ──▶ domain
+ │                           │       └────▶ contracts
+ └──▶ contracts, domain      └──▶ contracts
 worker ──▶ core, db, domain
 ```
 
-- `domain` hiçbir pakete ve harici kütüphaneye bağımlı değildir.
-- `contracts` yalnızca `zod`'a bağımlıdır; doğrulama kuralları yalnızca burada yazılır.
-- `api`/`worker` iş kuralı içermez; `core` use-case'lerini çağırır. `db`'yi yalnızca bağlantıyı kurmak (composition root) için import eder.
-- `web` API'ye yalnızca `hc<AppType>` ile erişir; `db`/`core` import etmez.
-- Paketler arası göreli import (`../../packages/...`) yasaktır.
+- `domain` depends on no package and no external library.
+- `contracts` depends only on `zod`; validation rules are written only here.
+- `api`/`worker` contain no business rules; they call `core` use cases. They import `db` only to wire up the connection (composition root).
+- `web` reaches the API only through `hc<AppType>`; it never imports `db`/`core`.
+- Relative imports across packages (`../../packages/...`) are forbidden.
 
-## Zorlama
-`scripts/arch-check.mjs` (`pnpm arch`): klasör listesi, paket adları, package.json bağımlılıkları,
-kaynak import'ları, ertelenmiş bağımlılıklar, `@ts-ignore`/`@ts-nocheck`, boş placeholder dosyalar.
-Pre-commit hook, CI ve Claude Code Stop hook'u bu kontrolü çalıştırır.
+## Enforcement
+`scripts/arch-check.mjs` (`pnpm arch`): folder list, package names, package.json dependencies,
+source imports, deferred dependencies, `@ts-ignore`/`@ts-nocheck`, empty placeholder files and the
+CLAUDE.md scaffold block. Runs in the pre-commit hook, CI and the Claude Code Stop hook.
 EOF
 
-emit docs/adr/0002-ertelenmis-paketler.md <<'EOF'
-# 0002. İhtiyaç doğana kadar ertelenen paketler
+emit docs/adr/0002-deferred-packages.md <<'EOF'
+# 0002. Packages deferred until needed
 
-- Durum: kabul edildi
+- Status: accepted
 
-## Bağlam
-Boş paketler ve `.gitkeep` klasörleri ajanlara "burayı doldur" sinyali verir ve spekülatif kod üretir.
+## Context
+Empty packages and `.gitkeep` folders signal "fill me" to agents and produce speculative code.
 
-## Karar
-`architecture.json > deferred` listesindeki paketler ve bağımlılıklar, tetikleyici koşul gerçekleşip
-bir ADR kabul edilene kadar **oluşturulmaz/kurulmaz**. Boş placeholder dosya (`.gitkeep`) yasaktır.
+## Decision
+Packages and dependencies listed under `architecture.json > deferred` are **not created/installed**
+until their trigger condition is met and an ADR is accepted. Empty placeholder files (`.gitkeep`) are forbidden.
 
-## Süreç
-1. Ajan veya geliştirici ihtiyacı fark eder.
-2. `docs/adr/proposed/NNNN-baslik.md` altına `TEMPLATE.md`'ye göre taslak yazar (ajanların yazabildiği tek ADR yolu).
-3. Bir insan taslağı inceler; kabul ederse `docs/adr/` altına taşır ve `architecture.json`'u günceller.
-4. Ancak bundan sonra paket/bağımlılık eklenir.
+## Process
+1. An agent or developer notices the need.
+2. They write a draft under `docs/adr/proposed/NNNN-title.md` following `TEMPLATE.md` (the only ADR path agents may write).
+3. A human reviews the draft; if accepted, moves it to `docs/adr/` and updates `architecture.json`.
+4. Only then is the package/dependency added.
 EOF
 
-emit docs/adr/0003-is-kuyrugu-pg-boss.md <<'EOF'
-# 0003. Arka plan işleri için pg-boss
+emit docs/adr/0003-job-queue-pg-boss.md <<'EOF'
+# 0003. pg-boss for background jobs
 
-- Durum: kabul edildi
+- Status: accepted
 
-## Karar
-Kuyruk olarak Postgres üzerinde çalışan `pg-boss` kullanılır; ek altyapı (Redis) gerekmez ve iş
-kuyruğa alma, iş verisiyle aynı transaction içinde yapılabilir. Redis tabanlı kuyruklar
-(`bullmq` vb.) ölçülmüş bir throughput sınırına kadar ertelenmiştir (bkz. 0002).
+## Decision
+Use `pg-boss` on Postgres as the job queue: no extra infrastructure (Redis), and enqueueing can
+happen in the same transaction as the business write. Redis-based queues (`bullmq` etc.) are
+deferred until a measured throughput limit (see 0002).
 EOF
 
 emit docs/adr/proposed/README.md <<'EOF'
-Ajanların ve geliştiricilerin ADR **taslakları** buraya yazılır. Buradaki hiçbir dosya kabul edilmiş
-sayılmaz ve `architecture.json` tarafından referans verilemez.
+ADR **drafts** written by agents and developers go here. Nothing in this folder is accepted, and
+`architecture.json` may not reference it.
 EOF
 
-# --- Ajan talimatları ---------------------------------------------------------
+# --- Agent instructions (CLAUDE.md block) ----------------------------------------------------
 upsert_claude_md <<'EOF'
-# Proje kuralları
+# Project rules
 
-Bu blok `.claude/hooks/guard.mjs` ve `pnpm arch` tarafından korunur. Bloğun dışına serbestçe yazılabilir.
+This block is protected by `.claude/hooks/guard.mjs` and `pnpm arch`. Anything outside it may be edited freely.
 
-## Komutlar
-- `pnpm verify`: mimari, lint, typecheck ve testler. **Bir iş ancak bu komut geçince bitmiş sayılır.**
-- `pnpm dev`: tüm uygulamalar. `docker compose up -d` ile Postgres.
-- `pnpm arch`: yalnızca mimari kontrol.
-- `pnpm add <paket> --filter __SCOPE__/<hedef>`: bağımlılık ekleme. Sürüm otomatik olarak catalog'a yazılır.
+## Language
+Chat with the user in the user's language. Everything else — code, comments, docs, ADRs, commit messages, PR text, log and error messages — is written in English.
 
-## Kod nereye gider
-| İhtiyaç | Yer |
+## Commands
+- `pnpm verify`: architecture, lint, typecheck and tests. **Work is done only when this passes.**
+- `pnpm dev`: all apps. Postgres via `docker compose up -d`.
+- `pnpm arch`: architecture check only.
+- `pnpm add <pkg> --filter __SCOPE__/<target>`: add a dependency; the version is written to the catalog.
+
+## Where code goes
+| Need | Location |
 |---|---|
-| İş kuralı, hesaplama, değer nesnesi | `packages/domain` |
-| İstek/yanıt şeması, doğrulama | `packages/contracts` (Zod) |
-| Tablo, migration, sorgu yardımcısı | `packages/db` |
-| Use-case (domain + db orkestrasyonu) | `packages/core` |
-| HTTP endpoint | `apps/api/src/app.ts` (yalnızca doğrulama + core çağrısı) |
-| Arka plan işi | `apps/worker/src/jobs/` (yalnızca core çağrısı) |
-| Arayüz | `apps/web` (API'ye `src/lib/api.ts` üzerinden erişilir) |
+| Business rule, calculation, value object | `packages/domain` |
+| Request/response schema, validation | `packages/contracts` (Zod) |
+| Table, migration, query helper | `packages/db` |
+| Use case (domain + db orchestration) | `packages/core` |
+| HTTP endpoint | `apps/api/src/app.ts` (validation + core call only) |
+| Background job | `apps/worker/src/jobs/` (core call only) |
+| UI | `apps/web` (API access via `src/lib/api.ts`) |
 
-Bağımlılık yönü ve paket rolleri: `architecture.json` ve `docs/adr/0001-paket-sinirlari.md`.
+Dependency direction and package roles: `architecture.json` and `docs/adr/0001-package-boundaries.md`.
 
-## Kesin kurallar
-1. **Yeni paket veya klasör açılmaz.** `apps/` ve `packages/` altında yalnızca `architecture.json`'daki paketler bulunur.
-2. **Ertelenmiş işler yapılmaz.** `architecture.json > deferred` listesindeki paketler (auth, i18n, ui, config, integrations, crawler, e2e) ve bağımlılıklar tetikleyici koşul gerçekleşmeden eklenmez. Gerekli olduğunu düşünüyorsan **dur**, `docs/adr/proposed/` altına `docs/adr/TEMPLATE.md`'ye göre bir taslak yaz ve kullanıcıya sor.
-3. **Korunan dosyalar değiştirilmez:** `architecture.json > protected_paths` ve bu blok. Yalnızca insanlar değiştirir.
-4. Kural susturulmaz: `@ts-ignore`, `@ts-nocheck`, `--no-verify` yasak. `biome-ignore` kullanılacaksa gerekçesi yazılır.
-5. Para her zaman `domain`'deki `Money` tipiyle (`bigint` + para birimi) tutulur; `number` kullanılmaz.
-6. Göreli importlarda `.ts` uzantısı yazılır (`./foo.ts`).
-7. Boş placeholder dosya/klasör (`.gitkeep`, `export {}`) oluşturulmaz. Kod, ihtiyaç olduğunda yazılır.
+## Hard rules
+1. **No new packages or folders.** Only the packages in `architecture.json` may exist under `apps/` and `packages/`.
+2. **Deferred work stays deferred.** Packages and dependencies under `architecture.json > deferred` are not added before their trigger. If you think one is needed, **stop**, write a draft under `docs/adr/proposed/` following `docs/adr/TEMPLATE.md`, and ask the user.
+3. **Protected files are not changed:** `architecture.json > protected_paths` and this block. Humans only.
+4. Never silence checks: `@ts-ignore`, `@ts-nocheck`, `--no-verify` are forbidden. Every `biome-ignore` needs a reason.
+5. Money is always the `Money` type from `domain` (`bigint` + currency); never `number`.
+6. Relative imports include the `.ts` extension (`./foo.ts`).
+7. No empty placeholder files/folders (`.gitkeep`, `export {}`). Write code when it is needed.
 EOF
 
-# --- Mimari kontrol script'i ---------------------------------------------------
+# --- Architecture check script -----------------------------------------------------------
 emit scripts/arch-check.mjs <<'EOF'
 #!/usr/bin/env node
-// architecture.json'daki sözleşmeyi zorlar. Bağımlılıksız; TS derleyici API'sine ihtiyaç duymaz.
+// Enforces the contract in architecture.json. Dependency-free; does not need the TS compiler API.
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -494,7 +494,7 @@ import path from "node:path";
 const root = path.resolve(import.meta.dirname, "..");
 const arch = JSON.parse(readFileSync(path.join(root, "architecture.json"), "utf8"));
 
-/** CLAUDE.md'deki scaffold bloğunun (işaretler dahil) sha256'sı; blok yoksa null. */
+/** sha256 of the CLAUDE.md scaffold block (markers included); null if missing. */
 function claudeBlockHash() {
   const cb = arch.claude_md_block;
   const p = path.join(root, "CLAUDE.md");
@@ -505,9 +505,9 @@ function claudeBlockHash() {
   if (e < 0) return null;
   return createHash("sha256").update(text.slice(b, e + cb.end.length)).digest("hex");
 }
-// İnsan bloğu bilerek değiştirdiyse: `pnpm arch --claude-hash` → architecture.json'a yazın.
+// A human intentionally changed the block: `pnpm arch --claude-hash` → write it into architecture.json.
 if (process.argv.includes("--claude-hash")) {
-  console.log(claudeBlockHash() ?? "CLAUDE.md scaffold bloğu bulunamadı");
+  console.log(claudeBlockHash() ?? "CLAUDE.md scaffold block not found");
   process.exit(0);
 }
 
@@ -522,7 +522,7 @@ const nameToDir = new Map(Object.keys(packages).map((d) => [`${scope}/${path.bas
 const deferredByPath = new Map(deferred.filter((d) => d.path).map((d) => [d.path, d]));
 const forbiddenDeps = new Map(deferred.flatMap((d) => (d.deps ?? []).map((dep) => [dep, d])));
 const hint = (d) =>
-  `ertelenmiş "${d.name}" kapsamında. Tetikleyici: ${d.trigger} Gerekliyse docs/adr/proposed/ altına ADR taslağı yazıp insan onayı isteyin.`;
+  `deferred "${d.name}". Trigger: ${d.trigger} If needed, write an ADR draft under docs/adr/proposed/ and ask a human.`;
 const pkgNameOf = (spec) => (spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]);
 
 function* walk(dir) {
@@ -531,14 +531,13 @@ function* walk(dir) {
     if (e.name === "node_modules" || e.name === "dist" || e.name === ".turbo") continue;
     const p = path.join(dir, e.name);
     if (e.isDirectory()) {
-      const inner = readdirSync(p);
-      if (inner.length === 0) err(`${rel(p)}: boş klasör (placeholder yasak)`);
+      if (readdirSync(p).length === 0) err(`${rel(p)}: empty folder (placeholders are forbidden)`);
       yield* walk(p);
     } else yield p;
   }
 }
 
-// 1) apps/ ve packages/ altında yalnızca tanımlı paketler
+// 1) Only declared packages under apps/ and packages/
 for (const group of ["apps", "packages"]) {
   const g = path.join(root, group);
   if (!existsSync(g)) continue;
@@ -546,11 +545,11 @@ for (const group of ["apps", "packages"]) {
     const dir = `${group}/${e.name}`;
     if (packages[dir]) continue;
     const d = deferredByPath.get(dir);
-    err(`${dir}: architecture.json'da tanımlı değil — ${d ? hint(d) : "yeni paket yalnızca kabul edilmiş bir ADR ile eklenebilir."}`);
+    err(`${dir}: not declared in architecture.json — ${d ? hint(d) : "new packages require an accepted ADR."}`);
   }
 }
 
-// 2) Ertelenmiş bağımlılıklar hiçbir yerde olmamalı (kök + catalog dahil)
+// 2) Deferred dependencies must not appear anywhere (root + catalog included)
 const depsOf = (pj) => ({ ...pj.dependencies, ...pj.devDependencies, ...pj.peerDependencies, ...pj.optionalDependencies });
 const rootPj = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
 for (const dep of Object.keys(depsOf(rootPj))) {
@@ -563,7 +562,7 @@ for (const [dep, d] of forbiddenDeps) {
   if (re.test(ws)) err(`pnpm-workspace.yaml catalog → ${dep}: ${hint(d)}`);
 }
 
-// 3) Paket başına kontroller
+// 3) Per-package checks
 const IMPORT_RE =
   /(?:^|[\s;])(import|export)\s+(type\s+)?(?:[\w*{}\s,$]+?\s+from\s+)?["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)/g;
 
@@ -571,15 +570,15 @@ for (const [dir, spec] of Object.entries(packages)) {
   const abs = path.join(root, dir);
   const pjPath = path.join(abs, "package.json");
   if (!existsSync(pjPath)) {
-    err(`${dir}: package.json yok`);
+    err(`${dir}: package.json missing`);
     continue;
   }
   if (!spec.adr || spec.adr.includes("/proposed/") || !existsSync(path.join(root, spec.adr)))
-    err(`${dir}: kabul edilmiş ADR referansı eksik veya geçersiz (${spec.adr ?? "-"})`);
+    err(`${dir}: missing or invalid accepted ADR reference (${spec.adr ?? "-"})`);
 
   const pj = JSON.parse(readFileSync(pjPath, "utf8"));
   const expected = `${scope}/${path.basename(dir)}`;
-  if (pj.name !== expected) err(`${dir}: paket adı "${expected}" olmalı (bulunan: ${pj.name})`);
+  if (pj.name !== expected) err(`${dir}: package name must be "${expected}" (found: ${pj.name})`);
 
   const mayDepend = new Set(spec.may_depend_on ?? []);
   const typeOnly = new Set(spec.type_only ?? []);
@@ -589,20 +588,20 @@ for (const [dir, spec] of Object.entries(packages)) {
     const target = nameToDir.get(dep);
     if (target) {
       if (!mayDepend.has(target) && !typeOnly.has(target))
-        err(`${dir} → ${dep}: bu bağımlılığa izin yok (izinli: ${[...mayDepend, ...typeOnly].join(", ") || "hiçbiri"})`);
-    } else if (dep.startsWith(`${scope}/`)) err(`${dir} → ${dep}: bilinmeyen workspace paketi`);
+        err(`${dir} → ${dep}: dependency not allowed (allowed: ${[...mayDepend, ...typeOnly].join(", ") || "none"})`);
+    } else if (dep.startsWith(`${scope}/`)) err(`${dir} → ${dep}: unknown workspace package`);
     else if (forbiddenDeps.has(dep)) err(`${dir} → ${dep}: ${hint(forbiddenDeps.get(dep))}`);
     else if (extAllow && !extAllow.has(dep) && !testAllow.has(dep))
-      err(`${dir} → ${dep}: harici bağımlılık izinli listede değil (${[...extAllow].join(", ") || "hiçbiri"})`);
+      err(`${dir} → ${dep}: external dependency not in allow list (${[...extAllow].join(", ") || "none"})`);
   }
 
   for (const file of walk(abs)) {
     const r = rel(file);
-    if (path.basename(file) === ".gitkeep") err(`${r}: placeholder dosya yasak`);
+    if (path.basename(file) === ".gitkeep") err(`${r}: placeholder files are forbidden`);
     if (!/\.(ts|tsx|mts|cts|js|mjs|jsx)$/.test(file)) continue;
     const src = readFileSync(file, "utf8");
-    if (/@ts-(ignore|nocheck)/.test(src)) err(`${r}: @ts-ignore / @ts-nocheck yasak`);
-    if (/^\s*export\s*\{\s*\}\s*;?\s*$/.test(src)) err(`${r}: boş modül (export {}) — placeholder yasak`);
+    if (/@ts-(ignore|nocheck)/.test(src)) err(`${r}: @ts-ignore / @ts-nocheck are forbidden`);
+    if (/^\s*export\s*\{\s*\}\s*;?\s*$/.test(src)) err(`${r}: empty module (export {}) — placeholders are forbidden`);
     const isTest = /\.(test|spec)\.[cm]?[jt]sx?$/.test(file);
 
     for (const m of src.matchAll(IMPORT_RE)) {
@@ -611,16 +610,16 @@ for (const [dir, spec] of Object.entries(packages)) {
       if (!s) continue;
       if (s.startsWith(".")) {
         const resolved = path.resolve(path.dirname(file), s);
-        if (!resolved.startsWith(abs + path.sep)) err(`${r}: paket dışına göreli import yasak ("${s}")`);
+        if (!resolved.startsWith(abs + path.sep)) err(`${r}: relative import outside the package ("${s}")`);
         continue;
       }
       const name = pkgNameOf(s);
       if (name.startsWith(`${scope}/`)) {
         const target = nameToDir.get(name);
-        if (!target) err(`${r}: bilinmeyen workspace paketi "${name}"`);
-        else if (target === dir) err(`${r}: paket kendi adıyla import edilmemeli ("${s}")`);
-        else if (typeOnly.has(target) && !isType) err(`${r}: "${name}" yalnızca \`import type\` ile import edilebilir`);
-        else if (!mayDepend.has(target) && !typeOnly.has(target)) err(`${r}: "${name}" import'una izin yok`);
+        if (!target) err(`${r}: unknown workspace package "${name}"`);
+        else if (target === dir) err(`${r}: a package must not import itself by name ("${s}")`);
+        else if (typeOnly.has(target) && !isType) err(`${r}: "${name}" may only be imported with \`import type\``);
+        else if (!mayDepend.has(target) && !typeOnly.has(target)) err(`${r}: import of "${name}" is not allowed`);
         continue;
       }
       if (forbiddenDeps.has(name)) {
@@ -629,29 +628,29 @@ for (const [dir, spec] of Object.entries(packages)) {
       }
       if (extAllow && !(isTest && testAllow.has(name))) {
         const ok = s.startsWith("node:") ? extAllow.has("node:*") : extAllow.has(name);
-        if (!ok) err(`${r}: "${s}" import'una izin yok (${dir} izinli harici: ${[...extAllow].join(", ") || "hiçbiri"})`);
+        if (!ok) err(`${r}: import of "${s}" is not allowed (${dir} external allow list: ${[...extAllow].join(", ") || "none"})`);
       }
     }
   }
 }
 
-// 4) CLAUDE.md scaffold bloğu yerinde ve değiştirilmemiş olmalı (bloğun dışı serbest)
+// 4) The CLAUDE.md scaffold block must exist and be unchanged (outside the block is free)
 if (arch.claude_md_block) {
   const h = claudeBlockHash();
-  if (!h) err("CLAUDE.md: scaffold bloğu eksik");
+  if (!h) err("CLAUDE.md: scaffold block missing");
   else if (h !== arch.claude_md_block.sha256)
-    err("CLAUDE.md: scaffold bloğu değiştirilmiş. Yalnızca insanlar değiştirir; bilerek değiştirdiyseniz `pnpm arch --claude-hash` çıktısını architecture.json > claude_md_block.sha256'ya yazın.");
+    err("CLAUDE.md: scaffold block was modified. Humans only; if intentional, write the output of `pnpm arch --claude-hash` into architecture.json > claude_md_block.sha256.");
 }
 
 if (errors.length) {
-  console.error(`✗ Mimari kontrol başarısız (${errors.length}):\n${errors.map((e) => `  - ${e}`).join("\n")}`);
-  console.error("\nKurallar: CLAUDE.md, architecture.json, docs/adr/");
+  console.error(`✗ Architecture check failed (${errors.length}):\n${errors.map((e) => `  - ${e}`).join("\n")}`);
+  console.error("\nRules: CLAUDE.md, architecture.json, docs/adr/");
   process.exit(1);
 }
-console.log(`✓ Mimari kontrol geçti (${Object.keys(packages).length} paket)`);
+console.log(`✓ Architecture check passed (${Object.keys(packages).length} packages)`);
 EOF
 
-# --- Claude Code hook'ları -------------------------------------------------------
+# --- Claude Code hooks -------------------------------------------------------------------
 emit .claude/settings.json <<'EOF'
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
@@ -673,8 +672,8 @@ EOF
 
 emit .claude/hooks/guard.mjs <<'EOF'
 #!/usr/bin/env node
-// PreToolUse: korunan dosyalara yazma, tanımsız paket açma, ertelenmiş bağımlılık kurma ve
-// hook atlama girişimlerini engeller (exit 2 → işlem iptal, mesaj ajana iletilir).
+// PreToolUse: blocks writes to protected files, undeclared packages, deferred dependencies and
+// hook bypass attempts (exit 2 → the tool call is cancelled and the message goes to the agent).
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -687,11 +686,11 @@ const protectedPaths = arch.protected_paths ?? [];
 const exceptions = arch.agent_writable_exceptions ?? [];
 
 const block = (msg) => {
-  process.stderr.write(`⛔ ${msg}\nKurallar: CLAUDE.md ve architecture.json.\n`);
+  process.stderr.write(`⛔ ${msg}\nRules: CLAUDE.md and architecture.json.\n`);
   process.exit(2);
 };
 const hint = (d) =>
-  `Bu, ertelenmiş "${d.name}" kapsamında (tetikleyici: ${d.trigger}). Gerekli olduğunu düşünüyorsan dur, docs/adr/proposed/ altına bir ADR taslağı yaz ve kullanıcıya sor.`;
+  `This is deferred "${d.name}" (trigger: ${d.trigger}). If you think it is needed, stop, write an ADR draft under docs/adr/proposed/ and ask the user.`;
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 const isProtected = (r) =>
   !exceptions.some((e) => r.startsWith(e)) &&
@@ -700,19 +699,19 @@ const isProtected = (r) =>
 function checkPath(r) {
   if (r.startsWith("..") || path.isAbsolute(r)) return;
   if (isProtected(r))
-    block(`${r} korunan bir dosya; yalnızca insanlar değiştirebilir. Değişiklik gerekiyorsa docs/adr/proposed/ altına ADR taslağı yaz ve kullanıcıya sor.`);
+    block(`${r} is protected; only humans may change it. If a change is needed, write an ADR draft under docs/adr/proposed/ and ask the user.`);
   const m = r.match(/^(apps|packages)\/([^/]+)/);
   if (m && !allowed.has(`${m[1]}/${m[2]}`)) {
     const dir = `${m[1]}/${m[2]}`;
     const d = deferred.find((x) => x.path === dir);
-    block(`${dir} architecture.json'da tanımlı bir paket değil. ${d ? hint(d) : "Yeni paket açmak kabul edilmiş bir ADR gerektirir."}`);
+    block(`${dir} is not a package declared in architecture.json. ${d ? hint(d) : "Adding a package requires an accepted ADR."}`);
   }
 }
 
 const tool = input.tool_name;
 const ti = input.tool_input ?? {};
 
-/** CLAUDE.md: scaffold bloğuna dokunan düzenlemeleri engeller, bloğun dışı serbesttir. */
+/** CLAUDE.md: blocks edits touching the scaffold block; outside the block is free. */
 function checkClaudeMd() {
   const cb = arch.claude_md_block;
   const p = path.join(root, "CLAUDE.md");
@@ -722,7 +721,7 @@ function checkClaudeMd() {
   const e = b < 0 ? -1 : text.indexOf(cb.end, b);
   if (e < 0) return;
   const end = e + cb.end.length;
-  const msg = "CLAUDE.md'deki scaffold bloğu korunuyor; yalnızca bloğun dışını düzenleyebilirsin.";
+  const msg = "The scaffold block in CLAUDE.md is protected; edit only outside the block.";
   if (tool === "Write") {
     if (!String(ti.content ?? "").includes(text.slice(b, end))) block(msg);
     return;
@@ -747,32 +746,41 @@ if (["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(tool)) {
 
 if (tool === "Bash") {
   const cmd = String(ti.command ?? "");
+  // Path-like tokens resolved against the project root; paths outside the project are ignored.
+  const home = process.env.HOME ?? "~";
+  const relTokens = [...cmd.matchAll(/[^\s"'<>|;&()]+/g)]
+    .map((m) => m[0].replace(/^~(?=\/)/, home))
+    .map((t) => path.relative(root, path.resolve(root, t)).split(path.sep).join("/"))
+    .filter((r) => r && !r.startsWith("..") && !path.isAbsolute(r));
+  const touchesProtected = relTokens.some(
+    (r) => isProtected(r) || protectedPaths.some((p) => p.endsWith("/") && r === p.slice(0, -1)),
+  );
+
   if (
-    /CLAUDE\.md/.test(cmd) &&
+    relTokens.includes("CLAUDE.md") &&
     (/\b(sed\s+-i|perl\s+-p?i|rm|mv|cp|truncate)\b/.test(cmd) ||
       /(^|[^>])>\s*["']?\S*CLAUDE\.md/.test(cmd) ||
       /\btee\s+(?!-a)\S*CLAUDE\.md/.test(cmd))
   )
-    block("CLAUDE.md Bash ile değiştirilemez; Edit aracıyla yalnızca scaffold bloğunun dışını düzenle.");
+    block("CLAUDE.md must not be modified via Bash; use the Edit tool, outside the scaffold block only.");
   if (/--no-verify\b/.test(cmd) || /\bgit\s+commit\b[^|;&]*\s-n\b/.test(cmd))
-    block("Git hook'larını atlamak yasak (--no-verify).");
-  if (/core\.hooksPath/.test(cmd) && !/\.githooks/.test(cmd)) block("Git hook yolunu değiştirmek yasak.");
+    block("Skipping git hooks is forbidden (--no-verify).");
+  if (/core\.hooksPath/.test(cmd) && !/\.githooks/.test(cmd)) block("Changing the git hooks path is forbidden.");
+  if (/\bgit\s+(clean|checkout\s+--|restore|rm)\b/.test(cmd) && touchesProtected)
+    block("Command touches a protected path via git; only humans may change it.");
 
   if (/\b(pnpm|npm|yarn|bun)\s+(add|install|i|update|up)\b/.test(cmd)) {
     for (const d of deferred)
       for (const dep of d.deps ?? [])
         if (new RegExp(`(^|[\\s"'])${esc(dep)}(@[^\\s"']*)?(?=$|[\\s"'])`).test(cmd))
-          block(`"${dep}" kurulamaz. ${hint(d)}`);
+          block(`"${dep}" cannot be installed. ${hint(d)}`);
   }
 
-  const writes = /\b(mkdir|touch|cp|mv|rm|tee|truncate|ln|install)\b|\bsed\s+-i|\bperl\s+-p?i|>/.test(cmd);
+  const redirects = cmd.replace(/\d*>&\d/g, "").replace(/\d*>\s*\/dev\/null/g, "");
+  const writes = /\b(mkdir|touch|cp|mv|rm|tee|truncate|ln|install)\b|\bsed\s+-i|\bperl\s+-p?i|>/.test(redirects);
   if (writes) {
-    for (const p of protectedPaths) {
-      const needle = p.replace(/\/$/, "");
-      if (new RegExp(`(^|[\\s"'=/])${esc(needle)}($|[\\s"'/])`).test(cmd) && !exceptions.some((e) => cmd.includes(e)))
-        block(`Komut korunan bir yola dokunuyor (${p}); yalnızca insanlar değiştirebilir.`);
-    }
-    for (const m of cmd.matchAll(/(?:^|[\s"'=/])((?:apps|packages)\/[A-Za-z0-9._-]+)/g)) checkPath(m[1]);
+    if (touchesProtected) block("Command touches a protected path; only humans may change it.");
+    for (const r of relTokens) if (/^(apps|packages)\/[^/]+/.test(r)) checkPath(r);
   }
 }
 
@@ -781,30 +789,30 @@ EOF
 
 emit .claude/hooks/stop-check.mjs <<'EOF'
 #!/usr/bin/env node
-// Stop: ajan işi bitirmeden önce mimari + lint kontrolleri geçmeli (exit 2 → ajan devam eder).
+// Stop: architecture + lint checks must pass before the agent finishes (exit 2 → agent continues).
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 const input = JSON.parse(readFileSync(0, "utf8") || "{}");
-if (input.stop_hook_active) process.exit(0); // sonsuz döngüyü önle
+if (input.stop_hook_active) process.exit(0); // avoid infinite loops
 const root = process.env.CLAUDE_PROJECT_DIR || input.cwd || process.cwd();
 const run = (cmd, args) => spawnSync(cmd, args, { cwd: root, encoding: "utf8" });
 
-const checks = [["mimari", run(process.execPath, ["scripts/arch-check.mjs"])]];
+const checks = [["architecture", run(process.execPath, ["scripts/arch-check.mjs"])]];
 const biome = path.join(root, "node_modules", ".bin", "biome");
 if (existsSync(biome)) checks.push(["lint", run(biome, ["check", "."])]);
 
 const failed = checks.filter(([, r]) => r.status !== 0);
 if (failed.length) {
   const out = failed.map(([n, r]) => `## ${n}\n${r.stdout ?? ""}${r.stderr ?? ""}`).join("\n");
-  process.stderr.write(`Bitirmeden önce şu kontrolleri düzelt (pnpm verify):\n${out.slice(-6000)}`);
+  process.stderr.write(`Fix these checks before finishing (pnpm verify):\n${out.slice(-6000)}`);
   process.exit(2);
 }
 process.exit(0);
 EOF
 
-# --- Git hook + CI ----------------------------------------------------------------
+# --- Git hook + CI -----------------------------------------------------------------------
 emit .githooks/pre-commit <<'EOF'
 #!/bin/sh
 set -e
@@ -836,8 +844,8 @@ jobs:
 EOF
 
 emit .github/CODEOWNERS <<'EOF'
-# Mimari sözleşme dosyaları insan onayı gerektirir. Aşağıdaki satırlarda
-# OWNER yerine GitHub kullanıcı/ekip adını yazıp yorum işaretini kaldırın.
+# Architecture contract files require human review. Replace OWNER with a GitHub user/team
+# and uncomment the lines below.
 # /architecture.json        OWNER
 # /CLAUDE.md                OWNER
 # /docs/adr/                OWNER
@@ -846,7 +854,7 @@ emit .github/CODEOWNERS <<'EOF'
 # /.github/                 OWNER
 EOF
 
-# --- Paket yardımcıları --------------------------------------------------------------
+# --- Package helper ------------------------------------------------------------------------
 lib_pkg() { # $1=dir  $2=deps-json  $3=devdeps-json  $4=extra-scripts-json
   local name deps devdeps scripts
   name="$(basename "$1")"
@@ -874,14 +882,13 @@ EOF
 EOF
 }
 
-# --- packages/domain ---------------------------------------------------------------
+# --- packages/domain ---------------------------------------------------------------------
 lib_pkg packages/domain
-mkdir -p packages/domain/src/money
 emit packages/domain/src/index.ts <<'EOF'
 export * from "./money/money.ts";
 EOF
 emit packages/domain/src/money/money.ts <<'EOF'
-/** Para: en küçük birimde (kuruş/cent) bigint + ISO 4217 para birimi. Asla number kullanılmaz. */
+/** Money: amount in minor units (cents) as bigint + ISO 4217 currency. Never use number. */
 export interface Money {
   readonly amount: bigint;
   readonly currency: string;
@@ -893,7 +900,7 @@ export class CurrencyMismatchError extends Error {
 
 const digitsCache = new Map<string, number>();
 
-/** Para biriminin ondalık basamak sayısı (TRY/USD: 2, JPY: 0, KWD: 3). */
+/** Number of minor-unit digits for a currency (USD: 2, JPY: 0, KWD: 3). */
 export function minorDigits(currency: string): number {
   let digits = digitsCache.get(currency);
   if (digits === undefined) {
@@ -907,18 +914,18 @@ export function minorDigits(currency: string): number {
 
 export function money(amount: bigint, currency: string): Money {
   const code = currency.toUpperCase();
-  minorDigits(code); // geçersiz para biriminde RangeError fırlatır
+  minorDigits(code); // throws RangeError for an invalid currency
   return { amount, currency: code };
 }
 
 export function add(a: Money, b: Money): Money {
   if (a.currency !== b.currency) {
-    throw new CurrencyMismatchError(`${a.currency} ile ${b.currency} toplanamaz`);
+    throw new CurrencyMismatchError(`Cannot add ${a.currency} and ${b.currency}`);
   }
   return money(a.amount + b.amount, a.currency);
 }
 
-/** Kayıpsız ondalık gösterim: 12345n TRY → "123.45" */
+/** Lossless decimal representation: 12345n USD → "123.45" */
 export function toDecimalString(m: Money): string {
   const digits = minorDigits(m.currency);
   const negative = m.amount < 0n;
@@ -939,32 +946,32 @@ import { describe, expect, it } from "vitest";
 import { add, CurrencyMismatchError, format, money, toDecimalString } from "./money.ts";
 
 describe("money", () => {
-  it("aynı para biriminde toplar", () => {
-    expect(add(money(10n, "TRY"), money(20n, "try"))).toEqual(money(30n, "TRY"));
+  it("adds amounts in the same currency", () => {
+    expect(add(money(10n, "USD"), money(20n, "usd"))).toEqual(money(30n, "USD"));
   });
 
-  it("farklı para birimlerini toplamaz", () => {
-    expect(() => add(money(1n, "USD"), money(1n, "TRY"))).toThrow(CurrencyMismatchError);
+  it("refuses to add different currencies", () => {
+    expect(() => add(money(1n, "USD"), money(1n, "EUR"))).toThrow(CurrencyMismatchError);
   });
 
-  it("para biriminin basamak sayısına uyar", () => {
-    expect(toDecimalString(money(12345n, "TRY"))).toBe("123.45");
+  it("respects the currency's minor digits", () => {
+    expect(toDecimalString(money(12345n, "USD"))).toBe("123.45");
     expect(toDecimalString(money(12345n, "JPY"))).toBe("12345");
     expect(toDecimalString(money(12345n, "KWD"))).toBe("12.345");
     expect(toDecimalString(money(-5n, "USD"))).toBe("-0.05");
   });
 
-  it("2^53 üstünde hassasiyet kaybetmez", () => {
+  it("does not lose precision above 2^53", () => {
     expect(toDecimalString(money(9007199254740993n, "USD"))).toBe("90071992547409.93");
   });
 
-  it("yerel biçimde gösterir", () => {
+  it("formats for a locale", () => {
     expect(format(money(123456n, "USD"), "en-US")).toBe("$1,234.56");
   });
 });
 EOF
 
-# --- packages/contracts ------------------------------------------------------------
+# --- packages/contracts ------------------------------------------------------------------
 lib_pkg packages/contracts '{ "zod": "catalog:" }'
 emit packages/contracts/src/index.ts <<'EOF'
 import { z } from "zod";
@@ -976,10 +983,10 @@ export const HealthResponse = z.object({
 export type HealthResponse = z.infer<typeof HealthResponse>;
 
 export const FormatPriceRequest = z.object({
-  /** En küçük birimde tamsayı, string olarak (JSON'da bigint taşınamaz). */
-  amount: z.string().regex(/^-?\d+$/, "tamsayı olmalı"),
+  /** Integer amount in minor units, as a string (JSON cannot carry bigint). */
+  amount: z.string().regex(/^-?\d+$/, "must be an integer"),
   currency: z.string().length(3),
-  locale: z.string().min(2).default("tr-TR"),
+  locale: z.string().min(2).default("en-US"),
 });
 export type FormatPriceRequest = z.infer<typeof FormatPriceRequest>;
 
@@ -987,17 +994,16 @@ export const FormatPriceResponse = z.object({ formatted: z.string() });
 export type FormatPriceResponse = z.infer<typeof FormatPriceResponse>;
 EOF
 
-# --- packages/db -------------------------------------------------------------------
+# --- packages/db -------------------------------------------------------------------------
 lib_pkg packages/db \
   '{ "drizzle-orm": "catalog:", "postgres": "catalog:" }' \
   '{ "drizzle-kit": "catalog:" }' \
   '"generate": "drizzle-kit generate", "migrate": "drizzle-kit migrate"'
-mkdir -p packages/db/src/schema
 emit packages/db/drizzle.config.ts <<'EOF'
 import { defineConfig } from "drizzle-kit";
 
 const url = process.env.DATABASE_URL;
-if (!url) throw new Error("DATABASE_URL tanımlı değil");
+if (!url) throw new Error("DATABASE_URL is not set");
 
 export default defineConfig({
   dialect: "postgresql",
@@ -1007,8 +1013,8 @@ export default defineConfig({
 });
 EOF
 emit packages/db/src/schema/index.ts <<'EOF'
-// Tablolar bu klasörde, tablo başına bir dosya olarak tanımlanır ve buradan export edilir.
-// Örnek: export * from "./products.ts";
+// Tables live in this folder, one file per table, re-exported here.
+// Example: export * from "./products.ts";
 export const schemaVersion = 1;
 EOF
 emit packages/db/src/index.ts <<'EOF'
@@ -1031,14 +1037,13 @@ export async function ping(db: Db): Promise<void> {
 export { schema };
 EOF
 
-# --- packages/core -----------------------------------------------------------------
+# --- packages/core -----------------------------------------------------------------------
 lib_pkg packages/core \
   '{ "__SCOPE__/contracts": "workspace:*", "__SCOPE__/db": "workspace:*", "__SCOPE__/domain": "workspace:*" }'
 emit packages/core/src/index.ts <<'EOF'
-export { checkHealth } from "./queries/health.ts";
 export { formatPrice } from "./queries/format-price.ts";
+export { checkHealth } from "./queries/health.ts";
 EOF
-mkdir -p packages/core/src/queries
 emit packages/core/src/queries/health.ts <<'EOF'
 import type { HealthResponse } from "__SCOPE__/contracts";
 import { type Db, ping } from "__SCOPE__/db";
@@ -1061,7 +1066,7 @@ export function formatPrice(input: FormatPriceRequest): FormatPriceResponse {
 }
 EOF
 
-# --- apps/api ----------------------------------------------------------------------
+# --- Node app helper ---------------------------------------------------------------------
 node_app_files() { # $1=dir  $2=deps-json  $3=entry
   local name; name="$(basename "$1")"
   emit "$1/package.json" <<EOF
@@ -1090,7 +1095,7 @@ EOF
   emit "$1/tsdown.config.ts" <<EOF
 import { defineConfig } from "tsdown";
 
-// Workspace paketleri kaynak olarak tüketildiği için çıktıya gömülür.
+// Workspace packages are consumed as source, so they are bundled into the output.
 export default defineConfig({
   entry: ["src/$3.ts"],
   platform: "node",
@@ -1113,6 +1118,7 @@ export const loadEnv = (source: NodeJS.ProcessEnv = process.env): Env => Env.par
 EOF
 }
 
+# --- apps/api ----------------------------------------------------------------------------
 node_app_files apps/api '{
     "__SCOPE__/contracts": "workspace:*",
     "__SCOPE__/core": "workspace:*",
@@ -1124,7 +1130,7 @@ node_app_files apps/api '{
   }' server
 
 emit apps/api/src/index.ts <<'EOF'
-// Web yalnızca bu tipi `import type` ile kullanır (hc<AppType>).
+// The web app uses this type only via `import type` (hc<AppType>).
 export type { AppType } from "./app.ts";
 EOF
 emit apps/api/src/app.ts <<'EOF'
@@ -1138,7 +1144,7 @@ export interface AppDeps {
   db: Db;
 }
 
-/** HTTP katmanı: yalnızca doğrulama + core çağrısı. İş kuralı burada yazılmaz. */
+/** HTTP layer: validation + core calls only. No business rules here. */
 export function createApp({ db }: AppDeps) {
   return new Hono()
     .basePath("/api")
@@ -1177,18 +1183,18 @@ import { describe, expect, it } from "vitest";
 import { createApp } from "./app.ts";
 
 const downDb = {
-  execute: () => Promise.reject(new Error("bağlantı yok")),
+  execute: () => Promise.reject(new Error("no connection")),
 } as unknown as Db;
 
 describe("api", () => {
   const app = createApp({ db: downDb });
 
-  it("DB erişilemezse degraded döner", async () => {
+  it("reports degraded when the DB is unreachable", async () => {
     const res = await app.request("/api/health");
     expect(await res.json()).toEqual({ status: "degraded", db: "down" });
   });
 
-  it("fiyatı biçimlendirir", async () => {
+  it("formats a price", async () => {
     const res = await app.request("/api/format-price", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1198,7 +1204,7 @@ describe("api", () => {
     expect(await res.json()).toEqual({ formatted: "$1,234.56" });
   });
 
-  it("geçersiz girdiyi contracts şemasıyla reddeder", async () => {
+  it("rejects invalid input via the contracts schema", async () => {
     const res = await app.request("/api/format-price", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1209,21 +1215,20 @@ describe("api", () => {
 });
 EOF
 
-# --- apps/worker -------------------------------------------------------------------
+# --- apps/worker -------------------------------------------------------------------------
 node_app_files apps/worker '{
     "__SCOPE__/core": "workspace:*",
     "__SCOPE__/db": "workspace:*",
     "pg-boss": "catalog:",
     "zod": "catalog:"
   }' worker
-mkdir -p apps/worker/src/jobs
 emit apps/worker/src/index.ts <<'EOF'
 export { jobs } from "./jobs/index.ts";
 EOF
 emit apps/worker/src/jobs/index.ts <<'EOF'
 import { healthcheck } from "./healthcheck.ts";
 
-/** Her iş: kuyruk adı + (opsiyonel) cron + handler. Handler yalnızca core çağırır. */
+/** Each job: queue name + optional cron + handler. Handlers only call core. */
 export const jobs = [healthcheck];
 EOF
 emit apps/worker/src/jobs/healthcheck.ts <<'EOF'
@@ -1256,7 +1261,7 @@ for (const job of jobs) {
   await boss.work(job.name, async () => job.handle(db));
   if (job.cron) await boss.schedule(job.name, job.cron);
 }
-console.log(`worker → ${jobs.length} kuyruk dinleniyor`);
+console.log(`worker → listening on ${jobs.length} queue(s)`);
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
@@ -1268,8 +1273,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 }
 EOF
 
-# --- apps/web ----------------------------------------------------------------------
-mkdir -p apps/web/src/lib
+# --- apps/web ----------------------------------------------------------------------------
 emit apps/web/package.json <<'EOF'
 {
   "name": "__SCOPE__/web",
@@ -1307,7 +1311,7 @@ emit apps/web/tsconfig.json <<'EOF'
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
-    // "node": AppType tipi api kaynağından çıkarıldığı için api'nin Node tiplerine ihtiyaç var.
+    // "node": AppType is inferred from the api source, which needs Node types.
     "types": ["vite/client", "node"]
   },
   "include": ["src", "vite.config.ts"]
@@ -1324,7 +1328,7 @@ export default defineConfig({
 EOF
 emit apps/web/index.html <<'EOF'
 <!doctype html>
-<html lang="tr">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -1340,7 +1344,7 @@ emit apps/web/src/lib/api.ts <<'EOF'
 import type { AppType } from "__SCOPE__/api";
 import { hc } from "hono/client";
 
-/** API'ye tek erişim noktası. Uç noktalar ve tipler api'deki Hono uygulamasından çıkarılır. */
+/** Single entry point to the API. Endpoints and types are inferred from the Hono app. */
 export const api = hc<AppType>("/").api;
 EOF
 emit apps/web/src/main.tsx <<'EOF'
@@ -1354,8 +1358,8 @@ function Health() {
     queryKey: ["health"],
     queryFn: async () => (await api.health.$get()).json(),
   });
-  if (health.isPending) return <p>Yükleniyor…</p>;
-  if (health.isError) return <p>API'ye ulaşılamadı.</p>;
+  if (health.isPending) return <p>Loading…</p>;
+  if (health.isError) return <p>API unreachable.</p>;
   return (
     <p>
       API: {health.data.status} · DB: {health.data.db}
@@ -1364,7 +1368,7 @@ function Health() {
 }
 
 const root = document.getElementById("root");
-if (!root) throw new Error("#root bulunamadı");
+if (!root) throw new Error("#root not found");
 
 createRoot(root).render(
   <StrictMode>
@@ -1376,8 +1380,7 @@ createRoot(root).render(
 );
 EOF
 
-# --- Yer tutucuları doldur -------------------------------------------------------------
-# Yalnızca bu çalıştırmada oluşturulan dosyalara dokunulur.
+# --- Fill placeholders (only in files created by this run) ----------------------------------------
 if (( ${#WRITTEN[@]} )); then
   SCOPE="$SCOPE" NODE_MAJOR="$NODE_MAJOR" PNPM_VERSION="$PNPM_VERSION" perl -pi -e '
     s/__SCOPE_RE__/$ENV{SCOPE}/g;
@@ -1387,16 +1390,16 @@ if (( ${#WRITTEN[@]} )); then
   ' "${WRITTEN[@]}"
 fi
 
-# CLAUDE.md blok özetini architecture.json'a yaz (yalnızca architecture.json yeni oluşturulduysa)
+# Record the CLAUDE.md block hash (only when architecture.json was just created)
 if grep -q '__CLAUDE_SHA__' architecture.json 2>/dev/null; then
   CLAUDE_SHA="$(node scripts/arch-check.mjs --claude-hash)"
   CLAUDE_SHA="$CLAUDE_SHA" perl -pi -e 's/__CLAUDE_SHA__/$ENV{CLAUDE_SHA}/g' architecture.json
 fi
 
-# --- Kurulum + doğrulama ---------------------------------------------------------------
+# --- Install + verify ----------------------------------------------------------------------
 git rev-parse --git-dir >/dev/null 2>&1 || git init -q -b main
 if (( INSTALL )); then
-  echo "→ Bağımlılıklar kuruluyor..."
+  echo "→ Installing dependencies..."
   pnpm install
   if (( ${#WRITTEN[@]} )); then
     pnpm exec biome check --write --files-ignore-unknown=true --no-errors-on-unmatched \
@@ -1408,11 +1411,11 @@ fi
 
 cat <<EOF
 
-✓ Scaffold hazır: $(pwd)  (${#WRITTEN[@]} yeni dosya)
+✓ Scaffold ready: $(pwd)  (${#WRITTEN[@]} new files)
 
-Sonraki adımlar:
+Next steps:
   cp .env.example .env && docker compose up -d
   pnpm dev                       # api :3000, web :5173, worker
-  .github/CODEOWNERS             # mimari dosyalarına sahip atayın
+  .github/CODEOWNERS             # assign owners for architecture files
   git add -A && git commit -m "chore: scaffold"
 EOF
