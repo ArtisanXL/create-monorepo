@@ -15,8 +15,16 @@ export interface PackageManagerAdapter {
   packageManagerField(version: string): string;
   /** Contents of the workspace/catalog file; `catalog` maps package to version range. */
   renderWorkspaceFile(catalog: Readonly<Record<string, string>>): string;
+  /** Lockfile name the package manager writes. */
+  readonly lockfile: string;
   installCommand(): Command;
+  /** Runs a locally installed binary, e.g. `execCommand(["biome", "check"])`. */
+  execCommand(args: readonly string[]): Command;
+  /** Runs a package script in one workspace package. */
+  filterCommand(pkg: string, script: string): Command;
   /** Format only the given (relative) files. */
   formatCommand(files: readonly string[]): Command;
   verifyCommand(): Command;
+  /** The "Next steps" block printed after scaffolding. */
+  nextSteps(): string;
 }

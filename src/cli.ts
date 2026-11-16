@@ -44,6 +44,7 @@ async function main() {
   const nodeMajor = Number(process.versions.node.split(".")[0]);
   if (nodeMajor < 24) fail(`Node >= 24 required (found: ${nodeMajor})`);
 
+  const pm = createPnpmAdapter();
   const result = await scaffold(
     {
       target: resolve(target),
@@ -64,10 +65,10 @@ async function main() {
           child.on("error", reject);
           child.on("close", (code) => done({ code: code ?? 1 }));
         }),
-      pm: createPnpmAdapter(),
+      pm,
     },
   );
-  console.log(formatResult(result, resolve(target)));
+  console.log(formatResult(result, resolve(target), pm.nextSteps()));
 }
 
 main().catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));

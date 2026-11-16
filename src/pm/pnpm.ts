@@ -34,7 +34,10 @@ allowBuilds:
   esbuild: true
 `;
     },
+    lockfile: "pnpm-lock.yaml",
     installCommand: () => ["pnpm", "install"],
+    execCommand: (args) => ["pnpm", "exec", ...args],
+    filterCommand: (pkg, script) => ["pnpm", "--filter", pkg, script],
     formatCommand: (files) => [
       "pnpm",
       "exec",
@@ -46,5 +49,10 @@ allowBuilds:
       ...files,
     ],
     verifyCommand: () => ["pnpm", "verify"],
+    nextSteps: () => `Next steps:
+  cp .env.example .env && docker compose up -d
+  pnpm dev                       # api :3000, web :5173, worker
+  .github/CODEOWNERS             # assign owners for architecture files
+  git add -A && git commit -m "chore: scaffold"`,
   };
 }
