@@ -5,7 +5,7 @@ import type { PackageManagerAdapter } from "./types.ts";
 const execFileAsync = promisify(execFile);
 
 async function installedPnpmVersion(): Promise<string> {
-  const { stdout } = await execFileAsync("pnpm", ["-v"]);
+  const { stdout } = await execFileAsync("pnpm", ["-v"], { shell: process.platform === "win32" });
   return stdout.trim();
 }
 

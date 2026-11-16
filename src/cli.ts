@@ -37,6 +37,7 @@ async function main() {
         new Promise((done, reject) => {
           const child = spawn(cmd, args, {
             cwd,
+            shell: process.platform === "win32",
             stdio: args[0] === "rev-parse" ? "ignore" : "inherit",
           });
           child.on("error", reject);
