@@ -1,0 +1,31 @@
+{
+  "name": "@artisanxl/create-monorepo",
+  "version": "0.1.0",
+  "description": "Scaffold a guard-railed TypeScript monorepo",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "create-monorepo": "./dist/cli.mjs"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "biome check .",
+    "format": "biome check --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.7",
+    "@types/node": "^26.6.6",
+    "tsdown": "^0.23.7",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}
