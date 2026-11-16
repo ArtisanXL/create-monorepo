@@ -1,46 +1,15 @@
 import { spawn } from "node:child_process";
-import { access } from "node:fs/promises";
-import { createInterface } from "node:readline/promises";
-import {
-  type FsProbe,
-  OptionsError,
-  type Prompter,
-  resolveOptions,
-  USAGE,
-  wantsHelp,
-} from "./options.ts";
+import { CancelledError, OptionsError, resolveOptions, USAGE, wantsHelp } from "./options.ts";
 import { createPnpmAdapter } from "./pm/pnpm.ts";
 import { createRegistryResolver } from "./registry.ts";
 import { formatResult } from "./report.ts";
 import { scaffold } from "./scaffold.ts";
+import { clackPrompter, nodeFsProbe } from "./wizard.ts";
 
 function fail(message: string, code = 1): never {
   console.error(message);
   process.exit(code);
 }
-
-/** Placeholder prompter until the wizard lands: plain readline questions. */
-const prompter: Prompter = {
-  async text(message, defaultValue) {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      const answer = await rl.question(
-        defaultValue ? `${message} (${defaultValue}): ` : `${message}: `,
-      );
-      return answer.trim() || defaultValue || "";
-    } finally {
-      rl.close();
-    }
-  },
-};
-
-const fsProbe: FsProbe = {
-  exists: (path) =>
-    access(path).then(
-      () => true,
-      () => false,
-    ),
-};
 
 async function main() {
   const argv = process.argv.slice(2);
@@ -52,8 +21,8 @@ async function main() {
     argv,
     process.env,
     Boolean(process.stdin.isTTY && process.stdout.isTTY),
-    prompter,
-    fsProbe,
+    clackPrompter,
+    nodeFsProbe,
   );
 
   const nodeMajor = Number(process.versions.node.split(".")[0]);
@@ -78,9 +47,13 @@ async function main() {
   console.log(formatResult(result, resolved.target));
 }
 
-main().catch((error: unknown) =>
+main().catch((error: unknown) => {
+  if (error instanceof CancelledError) {
+    console.error("Cancelled. No files were written.");
+    process.exit(0);
+  }
   fail(
     error instanceof Error ? error.message : String(error),
     error instanceof OptionsError ? error.exitCode : 1,
-  ),
-);
+  );
+});
