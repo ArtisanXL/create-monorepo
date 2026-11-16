@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { Options } from "./scaffold.ts";
 
@@ -17,14 +17,41 @@ export class OptionsError extends Error {
   }
 }
 
+/** Returned by a prompter when the user cancels (Ctrl-C) a prompt. */
+export const CANCEL: unique symbol = Symbol("cancel");
+export type Cancel = typeof CANCEL;
+
+/** Thrown when the user cancels or declines; the CLI exits cleanly (code 0), writing nothing. */
+export class CancelledError extends Error {
+  readonly exitCode = 0;
+  constructor() {
+    super("Cancelled");
+    this.name = "CancelledError";
+  }
+}
+
+export interface TextOptions {
+  defaultValue?: string | undefined;
+  /** Set when re-asking after invalid input. */
+  error?: string | undefined;
+}
+
 /** Interactive input seam (implemented by the wizard). */
 export interface Prompter {
-  text(message: string, defaultValue?: string): Promise<string>;
+  text(message: string, opts?: TextOptions): Promise<string | Cancel>;
+  select(
+    message: string,
+    choices: readonly string[],
+    defaultValue: string,
+  ): Promise<string | Cancel>;
+  confirm(message: string, defaultValue: boolean): Promise<boolean | Cancel>;
 }
 
 /** Filesystem inspection seam. */
 export interface FsProbe {
   exists(path: string): Promise<boolean>;
+  /** True when the path is a directory containing at least one entry. */
+  isNonEmptyDir(path: string): Promise<boolean>;
 }
 
 export type ResolvedOptions = Omit<Options, "nodeMajor">;
@@ -42,12 +69,42 @@ function detectPm(env: Record<string, string | undefined>): string {
   return (SUPPORTED_PMS as readonly string[]).includes(name ?? "") ? (name as string) : "pnpm";
 }
 
+function uncancel<T>(answer: T | Cancel): T {
+  if (answer === CANCEL) throw new CancelledError();
+  return answer as T;
+}
+
+/** Ask until `check` returns no error; cancel throws. */
+async function askValid(
+  prompter: Prompter,
+  message: string,
+  defaultValue: string | undefined,
+  check: (value: string) => string | undefined,
+): Promise<string> {
+  let error: string | undefined;
+  for (;;) {
+    const value = uncancel(await prompter.text(message, { defaultValue, error })).trim();
+    error = check(value);
+    if (!error) return value;
+  }
+}
+
+const scopeError = (v: string) =>
+  v.startsWith("@") && v.length > 1 ? undefined : "--scope must start with '@'";
+const dbPrefixError = (v: string) =>
+  DB_PREFIX_RE.test(v) ? undefined : "--db-prefix must match ^[a-z][a-z0-9_]{0,29}$";
+const deriveDbPrefix = (scope: string) =>
+  scope
+    .slice(1)
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "_");
+
 export async function resolveOptions(
   argv: readonly string[],
   env: Record<string, string | undefined>,
   tty: boolean,
   prompter: Prompter,
-  _fsProbe: FsProbe,
+  fsProbe: FsProbe,
 ): Promise<ResolvedOptions> {
   let parsed: ReturnType<typeof parse>;
   try {
@@ -61,38 +118,57 @@ export async function resolveOptions(
   let target = positionals[0];
   if (!target) {
     if (!interactive) throw new OptionsError(`Missing <target-dir>\n${USAGE}`);
-    target = (await prompter.text("Target directory")).trim();
-    if (!target) throw new OptionsError(`Missing <target-dir>\n${USAGE}`);
+    target = await askValid(prompter, "Target directory", undefined, (v) =>
+      v ? undefined : "Target directory is required",
+    );
+  }
+  const targetPath = resolve(target);
+
+  if (interactive && (await fsProbe.isNonEmptyDir(targetPath))) {
+    const proceed = uncancel(
+      await prompter.confirm(
+        `${targetPath} is not empty. Only missing files will be added; existing files are left untouched. Continue?`,
+        true,
+      ),
+    );
+    if (!proceed) throw new CancelledError();
   }
 
   let scope = values.scope;
   if (scope === undefined) {
+    const fallback = `@${basename(targetPath)}`;
     scope = interactive
-      ? (await prompter.text("Package scope", DEFAULT_SCOPE)).trim()
+      ? await askValid(prompter, "Package scope", fallback, scopeError)
       : DEFAULT_SCOPE;
   }
-  if (!scope.startsWith("@")) throw new OptionsError("--scope must start with '@'");
+  const badScope = scopeError(scope);
+  if (badScope) throw new OptionsError(badScope);
 
-  const dbPrefix =
-    values["db-prefix"] ??
-    scope
-      .slice(1)
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, "_");
-  if (!DB_PREFIX_RE.test(dbPrefix))
-    throw new OptionsError("--db-prefix must match ^[a-z][a-z0-9_]{0,29}$");
+  let dbPrefix = values["db-prefix"];
+  if (dbPrefix === undefined) {
+    const derived = deriveDbPrefix(scope);
+    dbPrefix = interactive
+      ? await askValid(prompter, "Database prefix", derived, dbPrefixError)
+      : derived;
+  }
+  const badPrefix = dbPrefixError(dbPrefix);
+  if (badPrefix) throw new OptionsError(badPrefix);
 
-  const pm = values.pm ?? detectPm(env);
+  let pm = values.pm;
+  if (pm === undefined) {
+    const detected = detectPm(env);
+    pm = interactive
+      ? uncancel(await prompter.select("Package manager", SUPPORTED_PMS, detected))
+      : detected;
+  }
   if (!(SUPPORTED_PMS as readonly string[]).includes(pm))
     throw new OptionsError(`Unsupported --pm '${pm}'. Supported: ${SUPPORTED_PMS.join(", ")}`);
 
-  return {
-    target: resolve(target),
-    scope,
-    dbPrefix,
-    pm,
-    install: !values["no-install"],
-  };
+  let install = !values["no-install"];
+  if (install && interactive)
+    install = uncancel(await prompter.confirm("Install dependencies?", true));
+
+  return { target: targetPath, scope, dbPrefix, pm, install };
 }
 
 function parse(argv: readonly string[]) {
