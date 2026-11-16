@@ -62,6 +62,9 @@ function destinationOf(templatePath: string): string {
     .join("/");
 }
 
+/** Template trees written into the target, in order. */
+const TEMPLATE_TREES = ["root", "packages", "apps"] as const;
+
 async function listTemplates(dir: string, rel = ""): Promise<string[]> {
   const out: string[] = [];
   for (const entry of await readdir(join(dir, rel), { withFileTypes: true })) {
@@ -80,10 +83,16 @@ export async function scaffold(options: Options, deps: Deps): Promise<Result> {
   const { target, scope, dbPrefix, nodeMajor } = options;
   const { pm } = deps;
 
-  const templates = (await listTemplates(join(TEMPLATES_DIR, "root"))).map((src) => ({
-    src: join(TEMPLATES_DIR, "root", src),
-    dest: destinationOf(src),
-  }));
+  const templates: { src: string; dest: string }[] = [];
+  for (const tree of TEMPLATE_TREES) {
+    const prefix = tree === "root" ? "" : `${tree}/`;
+    for (const rel of await listTemplates(join(TEMPLATES_DIR, tree))) {
+      templates.push({
+        src: join(TEMPLATES_DIR, tree, rel),
+        dest: destinationOf(`${prefix}${rel}`),
+      });
+    }
+  }
   const files = [...templates.map((t) => t.dest), pm.workspaceFile].sort();
   const missing = files.filter((f) => !existsSync(join(target, f)));
   const skipped = files.filter((f) => !missing.includes(f));

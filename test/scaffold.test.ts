@@ -68,11 +68,11 @@ describe("scaffold: fresh run", () => {
   it("writes the root files with placeholders filled", async () => {
     const result = await scaffold(options(), deps());
 
-    expect(result.written.sort()).toEqual(ROOT_FILES);
+    expect(result.written).toEqual(expect.arrayContaining(ROOT_FILES));
     expect(result.skipped).toEqual([]);
-    expect(await listFiles(dir)).toEqual(ROOT_FILES);
+    expect(await listFiles(dir)).toEqual(result.written.sort());
 
-    for (const f of ROOT_FILES) {
+    for (const f of result.written) {
       expect(await readFile(join(dir, f), "utf8")).not.toMatch(/__[A-Z_]+__/);
     }
     const pkg = JSON.parse(await readFile(join(dir, "package.json"), "utf8"));
@@ -81,6 +81,26 @@ describe("scaffold: fresh run", () => {
     expect(pkg.packageManager).toBe("pnpm@9.9.9");
     expect(pkg.scripts["db:migrate"]).toBe("pnpm --filter @acme/db migrate");
     expect(await readFile(join(dir, ".nvmrc"), "utf8")).toBe("24\n");
+  });
+
+  it("writes the packages and apps with scope and db prefix filled", async () => {
+    const result = await scaffold(options(), deps());
+    for (const f of [
+      "packages/domain/src/money/money.ts",
+      "packages/contracts/src/index.ts",
+      "packages/db/src/index.ts",
+      "packages/core/src/index.ts",
+      "apps/api/src/app.ts",
+      "apps/worker/src/worker.ts",
+      "apps/web/src/main.tsx",
+    ]) {
+      expect(result.written).toContain(f);
+    }
+    const api = JSON.parse(await readFile(join(dir, "apps/api/package.json"), "utf8"));
+    expect(api.name).toBe("@acme/api");
+    expect(await readFile(join(dir, "apps/api/tsdown.config.ts"), "utf8")).toContain(
+      "noExternal: [/^@acme\\//]",
+    );
   });
 
   it("maps resolved versions to ranges in the catalog", async () => {
@@ -119,15 +139,16 @@ describe("scaffold: fresh run", () => {
 describe("scaffold: re-run", () => {
   it("writes nothing, skips every file and does not resolve versions", async () => {
     await scaffold(options(), deps());
-    const before = await Promise.all(ROOT_FILES.map((f) => readFile(join(dir, f), "utf8")));
+    const all = await listFiles(dir);
+    const before = await Promise.all(all.map((f) => readFile(join(dir, f), "utf8")));
     resolved.length = 0;
 
     const result = await scaffold(options(), deps());
 
     expect(result.written).toEqual([]);
-    expect(result.skipped.sort()).toEqual(ROOT_FILES);
+    expect(result.skipped.sort()).toEqual(all);
     expect(resolved).toEqual([]);
-    const after = await Promise.all(ROOT_FILES.map((f) => readFile(join(dir, f), "utf8")));
+    const after = await Promise.all(all.map((f) => readFile(join(dir, f), "utf8")));
     expect(after).toEqual(before);
   });
 
