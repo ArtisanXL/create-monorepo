@@ -1,58 +1,66 @@
 import { spawn } from "node:child_process";
-import { resolve } from "node:path";
-import { parseArgs } from "node:util";
+import { access } from "node:fs/promises";
+import { createInterface } from "node:readline/promises";
+import {
+  type FsProbe,
+  OptionsError,
+  type Prompter,
+  resolveOptions,
+  USAGE,
+  wantsHelp,
+} from "./options.ts";
 import { createPnpmAdapter } from "./pm/pnpm.ts";
 import { createRegistryResolver } from "./registry.ts";
 import { formatResult } from "./report.ts";
 import { scaffold } from "./scaffold.ts";
 
-const USAGE = "Usage: create-monorepo <target-dir> [--scope @app] [--db-prefix app] [--no-install]";
-
-function fail(message: string): never {
+function fail(message: string, code = 1): never {
   console.error(message);
-  process.exit(1);
+  process.exit(code);
 }
 
+/** Placeholder prompter until the wizard lands: plain readline questions. */
+const prompter: Prompter = {
+  async text(message, defaultValue) {
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      const answer = await rl.question(
+        defaultValue ? `${message} (${defaultValue}): ` : `${message}: `,
+      );
+      return answer.trim() || defaultValue || "";
+    } finally {
+      rl.close();
+    }
+  },
+};
+
+const fsProbe: FsProbe = {
+  exists: (path) =>
+    access(path).then(
+      () => true,
+      () => false,
+    ),
+};
+
 async function main() {
-  const { values, positionals } = parseArgs({
-    allowPositionals: true,
-    options: {
-      scope: { type: "string", default: "@app" },
-      "db-prefix": { type: "string" },
-      "no-install": { type: "boolean", default: false },
-      help: { type: "boolean", short: "h", default: false },
-    },
-  });
-  if (values.help) {
+  const argv = process.argv.slice(2);
+  if (wantsHelp(argv)) {
     console.log(USAGE);
     return;
   }
-  const [target] = positionals;
-  if (!target) fail(USAGE);
-
-  const scope = values.scope;
-  if (!scope.startsWith("@")) fail("--scope must start with '@'");
-  const dbPrefix =
-    values["db-prefix"] ??
-    scope
-      .slice(1)
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, "_");
-  if (!/^[a-z][a-z0-9_]{0,29}$/.test(dbPrefix))
-    fail("--db-prefix must match ^[a-z][a-z0-9_]{0,29}$");
+  const resolved = await resolveOptions(
+    argv,
+    process.env,
+    Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    prompter,
+    fsProbe,
+  );
 
   const nodeMajor = Number(process.versions.node.split(".")[0]);
   if (nodeMajor < 24) fail(`Node >= 24 required (found: ${nodeMajor})`);
 
   const result = await scaffold(
-    {
-      target: resolve(target),
-      scope,
-      dbPrefix,
-      pm: "pnpm",
-      install: !values["no-install"],
-      nodeMajor,
-    },
+    { ...resolved, nodeMajor },
     {
       resolveVersion: createRegistryResolver(),
       run: (cmd, args, cwd) =>
@@ -67,7 +75,12 @@ async function main() {
       pm: createPnpmAdapter(),
     },
   );
-  console.log(formatResult(result, resolve(target)));
+  console.log(formatResult(result, resolved.target));
 }
 
-main().catch((error: unknown) => fail(error instanceof Error ? error.message : String(error)));
+main().catch((error: unknown) =>
+  fail(
+    error instanceof Error ? error.message : String(error),
+    error instanceof OptionsError ? error.exitCode : 1,
+  ),
+);
