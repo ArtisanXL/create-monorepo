@@ -19,6 +19,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "biome check . && node scripts/lint-templates.mjs",
+    "smoke:pack": "node scripts/pack-smoke.mjs",
     "format": "biome check --write ."
   },
   "devDependencies": {
