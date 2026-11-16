@@ -98,7 +98,9 @@ emit architecture.json <<'EOF'
   "protected_paths": [
     "architecture.json",
     "docs/adr/",
-    "scripts/arch-check.mjs",
+    "scripts/",
+    "paseo.json",
+    ".worktreeinclude",
     ".claude/settings.json",
     ".claude/settings.local.json",
     ".claude/hooks/",
@@ -209,6 +211,7 @@ Chat with the user in the user's language. Everything else — code, comments, d
 - `pnpm verify`: architecture, lint, typecheck and tests. **Work is done only when this passes.**
 - `pnpm dev`: all apps. Postgres via `docker compose up -d`.
 - `pnpm arch`: architecture check only.
+- `pnpm worktree:setup` / `worktree:info`: per-worktree `.env` + database (Paseo runs setup automatically; see `paseo.json`). Never hard-code ports; services get `$PASEO_PORT`.
 - `pnpm add <pkg> --filter __SCOPE__/<target>`: add a dependency; the version is written to the catalog.
 
 ## Where code goes

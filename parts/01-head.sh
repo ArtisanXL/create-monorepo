@@ -2,7 +2,7 @@
 # ---------------------------------------------------------------------------
 # Modern TypeScript monorepo scaffold with agent guardrails
 #
-#   ./scaffold-monorepo.sh <target-dir> [--scope @app] [--no-install]
+#   ./scaffold-monorepo.sh <target-dir> [--scope @app] [--db-prefix app] [--no-install]
 #
 # Generates:
 #   apps/{api,web,worker}  packages/{domain,contracts,db,core}
@@ -17,10 +17,12 @@ set -euo pipefail
 
 TARGET=""
 SCOPE="@app"
+DB_PREFIX=""
 INSTALL=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --scope) SCOPE="$2"; shift 2 ;;
+    --db-prefix) DB_PREFIX="$2"; shift 2 ;;
     --no-install) INSTALL=0; shift ;;
     -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) TARGET="$1"; shift ;;
@@ -28,6 +30,9 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$TARGET" ]] || { echo "Usage: $0 <target-dir> [--scope @app] [--no-install]" >&2; exit 1; }
 [[ "$SCOPE" == @* ]] || { echo "--scope must start with '@'" >&2; exit 1; }
+# Local Postgres database prefix (main checkout DB name; worktrees get <prefix>_wt_<key>).
+[[ -n "$DB_PREFIX" ]] || DB_PREFIX="$(printf '%s' "${SCOPE#@}" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '_')"
+[[ "$DB_PREFIX" =~ ^[a-z][a-z0-9_]{0,29}$ ]] || { echo "--db-prefix must match ^[a-z][a-z0-9_]{0,29}$" >&2; exit 1; }
 
 WRITTEN=()
 emit() { # usage: emit <path> <<'EOF' ... EOF  — skips existing files
@@ -123,11 +128,16 @@ emit package.json <<'EOF'
     "arch": "node scripts/arch-check.mjs",
     "verify": "pnpm arch && pnpm lint && pnpm typecheck && pnpm test",
     "db:generate": "pnpm --filter __SCOPE__/db generate",
-    "db:migrate": "pnpm --filter __SCOPE__/db migrate"
+    "db:migrate": "pnpm --filter __SCOPE__/db migrate",
+    "worktree:setup": "node scripts/worktree.mjs setup",
+    "worktree:teardown": "node scripts/worktree.mjs teardown",
+    "worktree:info": "node scripts/worktree.mjs info",
+    "worktree:gc": "node scripts/worktree.mjs gc"
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:",
     "@types/node": "catalog:",
+    "postgres": "catalog:",
     "turbo": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
@@ -192,7 +202,7 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    projects: ["packages/*", "apps/*"],
+    projects: ["packages/*", "apps/*", "scripts"],
     passWithNoTests: true,
   },
 });
