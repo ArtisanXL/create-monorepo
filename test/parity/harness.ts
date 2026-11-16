@@ -60,9 +60,7 @@ export const ALLOWED_DIFFERENCES: ReadonlyArray<{
   {
     reason: "CLAUDE.md block hash is computed per implementation",
     normalise: (file, text) =>
-      file === "architecture.json"
-        ? text.replace(/"claudeSha256?":\s*"[0-9a-f]*"/, '"claudeSha":""')
-        : text,
+      file === "architecture.json" ? text.replace(/"sha256":\s*"[0-9a-f]*"/, '"sha256": ""') : text,
   },
   {
     reason: "package.json packageManager field is adapter-owned",
