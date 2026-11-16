@@ -13,4 +13,9 @@ Generates a guard-railed TypeScript monorepo designed for development with AI ag
 - **Idempotent:** Existing files are never touched; only missing ones are created. A marked rules block is appended to `CLAUDE.md` once, preserving existing content. The block is protected by the hook and a sha256 check; everything outside it can be edited freely.
 - **Language policy:** Agents chat in the user's language; everything else (code, comments, docs, ADRs, commits) is English.
 
+## Development
+`scaffold-monorepo.sh` is generated from `parts/*.sh` (head, architecture contract, guards,
+packages, apps, web + finalize). Edit the parts, then run `./build.sh`; `./build.sh --check`
+fails if the generated script is out of date.
+
 Requirements: Node ≥ 24, pnpm, git, perl. Postgres via `docker compose up -d`.
