@@ -1,0 +1,16 @@
+{
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "files": {
+    "includes": [
+      "**",
+      "!templates",
+      "templates/root/scripts/worktree-lib.mjs",
+      "templates/root/scripts/worktree-lib.test.mjs",
+      "!scaffold-monorepo.sh",
+      "!parts",
+      "!**/*.md"
+    ]
+  },
+  "formatter": { "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
+  "linter": { "enabled": true, "rules": { "preset": "recommended" } }
+}

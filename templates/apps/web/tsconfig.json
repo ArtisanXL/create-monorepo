@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    // "node": AppType is inferred from the api source, which needs Node types.
+    "types": ["vite/client", "node"]
+  },
+  "include": ["src", "vite.config.ts"]
+}

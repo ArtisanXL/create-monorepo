@@ -1,0 +1,8 @@
+# Architecture contract files require human review. Replace OWNER with a GitHub user/team
+# and uncomment the lines below.
+# /architecture.json        OWNER
+# /CLAUDE.md                OWNER
+# /docs/adr/                OWNER
+# /scripts/arch-check.mjs   OWNER
+# /.claude/                 OWNER
+# /.github/                 OWNER

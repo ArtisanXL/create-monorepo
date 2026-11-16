@@ -1,0 +1,120 @@
+{
+  "$comment": "Single source of truth. Humans only (agent hook + CODEOWNERS). Every change requires an accepted ADR.",
+  "scope": "__SCOPE__",
+  "package_manager": "__PM__",
+  "test_allow": ["vitest"],
+  "packages": {
+    "packages/domain": {
+      "adr": "docs/adr/0001-package-boundaries.md",
+      "role": "Pure business rules and value objects (Money etc.). No I/O.",
+      "may_depend_on": [],
+      "external_allow": []
+    },
+    "packages/contracts": {
+      "adr": "docs/adr/0001-package-boundaries.md",
+      "role": "API input/output Zod schemas. Validation rules live only here.",
+      "may_depend_on": [],
+      "external_allow": ["zod"]
+    },
+    "packages/db": {
+      "adr": "docs/adr/0001-package-boundaries.md",
+      "role": "Drizzle schema, migrations, DB client.",
+      "may_depend_on": ["packages/domain"],
+      "external_allow": ["drizzle-orm", "drizzle-kit", "postgres"]
+    },
+    "packages/core": {
+      "adr": "docs/adr/0001-package-boundaries.md",
+      "role": "Use cases (actions/queries). Knows nothing about HTTP or queues.",
+      "may_depend_on": ["packages/domain", "packages/contracts", "packages/db"]
+    },
+    "apps/api": {
+      "adr": "docs/adr/0001-package-boundaries.md",
+      "role": "Hono HTTP layer: validation + core calls. No business rules.",
+      "may_depend_on": ["packages/core", "packages/contracts", "packages/domain", "packages/db"]
+    },
+    "apps/worker": {
+      "adr": "docs/adr/0003-job-queue-pg-boss.md",
+      "role": "pg-boss background jobs: core calls only. No business rules.",
+      "may_depend_on": ["packages/core", "packages/domain", "packages/db"]
+    },
+    "apps/web": {
+      "adr": "docs/adr/0001-package-boundaries.md",
+      "role": "React SPA. Talks to the API only through the hc<AppType> client.",
+      "may_depend_on": ["packages/contracts", "packages/domain"],
+      "type_only": ["apps/api"]
+    }
+  },
+  "deferred": [
+    {
+      "name": "auth",
+      "path": "packages/auth",
+      "trigger": "When real user sign-in becomes a requirement (preferred: better-auth).",
+      "deps": ["better-auth", "lucia", "next-auth", "@auth/core", "passport", "jsonwebtoken", "jose"]
+    },
+    {
+      "name": "i18n",
+      "path": "packages/i18n",
+      "trigger": "When a second UI language is requested.",
+      "deps": ["i18next", "react-i18next", "@lingui/core", "@lingui/react", "react-intl", "@inlang/paraglide-js"]
+    },
+    {
+      "name": "ui",
+      "path": "packages/ui",
+      "trigger": "When a second app needs the same components.",
+      "deps": []
+    },
+    {
+      "name": "config",
+      "path": "packages/config",
+      "trigger": "When the same env schema is duplicated in a third app.",
+      "deps": ["@t3-oss/env-core", "dotenv", "convict"]
+    },
+    {
+      "name": "integrations",
+      "path": "packages/integrations",
+      "trigger": "When the first third-party API integration is approved.",
+      "deps": []
+    },
+    {
+      "name": "crawler",
+      "path": "apps/crawler",
+      "trigger": "When a data need that the official API cannot cover (ToS) is approved.",
+      "deps": ["crawlee", "playwright", "puppeteer", "cheerio"]
+    },
+    {
+      "name": "e2e",
+      "path": "apps/e2e",
+      "trigger": "When the first critical user flow is complete.",
+      "deps": ["@playwright/test", "cypress"]
+    },
+    {
+      "name": "redis-queue",
+      "path": null,
+      "trigger": "When pg-boss hits a measured throughput limit.",
+      "deps": ["bullmq", "bull", "ioredis", "redis"]
+    }
+  ],
+  "protected_paths": [
+    "architecture.json",
+    "docs/adr/",
+    "scripts/",
+    "paseo.json",
+    ".worktreeinclude",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".claude/hooks/",
+    ".githooks/",
+    ".github/",
+    "biome.json",
+    "tsconfig.base.json",
+    "turbo.json",
+    "vitest.config.ts"
+  ],
+  "agent_writable_exceptions": ["docs/adr/proposed/"],
+  "claude_md_block": {
+    "$comment": "The scaffold block in CLAUDE.md is protected; everything outside it is free. If a human changes the block, update sha256 (pnpm arch --claude-hash).",
+    "begin": "<!-- scaffold:begin",
+    "end": "<!-- scaffold:end -->",
+    "sha256": "__CLAUDE_SHA__"
+  }
+}
