@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { claudeBlockHash, hasBlock, upsertBlock } from "./claude-md.ts";
@@ -53,6 +53,15 @@ const CATALOG_PACKAGES = [
   "@tanstack/react-query",
 ];
 
+/** Generated files that must be executable. */
+const EXECUTABLE = new Set([
+  "scripts/worktree.mjs",
+  "scripts/arch-check.mjs",
+  ".claude/hooks/guard.mjs",
+  ".claude/hooks/stop-check.mjs",
+  ".githooks/pre-commit",
+]);
+
 const TEMPLATES_DIR = fileURLToPath(new URL("../templates/", import.meta.url));
 
 /** Template files starting with `_` are dotfiles (npm would drop real ones when packing). */
@@ -62,6 +71,9 @@ function destinationOf(templatePath: string): string {
     .map((seg) => (seg.startsWith("_") ? `.${seg.slice(1)}` : seg))
     .join("/");
 }
+
+/** Template trees written into the target, in order. */
+const TEMPLATE_TREES = ["root", "packages", "apps"] as const;
 
 async function listTemplates(dir: string, rel = ""): Promise<string[]> {
   const out: string[] = [];
@@ -83,10 +95,16 @@ export async function scaffold(options: Options, deps: Deps): Promise<Result> {
   const { target, scope, dbPrefix, nodeMajor } = options;
   const { pm } = deps;
 
-  const templates = (await listTemplates(join(TEMPLATES_DIR, "root"))).map((src) => ({
-    src: join(TEMPLATES_DIR, "root", src),
-    dest: destinationOf(src),
-  }));
+  const templates: { src: string; dest: string }[] = [];
+  for (const tree of TEMPLATE_TREES) {
+    const prefix = tree === "root" ? "" : `${tree}/`;
+    for (const rel of await listTemplates(join(TEMPLATES_DIR, tree))) {
+      templates.push({
+        src: join(TEMPLATES_DIR, tree, rel),
+        dest: destinationOf(`${prefix}${rel}`),
+      });
+    }
+  }
   const claudeMdPath = join(target, "CLAUDE.md");
   const existingClaudeMd = existsSync(claudeMdPath)
     ? await readFile(claudeMdPath, "utf8")
@@ -134,19 +152,12 @@ export async function scaffold(options: Options, deps: Deps): Promise<Result> {
     if (missing.includes(t.dest)) contents.set(t.dest, fill(await readFile(t.src, "utf8")));
   }
 
-  const modes = new Map<string, number>();
-  for (const t of templates) {
-    const mode = (await stat(t.src)).mode & 0o777;
-    if (mode & 0o100) modes.set(t.dest, mode);
-  }
-
   await mkdir(target, { recursive: true });
   for (const file of missing) {
     const path = join(target, file);
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, contents.get(file) as string);
-    const mode = modes.get(file);
-    if (mode) await chmod(path, mode);
+    if (EXECUTABLE.has(file)) await chmod(path, 0o755);
   }
 
   const git = await deps.run("git", ["rev-parse", "--git-dir"], target);
