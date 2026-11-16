@@ -63,6 +63,18 @@ export const ALLOWED_DIFFERENCES: ReadonlyArray<{
       file === "architecture.json" ? text.replace(/"sha256":\s*"[0-9a-f]*"/, '"sha256": ""') : text,
   },
   {
+    reason: "TS records the chosen package manager in architecture.json",
+    normalise: (file, text) =>
+      file === "architecture.json" ? text.replace(/^\s*"package_manager":.*\n/m, "") : text,
+  },
+  {
+    reason: "TS guard blocks foreign package managers (pm-guard block)",
+    normalise: (file, text) =>
+      file === ".claude/hooks/guard.mjs"
+        ? text.replace(/ *\/\/ pm-guard:begin[\s\S]*?\/\/ pm-guard:end\n\n?/, "")
+        : text,
+  },
+  {
     reason: "package.json packageManager field is adapter-owned",
     normalise: (file, text) =>
       file === "package.json"

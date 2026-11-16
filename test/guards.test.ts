@@ -105,6 +105,39 @@ describe("generated guard hook", () => {
     expect((await bash("pnpm add zod --filter @acme/contracts")).code).toBe(0);
   });
 
+  it("records the chosen package manager in architecture.json", async () => {
+    const arch = JSON.parse(await readFile(join(dir, "architecture.json"), "utf8"));
+    expect(arch.package_manager).toBe("pnpm");
+  });
+
+  it("blocks install commands of foreign package managers", async () => {
+    for (const cmd of [
+      "npm install",
+      "npm i left-pad",
+      "npm ci",
+      "yarn",
+      "yarn add zod",
+      "bun install",
+      "bun add zod",
+      "cd apps/api && npm install",
+    ]) {
+      const r = await bash(cmd);
+      expect(r.code, cmd).toBe(2);
+      expect(r.stderr, cmd).toContain("pnpm");
+    }
+  });
+
+  it("allows the chosen package manager and non-install foreign commands", async () => {
+    for (const cmd of [
+      "pnpm install",
+      "pnpm add zod --filter @acme/contracts",
+      "pnpm verify",
+      "npm --version",
+      "git commit -m 'npm install notes'",
+    ])
+      expect((await bash(cmd)).code, cmd).toBe(0);
+  });
+
   it("blocks --no-verify and git commit -n", async () => {
     expect((await bash("git commit --no-verify -m x")).code).toBe(2);
     expect((await bash("git commit -n -m x")).code).toBe(2);

@@ -1,6 +1,7 @@
 {
   "$comment": "Single source of truth. Humans only (agent hook + CODEOWNERS). Every change requires an accepted ADR.",
   "scope": "__SCOPE__",
+  "package_manager": "__PM__",
   "test_allow": ["vitest"],
   "packages": {
     "packages/domain": {
