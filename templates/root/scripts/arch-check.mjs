@@ -77,7 +77,7 @@ for (const [dep, d] of forbiddenDeps) {
 
 // 3) Per-package checks
 const IMPORT_RE =
-  /(?:^|[\s;])(import|export)\s+(type\s+)?(?:[\w*{}\s,$]+?\s+from\s+)?["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)/g;
+  /(?:^|[\s;])(import|export)\s+(type\s+)?(?:([\w*{}\s,$]+?)\s+from\s+)?["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)/g;
 
 for (const [dir, spec] of Object.entries(packages)) {
   const abs = path.join(root, dir);
@@ -118,8 +118,11 @@ for (const [dir, spec] of Object.entries(packages)) {
     const isTest = /\.(test|spec)\.[cm]?[jt]sx?$/.test(file);
 
     for (const m of src.matchAll(IMPORT_RE)) {
-      const isType = Boolean(m[2]);
-      const s = m[3] ?? m[4];
+      // `import type ...` or `import { type A, type B } ...` (every binding type-prefixed) is type-only.
+      const named = m[3]?.trim().match(/^\{([^}]*)\}$/);
+      const items = named ? named[1].split(",").map((x) => x.trim()).filter(Boolean) : [];
+      const isType = Boolean(m[2]) || (items.length > 0 && items.every((x) => /^type\s/.test(x)));
+      const s = m[4] ?? m[5];
       if (!s) continue;
       if (s.startsWith(".")) {
         const resolved = path.resolve(path.dirname(file), s);

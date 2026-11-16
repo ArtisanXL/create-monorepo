@@ -85,7 +85,11 @@ async function listTemplates(dir: string, rel = ""): Promise<string[]> {
   return out.sort();
 }
 
-const fill0 = (text: string, scope: string) => text.replaceAll("__SCOPE__", scope);
+/** Literal replacement: a replacer function keeps `$&`, `$'` etc. in values from being interpreted. */
+const sub = (text: string, token: string, value: string) => text.replaceAll(token, () => value);
+const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+
+const fill0 = (text: string, scope: string) => sub(text, "__SCOPE__", scope);
 
 function toRange(pkg: string, version: string): string {
   return `${pkg === "typescript" ? "~" : "^"}${version}`;
@@ -140,15 +144,16 @@ export async function scaffold(options: Options, deps: Deps): Promise<Result> {
   const claudeSha = claudeBlockHash(claudeMd) ?? "";
 
   const packageManager = pm.packageManagerField(await pm.version());
-  const fill = (text: string) =>
-    text
-      .replaceAll("__DB_PREFIX__", dbPrefix)
-      .replaceAll("__SCOPE_RE__", scope)
-      .replaceAll("__SCOPE__", scope)
-      .replaceAll("__NODE_MAJOR__", String(nodeMajor))
-      .replaceAll("__CLAUDE_SHA__", claudeSha)
-      .replaceAll("__PACKAGE_MANAGER__", packageManager)
-      .replaceAll("__PM__", pm.name);
+  const replacements: ReadonlyArray<readonly [string, string]> = [
+    ["__DB_PREFIX__", dbPrefix],
+    ["__SCOPE_RE__", escapeRegex(scope)],
+    ["__SCOPE__", scope],
+    ["__NODE_MAJOR__", String(nodeMajor)],
+    ["__CLAUDE_SHA__", claudeSha],
+    ["__PACKAGE_MANAGER__", packageManager],
+    ["__PM__", pm.name],
+  ];
+  const fill = (text: string) => replacements.reduce((acc, [t, v]) => sub(acc, t, v), text);
   for (const t of templates) {
     if (missing.includes(t.dest)) contents.set(t.dest, fill(await readFile(t.src, "utf8")));
   }
@@ -161,8 +166,15 @@ export async function scaffold(options: Options, deps: Deps): Promise<Result> {
     if (EXECUTABLE.has(file)) await chmod(path, 0o755);
   }
 
-  const git = await deps.run("git", ["rev-parse", "--git-dir"], target);
-  if (git.code !== 0) await run(deps, ["git", "init", "-q", "-b", "main"], target);
+  // `git rev-parse` would succeed inside a parent repository and skip the init, leaving the
+  // `prepare` script to set core.hooksPath on the parent: look for the target's own `.git`.
+  if (!existsSync(join(target, ".git"))) {
+    try {
+      await run(deps, ["git", "init", "-q", "-b", "main"], target);
+    } catch {
+      // A missing git binary must not fail a scaffold whose files are already written.
+    }
+  }
 
   if (options.install) {
     await run(deps, pm.installCommand(), target);

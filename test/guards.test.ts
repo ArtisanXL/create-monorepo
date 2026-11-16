@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -55,6 +55,24 @@ describe("generated arch-check", () => {
     }
   });
 
+  it("treats inline `type` bindings as type-only imports", async () => {
+    const file = join(dir, "apps/web/src/inline-type.ts");
+    const run = () => execFileAsync("node", ["scripts/arch-check.mjs"], { cwd: dir });
+    try {
+      await writeFile(
+        file,
+        'import { type AppType } from "@acme/api";\nexport type A = AppType;\n',
+      );
+      await expect(run()).resolves.toBeDefined();
+      await writeFile(file, 'import { type AppType, app } from "@acme/api";\nexport { app };\n');
+      await expect(run()).rejects.toMatchObject({
+        stderr: expect.stringContaining("may only be imported with `import type`"),
+      });
+    } finally {
+      await (await import("node:fs/promises")).rm(file, { force: true });
+    }
+  });
+
   it("fails on an undeclared package folder", async () => {
     await mkdir(join(dir, "packages/auth"), { recursive: true });
     await writeFile(join(dir, "packages/auth/index.ts"), "export const a = 1;\n");
@@ -103,6 +121,40 @@ describe("generated guard hook", () => {
     expect(r.code).toBe(2);
     expect(r.stderr).toContain('"better-auth" cannot be installed');
     expect((await bash("pnpm add zod --filter @acme/contracts")).code).toBe(0);
+  });
+
+  it("blocks deferred dependencies behind flags such as --filter and -w", async () => {
+    for (const cmd of [
+      "pnpm --filter @acme/core add better-auth",
+      "pnpm -w add better-auth",
+      "pnpm -F @acme/core install better-auth@1.0.0",
+    ]) {
+      const r = await bash(cmd);
+      expect(r.code, cmd).toBe(2);
+      expect(r.stderr, cmd).toContain('"better-auth" cannot be installed');
+    }
+  });
+
+  it("blocks foreign package managers behind prefixes", async () => {
+    for (const cmd of [
+      "  npm install foo",
+      "sudo npm install",
+      "time npm i",
+      "env X=1 yarn add zod",
+      "corepack npm install",
+    ]) {
+      const r = await bash(cmd);
+      expect(r.code, cmd).toBe(2);
+      expect(r.stderr, cmd).toContain("pnpm");
+    }
+  });
+
+  it("only treats a redirect target as a write", async () => {
+    expect((await bash("cat architecture.json > /tmp/arch-copy")).code).toBe(0);
+    expect((await bash("cat biome.json | wc -l > /dev/null")).code).toBe(0);
+    expect((await bash("echo x > architecture.json")).code).toBe(2);
+    expect((await bash("echo x >> docs/adr/0001-x.md")).code).toBe(2);
+    expect((await bash("echo x > packages/widgets/a.ts")).code).toBe(2);
   });
 
   it("records the chosen package manager in architecture.json", async () => {
@@ -156,6 +208,33 @@ describe("generated guard hook", () => {
       content: `before\n${await readFile(join(dir, "CLAUDE.md"), "utf8")}`,
     });
     expect(outside.code).toBe(0);
+  });
+});
+
+describe("generated stop-check hook", () => {
+  const entry = () => join(dir, "node_modules/@biomejs/biome/bin/biome");
+  const stop = () => {
+    const p = execFileAsync("node", [".claude/hooks/stop-check.mjs"], {
+      cwd: dir,
+      env: { ...process.env, CLAUDE_PROJECT_DIR: dir },
+    });
+    p.child.stdin?.end("{}");
+    return p;
+  };
+
+  it("runs biome through its JS entry with the current Node, not the .bin shim", async () => {
+    await mkdir(join(dir, "node_modules/@biomejs/biome/bin"), { recursive: true });
+    try {
+      await writeFile(entry(), "process.exit(process.argv[2] === 'check' ? 0 : 3);\n");
+      await expect(stop()).resolves.toBeDefined();
+      await writeFile(entry(), "console.error('lint broke');process.exit(1);\n");
+      await expect(stop()).rejects.toMatchObject({
+        code: 2,
+        stderr: expect.stringContaining("lint broke"),
+      });
+    } finally {
+      await rm(join(dir, "node_modules"), { recursive: true, force: true });
+    }
   });
 });
 

@@ -89,15 +89,30 @@ async function askValid(
   }
 }
 
+// npm scope rules: lowercase, URL-safe, no leading dot/underscore, 214 chars at most.
+const SCOPE_RE = /^@[a-z0-9~-][a-z0-9._~-]{0,212}$/;
 const scopeError = (v: string) =>
-  v.startsWith("@") && v.length > 1 ? undefined : "--scope must start with '@'";
+  SCOPE_RE.test(v)
+    ? undefined
+    : "--scope must be a valid npm scope: '@' plus lowercase letters, digits, '-', '.', '_' or '~' (e.g. @acme)";
 const dbPrefixError = (v: string) =>
   DB_PREFIX_RE.test(v) ? undefined : "--db-prefix must match ^[a-z][a-z0-9_]{0,29}$";
-const deriveDbPrefix = (scope: string) =>
-  scope
+/** Derives a prefix from the scope and repairs it to fit DB_PREFIX_RE (leading letter, 30 chars). */
+const deriveDbPrefix = (scope: string) => {
+  const base = scope
     .slice(1)
     .toLowerCase()
     .replace(/[^a-z0-9]/g, "_");
+  return (/^[a-z]/.test(base) ? base : `db_${base}`).slice(0, 30);
+};
+/** Suggests a valid scope for a directory name (lowercase, invalid characters become '-'). */
+const suggestScope = (dirName: string) => {
+  const name = dirName
+    .toLowerCase()
+    .replace(/[^a-z0-9._~-]+/g, "-")
+    .replace(/^[._]+/, "");
+  return SCOPE_RE.test(`@${name}`) ? `@${name}` : DEFAULT_SCOPE;
+};
 
 export async function resolveOptions(
   argv: readonly string[],
@@ -136,7 +151,7 @@ export async function resolveOptions(
 
   let scope = values.scope;
   if (scope === undefined) {
-    const fallback = `@${basename(targetPath)}`;
+    const fallback = suggestScope(basename(targetPath));
     scope = interactive
       ? await askValid(prompter, "Package scope", fallback, scopeError)
       : DEFAULT_SCOPE;
