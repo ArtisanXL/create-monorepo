@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -10,10 +10,16 @@ const ROOT_FILES = [
   ".env.example",
   ".gitignore",
   ".nvmrc",
+  ".worktreeinclude",
   "biome.json",
   "compose.yaml",
+  "docs/adr/0004-worktree-isolation.md",
   "package.json",
+  "paseo.json",
   "pnpm-workspace.yaml",
+  "scripts/worktree-lib.mjs",
+  "scripts/worktree-lib.test.mjs",
+  "scripts/worktree.mjs",
   "tsconfig.base.json",
   "turbo.json",
   "vitest.config.ts",
@@ -65,6 +71,12 @@ async function listFiles(root: string, rel = ""): Promise<string[]> {
 }
 
 describe("scaffold: fresh run", () => {
+  it("makes the worktree script executable", async () => {
+    await scaffold(options(), deps());
+    const { mode } = await stat(join(dir, "scripts/worktree.mjs"));
+    expect(mode & 0o111).not.toBe(0);
+  });
+
   it("writes the root files with placeholders filled", async () => {
     const result = await scaffold(options(), deps());
 
