@@ -1,0 +1,10 @@
+{
+  "name": "__SCOPE__/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsc -p .", "generate": "drizzle-kit generate", "migrate": "drizzle-kit migrate" },
+  "dependencies": { "drizzle-orm": "catalog:", "postgres": "catalog:" },
+  "devDependencies": { "drizzle-kit": "catalog:" }
+}

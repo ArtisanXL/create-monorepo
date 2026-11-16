@@ -1,0 +1,10 @@
+{
+  "name": "__SCOPE__/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsc -p ." },
+  "dependencies": { "__SCOPE__/contracts": "workspace:*", "__SCOPE__/db": "workspace:*", "__SCOPE__/domain": "workspace:*" },
+  "devDependencies": {}
+}
