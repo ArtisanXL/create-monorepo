@@ -27,14 +27,23 @@ const ROOT_FILES = [
   "vitest.config.ts",
 ];
 
+const WORKTREE_FILES = [
+  "paseo.json",
+  ".worktreeinclude",
+  "scripts/worktree-lib.mjs",
+  "scripts/worktree-lib.test.mjs",
+  "scripts/worktree.mjs",
+  "docs/adr/0004-worktree-isolation.md",
+];
+
 let tmp: string;
 beforeEach(async () => {
   tmp = await mkdtemp(join(tmpdir(), "parity-"));
 });
 afterEach(() => rm(tmp, { recursive: true, force: true }));
 
-describe.skipIf(!parityEnabled)("bash parity: root files", () => {
-  it("TS output matches bash output for the root-file subset", async () => {
+describe.skipIf(!parityEnabled)("bash parity: root and worktree files", () => {
+  it("TS output matches bash output for the root-file and worktree subset", async () => {
     const bashDir = join(tmp, "bash");
     const tsDir = join(tmp, "ts");
     await runBash(bashDir, await createPnpmShim());
@@ -55,6 +64,6 @@ describe.skipIf(!parityEnabled)("bash parity: root files", () => {
       },
     );
 
-    expect(await diffTrees(bashDir, tsDir, ROOT_FILES)).toEqual([]);
+    expect(await diffTrees(bashDir, tsDir, [...ROOT_FILES, ...WORKTREE_FILES])).toEqual([]);
   });
 });

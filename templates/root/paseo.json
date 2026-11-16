@@ -1,0 +1,29 @@
+{
+  "worktree": {
+    "setup": [
+      "command -v pnpm >/dev/null || corepack enable --install-directory \"$HOME/.local/bin\" pnpm",
+      "pnpm install --frozen-lockfile",
+      "pnpm worktree:setup"
+    ],
+    "teardown": "pnpm worktree:teardown || true",
+    "servicePorts": { "range": "4100-4999" }
+  },
+  "scripts": {
+    "api": {
+      "type": "service",
+      "command": "PORT=$PASEO_PORT pnpm --filter __SCOPE__/api dev"
+    },
+    "web": {
+      "type": "service",
+      "command": "API_URL=http://127.0.0.1:$PASEO_SERVICE_API_PORT pnpm --filter __SCOPE__/web dev --host $HOST --port $PASEO_PORT --strictPort"
+    },
+    "worker": {
+      "type": "service",
+      "command": "pnpm --filter __SCOPE__/worker dev"
+    },
+    "test": { "command": "pnpm test" },
+    "verify": { "command": "pnpm verify" },
+    "db:migrate": { "command": "pnpm db:migrate" },
+    "worktree:info": { "command": "pnpm worktree:info" }
+  }
+}
