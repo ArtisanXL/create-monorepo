@@ -27,6 +27,8 @@ import {
   databaseName,
   databaseOf,
   ensureSecrets,
+  isWorktreeDatabase,
+  likePatternFor,
   rewriteIsolatedKeys,
   withDatabase,
   worktreeKey,
@@ -147,7 +149,7 @@ async function teardown() {
     const url = parseEnv(readFileSync(sourceEnv, "utf8")).DATABASE_URL;
     if (url) protectedDbs.add(databaseOf(url));
   }
-  if (!database.startsWith(`${PREFIX}_wt_`) || protectedDbs.has(database)) {
+  if (!isWorktreeDatabase(PREFIX, database) || protectedDbs.has(database)) {
     return warn(`refusing: ${database} belongs to the main or source checkout`);
   }
   const sql = adminSql(env);
@@ -165,9 +167,12 @@ async function gc(confirmed) {
   try {
     const rows = await sql`
       select datname, shobj_description(oid, 'pg_database') as comment
-      from pg_database where datname like ${`${PREFIX}\\_wt\\_%`}`;
+      from pg_database where datname like ${likePatternFor(PREFIX)}`;
     const orphans = rows.filter(
-      (r) => r.comment?.startsWith(COMMENT_PREFIX) && !existsSync(r.comment.slice(COMMENT_PREFIX.length)),
+      (r) =>
+        isWorktreeDatabase(PREFIX, r.datname) &&
+        r.comment?.startsWith(COMMENT_PREFIX) &&
+        !existsSync(r.comment.slice(COMMENT_PREFIX.length)),
     );
     if (orphans.length === 0) return log("no orphaned worktree databases");
     for (const r of orphans) log(`orphaned: ${r.datname} (${r.comment.slice(COMMENT_PREFIX.length)} is gone)`);

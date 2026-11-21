@@ -13,9 +13,24 @@ export function worktreeKey(worktreePath) {
   return `${slug}_${hash}`;
 }
 
+/** Separates the project prefix from the worktree key in every worktree database name. */
+export const WORKTREE_SEPARATOR = "_wt_";
+
 /** Database name for the main checkout (`key === null`) or a worktree. */
 export function databaseName(prefix, key) {
-  return key === null ? prefix : `${prefix}_wt_${key}`;
+  return key === null ? prefix : `${prefix}${WORKTREE_SEPARATOR}${key}`;
+}
+
+/** True only for a database named `<prefix>_wt_<something>`; a literal comparison, no wildcards. */
+export function isWorktreeDatabase(prefix, name) {
+  const head = `${prefix}${WORKTREE_SEPARATOR}`;
+  return typeof name === "string" && name.length > head.length && name.startsWith(head);
+}
+
+/** SQL LIKE pattern (default `\` escape) matching worktree databases of `prefix`; `\`, `%`, `_` are literal. */
+export function likePatternFor(prefix) {
+  const literal = `${prefix}${WORKTREE_SEPARATOR}`.replace(/[\\%_]/g, "\\$&");
+  return `${literal}%`;
 }
 
 /** `url` with its database name replaced; `undefined` passes through. */

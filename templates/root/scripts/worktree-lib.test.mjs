@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   databaseName,
   ensureSecrets,
+  isWorktreeDatabase,
+  likePatternFor,
   rewriteIsolatedKeys,
   withDatabase,
   worktreeKey,
@@ -19,6 +21,20 @@ describe("worktree-lib", () => {
   it("names the main and worktree databases", () => {
     expect(databaseName("app", null)).toBe("app");
     expect(databaseName("app", "icky_emu_3f9a1c")).toBe("app_wt_icky_emu_3f9a1c");
+  });
+
+  it("recognises only this prefix's worktree databases", () => {
+    expect(isWorktreeDatabase("my_app", "my_app_wt_abc_123456")).toBe(true);
+    expect(isWorktreeDatabase("my_app", "myxapp_wt_abc_123456")).toBe(false);
+    expect(isWorktreeDatabase("my_app", "my_app")).toBe(false);
+    expect(isWorktreeDatabase("my_app", "my_app_wt_")).toBe(false);
+    expect(isWorktreeDatabase("app", databaseName("app", "k_123456"))).toBe(true);
+  });
+
+  it("escapes LIKE wildcards in the prefix", () => {
+    expect(likePatternFor("my_app")).toBe("my\\_app\\_wt\\_%");
+    expect(likePatternFor("a%b")).toBe("a\\%b\\_wt\\_%");
+    expect(likePatternFor("a\\b")).toBe("a\\\\b\\_wt\\_%");
   });
 
   it("replaces only the database in a URL", () => {
