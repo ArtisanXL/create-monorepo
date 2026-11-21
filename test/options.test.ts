@@ -203,6 +203,14 @@ describe("resolveOptions: validation", () => {
     });
   });
 
+  it("rejects db prefixes containing the worktree separator", async () => {
+    for (const prefix of ["app_wt", "app_wt_foo", "a_wt"]) {
+      expect(await failure(["proj", "--db-prefix", prefix]), prefix).toMatchObject({
+        message: expect.stringContaining("_wt"),
+      });
+    }
+  });
+
   it("derives the db prefix from the scope", async () => {
     const { options } = await resolve(["proj", "--scope", "@my-shop"]);
     expect(options.dbPrefix).toBe("my_shop");
@@ -212,6 +220,12 @@ describe("resolveOptions: validation", () => {
     for (const [scope, expected] of [
       ["@1app", "db_1app"],
       ["@-", "db__"],
+      ["@app-wt", "app_w_t"],
+      ["@app-wt-x", "app_w_t_x"],
+      ["@wt-x", "wt_x"],
+      ["@1wt", "db_1wt"],
+      ["@-wt", "db__w_t"],
+      ["@app-wt-wt", "app_w_t_w_t"],
       [`@${"a".repeat(40)}`, "a".repeat(30)],
     ] as const) {
       const { options } = await resolve(["proj", "--scope", scope]);

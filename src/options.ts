@@ -94,14 +94,18 @@ const scopeError = (v: string) =>
     ? undefined
     : "--scope must be a valid npm scope: '@' plus lowercase letters, digits, '-', '.', '_' or '~' (e.g. @acme)";
 const dbPrefixError = (v: string) =>
-  DB_PREFIX_RE.test(v) ? undefined : "--db-prefix must match ^[a-z][a-z0-9_]{0,29}$";
-/** Derives a prefix from the scope and repairs it to fit DB_PREFIX_RE (leading letter, 30 chars). */
+  !DB_PREFIX_RE.test(v)
+    ? "--db-prefix must match ^[a-z][a-z0-9_]{0,29}$"
+    : v.includes("_wt")
+      ? "--db-prefix must not contain '_wt': it is the worktree database separator, so another project's databases could be mistaken for this project's worktree databases"
+      : undefined;
+/** Derives a prefix from the scope and repairs it to be valid (leading letter, no '_wt', 30 chars). */
 const deriveDbPrefix = (scope: string) => {
   const base = scope
     .slice(1)
     .toLowerCase()
     .replace(/[^a-z0-9]/g, "_");
-  return (/^[a-z]/.test(base) ? base : `db_${base}`).slice(0, 30);
+  return (/^[a-z]/.test(base) ? base : `db_${base}`).replace(/_wt/g, "_w_t").slice(0, 30);
 };
 /** Suggests a valid scope for a directory name (lowercase, invalid characters become '-'). */
 const suggestScope = (dirName: string) => {
