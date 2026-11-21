@@ -56,8 +56,10 @@ describe("worktree-lib", () => {
   describe("drop safety", () => {
     const prefix = "my_app";
     const env = (db) => `DATABASE_URL=postgres://u:p@localhost:5432/${db}\n`;
+    const envsOf = (texts) => texts.map((text, i) => ({ source: `/env${i}`, text }));
+    const protect = (texts) => protectedDatabases({ prefix, envs: envsOf(texts) });
     const may = (database, envTexts) =>
-      mayDropDatabase({ prefix, database, protected: protectedDatabases({ prefix, envTexts }) });
+      mayDropDatabase({ prefix, database, protected: protect(envTexts) });
 
     it("refuses the main database", () => {
       expect(may("my_app", [env("my_app")])).toBe(false);
@@ -79,16 +81,20 @@ describe("worktree-lib", () => {
 
     it("protects every given env, so a missing Paseo source still leaves the main .env protected", () => {
       const texts = [env("paseo_db"), env("main_db")];
-      expect(protectedDatabases({ prefix, envTexts: texts })).toEqual(
+      expect(protect(texts)).toEqual(
         new Set(["my_app", "paseo_db", "main_db"]),
       );
-      expect(protectedDatabases({ prefix, envTexts: [env("main_db")] }).has("main_db")).toBe(true);
+      expect(protect([env("main_db")]).has("main_db")).toBe(true);
     });
 
-    it("ignores missing or unparseable DATABASE_URL values", () => {
-      expect(protectedDatabases({ prefix, envTexts: ["FOO=1\n", "DATABASE_URL=not a url\n"] })).toEqual(
-        new Set(["my_app"]),
-      );
+    it("ignores a missing DATABASE_URL", () => {
+      expect(protect(["FOO=1\n"])).toEqual(new Set(["my_app"]));
+    });
+
+    it("fails closed on a malformed source URL, naming the file", () => {
+      const bad = "DATABASE_URL=postgres://u:pa/ss@localhost/my_app_wt_feat_abc123\n";
+      const decide = () => may("my_app_wt_feat_abc123", [bad]);
+      expect(decide).toThrow(/\/env0/);
     });
   });
 

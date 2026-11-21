@@ -26,7 +26,6 @@ import postgres from "postgres";
 import {
   databaseName,
   ensureSecrets,
-  isWorktreeDatabase,
   likePatternFor,
   mayDropDatabase,
   protectedDatabases,
@@ -64,17 +63,28 @@ function adminSql(env) {
   return postgres(url, { max: 1, onnotice: () => {} });
 }
 
-function existingSourceEnvs() {
+function existingSourceEnvs({ excludeOwn }) {
   return sourceEnvCandidates({
     paseoSource: process.env.PASEO_SOURCE_CHECKOUT_PATH,
     mainCheckout,
     toplevel,
-  }).filter((candidate) => candidate !== envPath && existsSync(candidate));
+  }).filter((candidate) => !(excludeOwn && candidate === envPath) && existsSync(candidate));
+}
+
+/** Databases named by any existing source .env; throws on a malformed URL so callers fail closed. */
+function protectedSourceDatabases() {
+  return protectedDatabases({
+    prefix: PREFIX,
+    envs: existingSourceEnvs({ excludeOwn: false }).map((source) => ({
+      source,
+      text: readFileSync(source, "utf8"),
+    })),
+  });
 }
 
 /** Where a missing .env is copied from, and what "unchanged" isolated values are compared to. */
 function sourceEnvPath() {
-  const found = existingSourceEnvs();
+  const found = existingSourceEnvs({ excludeOwn: true });
   if (found.length > 0) return found[0];
   throw new Error("no .env source found (expected .env.example at least)");
 }
@@ -145,10 +155,7 @@ async function setup() {
 async function teardown() {
   if (key === null) return warn("refusing to tear down the main checkout");
   const env = readEnv();
-  const protectedDbs = protectedDatabases({
-    prefix: PREFIX,
-    envTexts: existingSourceEnvs().map((path) => readFileSync(path, "utf8")),
-  });
+  const protectedDbs = protectedSourceDatabases();
   if (!mayDropDatabase({ prefix: PREFIX, database, protected: protectedDbs })) {
     return warn(`refusing: ${database} belongs to the main or source checkout`);
   }
@@ -163,6 +170,7 @@ async function teardown() {
 
 async function gc(confirmed) {
   const env = readEnv();
+  const protectedDbs = protectedSourceDatabases();
   const sql = adminSql(env);
   try {
     const rows = await sql`
@@ -170,7 +178,7 @@ async function gc(confirmed) {
       from pg_database where datname like ${likePatternFor(PREFIX)}`;
     const orphans = rows.filter(
       (r) =>
-        isWorktreeDatabase(PREFIX, r.datname) &&
+        mayDropDatabase({ prefix: PREFIX, database: r.datname, protected: protectedDbs }) &&
         r.comment?.startsWith(COMMENT_PREFIX) &&
         !existsSync(r.comment.slice(COMMENT_PREFIX.length)),
     );

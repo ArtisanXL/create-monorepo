@@ -42,16 +42,20 @@ export function sourceEnvCandidates({ paseoSource, mainCheckout, toplevel }) {
   ];
 }
 
-/** Databases that must never be dropped: the bare prefix plus each env text's DATABASE_URL database. */
-export function protectedDatabases({ prefix, envTexts }) {
+/**
+ * Databases that must never be dropped: the bare prefix plus each env's DATABASE_URL database.
+ * `envs` is `[{ source, text }]`. A malformed DATABASE_URL throws (naming its source) so callers
+ * fail closed instead of dropping a database they could not identify.
+ */
+export function protectedDatabases({ prefix, envs }) {
   const names = new Set([prefix]);
-  for (const text of envTexts) {
+  for (const { source, text } of envs) {
     const url = parseEnv(text).DATABASE_URL;
     if (!url) continue;
     try {
       names.add(databaseOf(url));
     } catch {
-      // an unparseable URL names no database
+      throw new Error(`DATABASE_URL in ${source} is not a valid URL; refusing to drop anything`);
     }
   }
   return names;
