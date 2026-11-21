@@ -9,7 +9,7 @@ import {
   isProtectedOrDir,
   packageOf,
 } from "./arch-contract.mjs";
-import { ASSIGNMENT, INTERPRETERS, SHELL_NAME, baseName, gitOptions, knownSafe, splitArgs, targetsOf } from "./shell-lex.mjs";
+import { ASSIGNMENT, INTERPRETERS, KEYWORDS, SHELL_NAME, baseName, gitOptions, knownSafe, splitArgs, targetsOf } from "./shell-lex.mjs";
 
 const toPosix = (p) => p.split(path.sep).join("/");
 
@@ -79,7 +79,7 @@ function fileRule({ contract, root, f }, tool, ti, claudeMdText) {
 }
 
 
-const WRITERS = new Set(["mkdir", "touch", "cp", "mv", "rm", "tee", "truncate", "ln", "install", "chmod", "chown", "chgrp"]);
+const WRITERS = new Set(["mkdir", "touch", "cp", "mv", "rm", "tee", "truncate", "ln", "install", "chmod", "chown", "chgrp", "unlink", "shred", "rmdir"]);
 const EVAL_FLAG = /^(?:-[A-Za-z]*[ecEp]|--eval(?:=.*)?|--print(?:=.*)?)$/;
 // Programs that run a command string given to their -c flag.
 const COMMAND_STRING_RUNNERS = new Set(["su", "flock", "script", "runuser", "sg"]);
@@ -141,7 +141,7 @@ const MSG = {
   gitConfig: "git -c include.path / includeIf pulls in a config file the guard cannot inspect; set the options you need directly.",
   gitConfigEnv:
     "git --config-env names an environment variable the guard cannot see; assign it in the same command or pass the value directly.",
-  reset: "git reset --hard to another revision rewrites protected files too; only humans may do that. Plain `git reset --hard` and `--hard HEAD` are fine.",
+  reset: "git reset --hard to another revision rewrites protected files too; only humans may do that. Plain `git reset --hard`, `--hard HEAD`, `HEAD~N` and `git reset --soft` are fine.",
   decode:
     "A decoded or decompressed stream is run by a shell or interpreter, so the guard cannot inspect it. Decode it to a file you can read, or run the commands directly.",
   complex: "Command is too complex for the guard to check; split it into simpler commands.",
@@ -149,6 +149,8 @@ const MSG = {
 };
 
 /** git clean/checkout/restore/rm/mv aimed at protected paths (also behind `sudo -u x git ...`). */
+// HEAD and revisions relative to it (`HEAD~2`, `HEAD^`, `@{u}`, `HEAD@{1}`, `ORIG_HEAD`): resetting to them stays in the current history.
+const HEAD_RELATIVE = /^(?:HEAD|@)?(?:~\d*|\^\d*|@\{[^}]*\})*$|^ORIG_HEAD$/;
 const INCLUDE_KEY = /^include(?:if\..+)?\.path$/i;
 // Config keys that name a program or file git runs or reads.
 const COMMAND_KEY = /pager|editor|ssh|askpass|fsmonitor|external|textconv|command|driver|clean|smudge|process|helper|program|hookspath|alias|include|exec/i;
@@ -173,18 +175,19 @@ function assignedValues({ vars, segments }, name) {
 function globHitsProtected(contract, rel) {
   const star = rel.search(/[*?[]/);
   if (star < 0) return false;
+  if (rel.length > 512) return true;
   const head = rel.slice(0, star);
-  let re;
+  // Fails closed: a pattern the regex engine cannot compile or run counts as a hit.
   try {
-    re = new RegExp(`^${rel.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
+    const re = new RegExp(`^${rel.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
+    for (const p of contract.protectedPaths) {
+      const dir = p.endsWith("/");
+      const parts = (dir ? p.slice(0, -1) : p).split("/");
+      for (let k = 1; k <= parts.length; k++) if (re.test(parts.slice(0, k).join("/"))) return true;
+      if (dir && (head.startsWith(p) || (rel[star] === "*" && p.startsWith(head)))) return true;
+    }
   } catch {
     return true;
-  }
-  for (const p of contract.protectedPaths) {
-    const dir = p.endsWith("/");
-    const parts = (dir ? p.slice(0, -1) : p).split("/");
-    for (let k = 1; k <= parts.length; k++) if (re.test(parts.slice(0, k).join("/"))) return true;
-    if (dir && (head.startsWith(p) || (rel[star] === "*" && p.startsWith(head)))) return true;
   }
   return false;
 }
@@ -206,7 +209,7 @@ function gitRule(env, words, bases, parsed) {
   }
   if (sub === "reset") {
     const r = splitArgs(args.slice(i + 1));
-    return r.flags.includes("--hard") && r.operands.some((o) => o.text !== "HEAD" && o.text !== "@") ? MSG.reset : undefined;
+    return r.flags.includes("--hard") && r.operands.some((o) => !HEAD_RELATIVE.test(o.text)) ? MSG.reset : undefined;
   }
   if (!["clean", "checkout", "restore", "rm", "mv"].includes(sub ?? "")) return undefined;
   const gb = [...bases, ...dirs.map((d) => path.resolve(env.root, expand(d)))];
@@ -323,7 +326,8 @@ function fallbackRule(env, parsed, idx, writeRels) {
     return WRITERS.has(n) || n === "dd" || ((n === "sed" || n === "perl") && inPlace(n, s.words.slice(k + 1).map((x) => x.text)));
   });
   const writer = at < 0 ? undefined : s.words[at];
-  if (!writer && !s.words[0]?.text.startsWith("$")) return undefined;
+  const head = s.words.find((w) => !KEYWORDS.has(w.text));
+  if (!writer && !head?.text.startsWith("$") && !head?.fromVar) return undefined;
   const wname = writer ? word(writer) : "";
   const after = s.words.slice(at < 0 ? 1 : at + 1);
   const prev = idx > s.pipeStart ? parsed.segments[idx - 1] : undefined;
@@ -348,15 +352,28 @@ const inPlace = (name, flags) =>
   (name === "sed" && flags.some((x) => /^-[A-Za-z]*i|^--in-place/.test(x))) ||
   (name === "perl" && flags.some((x) => /^-[A-Za-z]*i/.test(x)));
 
-const WRITE_WORD = /\b(?:mkdir|touch|cp|mv|rm|tee|truncate|ln|install|dd|chmod|chown|chgrp)\b|\bsed\s+-i|\bperl\s+-p?i/;
+const WRITE_WORD = /\b(?:mkdir|touch|cp|mv|rm|tee|truncate|ln|install|dd|chmod|chown|chgrp|unlink|shred|rmdir)\b|\bsed\s+-i|\bperl\s+-p?i/;
 // File-changing calls of interpreters (node fs, python os/shutil/pathlib, perl): counted when an interpreter runs run-time text.
-const INTERP_WRITE =
-  /\b(?:unlink|unlinkSync|rm|rmSync|rmdir|rmdirSync|rmtree|writeFile|writeFileSync|appendFile|appendFileSync|rename|renameSync|copyFile|copyFileSync|cpSync|truncate|truncateSync|createWriteStream|remove|removedirs|replace|move|copy|copy2|copyfile|copytree|write_text|write_bytes|symlink|symlinkSync|chmod|chmodSync)\b|\bopen\w*\s*\(\s*[^,()]+,\s*["'][rwabxt+]*[wa+][rwabxt+]*["']|\bopen\b[^;\n]{0,80}["']\s*\+?>/;
+const INTERP_WRITE = new RegExp(
+  [
+    // node fs: fs.unlinkSync(, fs.promises.rm(, writeFile(, ...
+    String.raw`\b(?:unlink|unlinkSync|rmSync|rmdirSync|writeFile|writeFileSync|appendFile|appendFileSync|rename|renameSync|copyFile|copyFileSync|cpSync|truncate|truncateSync|createWriteStream|symlinkSync|chmodSync)\s*\(`,
+    String.raw`\.(?:rm|rmdir|cp|copy|unlink|write_text|write_bytes|rename|replace|touch|symlink_to|chmod)\s*\(`,
+    // python: os.remove(, shutil.rmtree(, ...
+    String.raw`\bos\.(?:remove|unlink|rename|replace|removedirs|rmdir|truncate|chmod|chown|symlink|link)\s*\(`,
+    String.raw`\bshutil\.\w+\s*\(`,
+    // perl: unlink 'x', rename(...)
+    String.raw`\b(?:unlink|rmdir|rename|truncate|chmod|chown|symlink)(?=[ \t(])`,
+    // open(path, "w" | "a" | "+")
+    String.raw`\bopen\w*\s*\(\s*[^,()]+,\s*["'][rwabxt+]*[wa+][rwabxt+]*["']`,
+    String.raw`\bopen\b[^;\n]{0,80}["']\s*\+?>`,
+  ].join("|"),
+);
 // A recursive delete, `-delete`, `--delete` or a move: with a folder that holds protected paths it destroys them.
 const FOLDER_DELETE = /\brm[ \t]+(?:-\S+[ \t]+){0,5}?-[A-Za-z]*[rR]|\brm\b.{0,20}--recursive|[ \t]-delete\b|--delete|\bmv\b|\brmdir\b/;
 // Decoders and decompressors; their output piped into a shell or interpreter cannot be inspected.
 const DECODER =
-  /\b(?:base64|base32|basenc)\b.{0,40}?(?:[ \t]-[A-Za-z]*[dD]\b|--decode)|\bxxd\b.{0,40}?[ \t]-[A-Za-z]*r|\bopenssl\b.{0,40}?[ \t]-d\b|\b(?:gunzip|gzcat|zcat|bzcat|xzcat|unxz|bunzip2|unzstd|zstdcat|uudecode)\b|\b(?:gzip|bzip2|xz|zstd)\b.{0,30}?[ \t]-[A-Za-z]*d\b/;
+  /\b(?:base64|base32|basenc)\b.{0,40}?(?:[ \t]-[A-Za-z]*[dD]\b|--decode)|\bxxd\b.{0,40}?[ \t]-[A-Za-z]*r|\bopenssl\b.{0,40}?[ \t]-d\b|\b(?:gunzip|gzcat|zcat|bzcat|xzcat|unxz|bunzip2|unzstd|zstdcat|uudecode)\b|\b(?:gzip|bzip2|xz|zstd)\b.{0,30}?[ \t]-[A-Za-z]*d[A-Za-z]*\b/;
 
 /**
  * Backstop for text that becomes a command at run time (`echo 'rm x' | sh`, `bash <<< '...'`, `bash <(...)`,
@@ -529,15 +546,15 @@ function directRule(ctx, cmd, parsed) {
   return undefined;
 }
 
-function bashRule(ctx, cmd, depth = 0, vars = new Map()) {
-  const parsed = targetsOf(cmd, ctx.root, ctx.expand, ctx.f, vars);
+function bashRule(ctx, cmd, depth = 0, scope = undefined) {
+  const parsed = targetsOf(cmd, ctx.root, ctx.expand, ctx.f, scope);
   const own = directRule(ctx, cmd, parsed);
   if (own !== undefined) return own;
   // The same rules apply to every command string another command runs (`bash -c`, `eval`, `$(...)`...).
   const inner = innerStrings(parsed);
   if (depth >= 3) return inner.length ? MSG.nested : undefined;
   for (const item of inner) {
-    const msg = bashRule(ctx, typeof item === "string" ? item : item.text, depth + 1, parsed.vars);
+    const msg = bashRule(ctx, typeof item === "string" ? item : item.text, depth + 1, { vars: parsed.vars, budget: parsed.budget });
     if (msg !== undefined) return typeof item === "string" ? msg : `${msg} ${item.hint}`;
   }
   return undefined;

@@ -6,7 +6,7 @@ import path from "node:path";
 const WRAPPERS = new Set([
   "sudo", "time", "env", "command", "exec", "nohup", "nice", "corepack", "npx", "bunx", "xargs", "builtin",
 ]);
-const KEYWORDS = new Set(["if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}"]);
+export const KEYWORDS = new Set(["if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}"]);
 export const ASSIGNMENT = /^[A-Za-z_]\w*=/;
 export const INTERPRETERS = /^(?:node|nodejs|bun|deno|python[\d.]*|perl|ruby|php|tsx|ts-node)$/;
 export const SHELL_NAME = /^(?:ba|z|da|k|a)?sh$/;
@@ -267,13 +267,18 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
       nested.push(cmd.slice(i + 2, e));
       i = e + 1;
     } else if (c === "(") {
+      if (cur?.text.endsWith("$")) cur.dyn = true;
       depth++;
       end(";");
     } else if (c === ")") {
       if (stopAtClose && depth === 0) break;
       depth = Math.max(0, depth - 1);
       end(";");
-    } else if (c === "\n" || c === ";" || c === "`") end(";");
+    } else if (c === "`") {
+      // An unquoted backtick ends the word but leaves its value to run time (`X=`cmd``).
+      if (cur !== null) cur.dyn = true;
+      end(";");
+    } else if (c === "\n" || c === ";") end(";");
     else if (c === "&" && cmd[i + 1] !== ">") {
       const sep = cmd[i + 1] === "&" ? "&&" : "&";
       end(sep);
@@ -414,36 +419,57 @@ export function knownSafe(seg, fold) {
 const VAR_REF = /\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g;
 const IFS_REF = /\$(?:\{IFS\}|IFS(?!\w))(?:\$[0-9])?/g;
 const MAX_VAR_LENGTH = 1024;
+// Total characters variable substitution may produce in one decision, shared by nested strings.
+const MAX_EXPANSION = 65_536;
 const ASSIGNING = new Set(["export", "declare", "typeset", "readonly", "local"]);
+const ASSIGN_WORD = /^([A-Za-z_]\w*)(\+?)=/;
+// Commands that set the variables named by their bare arguments.
+const SETTERS = new Set(["read", "getopts", "mapfile", "readarray", "unset", "printf", "select", "for"]);
 
 /** `$NAME` / `${NAME}` replaced by the value assigned earlier in the line; `$IFS` / `${IFS}` become a space. */
-const expandVars = (text, vars) =>
-  text.replace(IFS_REF, " ").replace(VAR_REF, (m, a, b) => vars.get(a ?? b) ?? m);
+function expandVars(text, vars, budget) {
+  const spend = (v) => {
+    budget.left -= v.length;
+    return budget.left < 0 ? "" : v;
+  };
+  return text.replace(IFS_REF, () => spend(" ")).replace(VAR_REF, (m, a, b) => {
+    const v = vars.get(a ?? b);
+    return v === undefined ? m : spend(v);
+  });
+}
 
 /**
  * Records `NAME=value` segments (also behind `export`) in `vars` and substitutes known variables into the
- * words and redirect targets of every other segment, splitting a word that expanded to several.
+ * words and redirect targets of every other segment, splitting a word that expanded to several. A value
+ * built at run time (`$(...)`, backticks), appended to (`+=`) or set by `read`, `getopts`, `for`... is
+ * forgotten, so `$NAME` stays unexpanded and the rules for variables of unknown value apply.
+ * Returns false once the expansion budget is spent.
  */
-function applyVars(seg, vars) {
+function applyVars(seg, vars, budget) {
   const first = seg.words[0]?.text;
   const rest = first !== undefined && ASSIGNING.has(first) ? seg.words.slice(1) : seg.words;
-  if (rest.length && rest.every((w) => ASSIGNMENT.test(w.text))) {
+  if (rest.length && rest.every((w) => ASSIGN_WORD.test(w.text))) {
     for (const w of rest) {
-      const eq = w.text.indexOf("=");
-      // Capped so that `X=$X$X` repeated cannot double the text on every assignment.
-      vars.set(w.text.slice(0, eq), expandVars(w.text.slice(eq + 1), vars).slice(0, MAX_VAR_LENGTH));
+      const m = ASSIGN_WORD.exec(w.text);
+      const value = expandVars(w.text.slice(m[0].length), vars, budget);
+      if (w.dyn || (m[2] && !vars.has(m[1]))) vars.delete(m[1]);
+      else vars.set(m[1], ((m[2] ? vars.get(m[1]) : "") + value).slice(0, MAX_VAR_LENGTH));
     }
-    return;
+    return budget.left >= 0;
   }
+  const at = seg.words.findIndex((w) => !ASSIGN_WORD.test(w.text) && !KEYWORDS.has(w.text));
+  if (at >= 0 && SETTERS.has(seg.words[at].text))
+    for (const w of seg.words.slice(at + 1)) if (/^[A-Za-z_]\w*$/.test(w.text)) vars.delete(w.text);
   seg.words = seg.words.flatMap((w) => {
     if (!w.text.includes("$")) return [w];
-    const text = expandVars(w.text, vars);
-    if (text === w.text) return [w];
+    const text = expandVars(w.text, vars, budget);
+    if (text === w.text || budget.left < 0) return [w];
     const parts = text.split(/\s+/).filter(Boolean);
-    return (parts.length ? parts : [""]).map((t) => ({ ...w, text: t }));
+    return (parts.length ? parts : [""]).map((t) => ({ ...w, text: t, fromVar: true }));
   });
-  for (const r of seg.redirs) r.target = expandVars(r.target, vars);
-  for (const r of seg.inputs) r.target = expandVars(r.target, vars);
+  for (const r of seg.redirs) r.target = expandVars(r.target, vars, budget);
+  for (const r of seg.inputs) r.target = expandVars(r.target, vars, budget);
+  return budget.left >= 0;
 }
 
 /**
@@ -456,23 +482,25 @@ function applyVars(seg, vars) {
  * @param {string} root
  * @param {(t: string) => string} [expand] applied to every path word (home, case folding)
  * @param {(t: string) => string} [fold] applied to command names
- * @param {Map<string, string>} [outer] variables assigned before this string runs (`X=a; bash -c 'rm $X'`)
+ * @param {{ vars: Map<string, string>, budget: { left: number } }} [outer] variables assigned before this string
+ *   runs (`X=a; bash -c 'rm $X'`) and the substitution budget shared with the strings around it
  */
-export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer = new Map()) {
-  const vars = new Map(outer);
+export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer = { vars: new Map(), budget: { left: MAX_EXPANSION } }) {
+  const vars = new Map(outer.vars);
+  const { budget } = outer;
   const commands = [];
   const redirects = [];
   const segments = [];
-  if (cmd.length > MAX_COMMAND_LENGTH) return { commands, redirects, segments, nested: [], vars, tooComplex: true };
+  if (cmd.length > MAX_COMMAND_LENGTH || budget.left < 0) return { commands, redirects, segments, nested: [], vars, budget, tooComplex: true };
   const parsed = shellSegments(cmd);
-  if (parsed.complex) return { commands, redirects, segments, nested: [], vars, tooComplex: true };
+  if (parsed.complex) return { commands, redirects, segments, nested: [], vars, budget, tooComplex: true };
   let chain = root;
   let bases = [root];
   let tight = [root];
   let cds = 0;
   let pipeStart = 0;
   for (const seg of parsed.segments) {
-    applyVars(seg, vars);
+    if (!applyVars(seg, vars, budget)) return { commands, redirects, segments, nested: parsed.nested, vars, budget, tooComplex: true };
     for (const r of seg.redirs) redirects.push({ op: r.op, target: r.target, bases });
     const found = commandsOf(seg.words, fold);
     const bodies = seg.heredocs.map((h) => h.body);
@@ -483,7 +511,7 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer =
       if (c.name !== "cd" && c.name !== "pushd") continue;
       const dir = splitArgs(c.args).operands[0];
       if (!dir || dir.text === "-") continue;
-      if (++cds > MAX_CDS) return { commands, redirects, segments, nested: parsed.nested, vars, tooComplex: true };
+      if (++cds > MAX_CDS) return { commands, redirects, segments, nested: parsed.nested, vars, budget, tooComplex: true };
       chain = path.resolve(chain, expand(dir.text));
       bases = [...new Set([...bases, chain, path.resolve(root, expand(dir.text))])];
       if (seg.sep === "&&" || seg.sep === ";") tight = [chain];
@@ -515,5 +543,5 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer =
     const interp = [seg, ...pipe].some((x) => x.words.some((w) => !w.quoted && INTERPRETERS.test(fold(baseName(w.text)))));
     if (interp) seg.codeBodies = seg.bodies;
   }
-  return { commands, redirects, segments, nested: parsed.nested, checked, vars, tooComplex: false };
+  return { commands, redirects, segments, nested: parsed.nested, checked, vars, budget, tooComplex: false };
 }

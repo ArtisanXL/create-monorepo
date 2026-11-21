@@ -1193,9 +1193,9 @@ describe("guard decision: remaining limits (#34)", () => {
       "git restore -s HEAD~5 '*.json'",
       "git restore --source=main '*'",
       "git restore --source=main 'scripts/*.mjs'",
-      "git reset --hard HEAD~5",
-      "git reset --hard HEAD~3",
       "git reset --hard origin/main",
+      "git reset --hard v1.0.0",
+      "git reset --hard feature/x~2",
       "git reset --hard abc1234",
       "git reset -q --hard main",
     ])("blocks %s", (cmd) => {
@@ -1206,6 +1206,15 @@ describe("guard decision: remaining limits (#34)", () => {
       "git reset --hard",
       "git reset --hard HEAD",
       "git reset --hard @",
+      "git reset --hard HEAD~1",
+      "git reset --hard HEAD~5",
+      "git reset --hard HEAD^",
+      "git reset --hard HEAD^^",
+      "git reset --hard @~2",
+      "git reset --hard @{u}",
+      "git reset --hard @{upstream}",
+      "git reset --hard ORIG_HEAD",
+      "git reset --hard HEAD@{1}",
       "git reset --soft HEAD~1",
       "git reset HEAD~1",
       "git reset HEAD file.ts",
@@ -1234,6 +1243,9 @@ describe("guard decision: remaining limits (#34)", () => {
       "chgrp wheel docs/adr/0001-package-boundaries.md",
       "sudo chmod 777 .github/workflows/ci.yml",
       "echo 'chmod 000 architecture.json' | sh",
+      "unlink architecture.json",
+      "shred -u architecture.json",
+      "rmdir docs/adr",
     ])("blocks %s", (cmd) => {
       expect(blocked(bash(cmd)), cmd).toBeDefined();
     });
@@ -1246,6 +1258,73 @@ describe("guard decision: remaining limits (#34)", () => {
     ])("allows %s", (cmd) => {
       expect(bash(cmd), cmd).toEqual({ allow: true });
     });
+  });
+
+  describe("variables of unknown value (audit of #36)", () => {
+    it.each([
+      `X="$(printf '\\x72\\x6d')"; $X architecture.json`,
+      "X=`printf '\\x72\\x6d'`; $X architecture.json",
+      `X="$(cat f)"; $X architecture.json`,
+      `X="$(printf r)"m; $X architecture.json`,
+      "X=r; X+=m; $X architecture.json",
+      "X=echo; read X < f; $X architecture.json",
+      "X=echo; getopts r X; $X architecture.json",
+      "X=echo; for X in a b; do $X architecture.json; done",
+      "X=echo; printf -v X rm; $X architecture.json",
+      "X=echo; mapfile X < f; $X architecture.json",
+      "X=echo; unset X; $X architecture.json",
+      `export X="$(cat f)"; $X architecture.json`,
+      "X=$(cat f); $X architecture.json",
+    ])("blocks %s", (cmd) => {
+      expect(blocked(bash(cmd)), cmd).toBeDefined();
+    });
+
+    it.each([
+      'TMP="$(mktemp -d)"; cp x "$TMP"; rm -rf "$TMP"',
+      "TMP=`mktemp -d`; rm -rf $TMP",
+      'd="$(mktemp -d)" && cd "$d" && rm -rf "$d"',
+      "TMP=$(mktemp -d); rm -rf $TMP",
+    ])("allows %s", (cmd) => {
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+    });
+  });
+
+  describe("expansion budget (audit of #36)", () => {
+    const X = "a ".repeat(512).trim();
+    it.each([
+      ["many references in one word", `X='${X}'; echo ${"$X".repeat(20_000)}`],
+      ["many references as words", `X='${X}'; echo ${"$X ".repeat(15_000)}`],
+      ["inside bash -c", `X='${X}'; bash -c "echo ${"$X".repeat(15_000)}"`],
+      ["chained doubling", `A='${X}'; B=$A$A; C=$B$B; D=$C$C; echo ${"$D".repeat(10_000)}`],
+    ])("is bounded: %s", (_n, cmd) => {
+      const t0 = performance.now();
+      const r = bash(cmd);
+      expect(performance.now() - t0).toBeLessThan(500);
+      expect(blocked(r)).toContain("too complex");
+    });
+
+    it("still expands ordinary uses", () => {
+      expect(blocked(bash("X=architecture.json; rm $X $X $X"))).toBeDefined();
+    });
+  });
+
+  describe("review follow-ups (audit of #36)", () => {
+    it("blocks an oversized glob after a revision instead of crashing", () => {
+      const r = bash(`git checkout HEAD~5 -- '${"a*".repeat(6000)}'`);
+      expect(blocked(r)).toBeDefined();
+    });
+
+    it("keeps plain interpreter scripts with copy in a name allowed", () => {
+      expect(bash("tsx tools/copy-assets.ts && cat vitest.config.ts")).toEqual({ allow: true });
+      expect(bash("echo 'copy-assets' | node")).toEqual({ allow: true });
+    });
+
+    it.each(["gzip -dc x.gz | sh", "gzip -cd x.gz | bash", "zcat x.gz | node"])(
+      "blocks %s",
+      (cmd) => {
+        expect(blocked(bash(cmd)), cmd).toBeDefined();
+      },
+    );
   });
 
   it("documents remaining limits: allowed, CI arch-check is the backstop", () => {
