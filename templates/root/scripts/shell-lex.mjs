@@ -357,7 +357,7 @@ export function gitOptions(args) {
   const dirs = [];
   for (; i < args.length; i++) {
     const t = args[i].text;
-    if (t === "-C" || t === "-c" || /^--(?:git-dir|work-tree|namespace)$/.test(t)) {
+    if (t === "-C" || t === "-c" || /^--(?:git-dir|work-tree|namespace|config-env)$/.test(t)) {
       if (t === "-C" && args[i + 1]) dirs.push(args[i + 1].text);
       i++;
     } else if (!t.startsWith("-")) break;
@@ -411,6 +411,41 @@ export function knownSafe(seg, fold) {
   return READ_ONLY.has(name);
 }
 
+const VAR_REF = /\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g;
+const IFS_REF = /\$(?:\{IFS\}|IFS(?!\w))(?:\$[0-9])?/g;
+const MAX_VAR_LENGTH = 1024;
+const ASSIGNING = new Set(["export", "declare", "typeset", "readonly", "local"]);
+
+/** `$NAME` / `${NAME}` replaced by the value assigned earlier in the line; `$IFS` / `${IFS}` become a space. */
+const expandVars = (text, vars) =>
+  text.replace(IFS_REF, " ").replace(VAR_REF, (m, a, b) => vars.get(a ?? b) ?? m);
+
+/**
+ * Records `NAME=value` segments (also behind `export`) in `vars` and substitutes known variables into the
+ * words and redirect targets of every other segment, splitting a word that expanded to several.
+ */
+function applyVars(seg, vars) {
+  const first = seg.words[0]?.text;
+  const rest = first !== undefined && ASSIGNING.has(first) ? seg.words.slice(1) : seg.words;
+  if (rest.length && rest.every((w) => ASSIGNMENT.test(w.text))) {
+    for (const w of rest) {
+      const eq = w.text.indexOf("=");
+      // Capped so that `X=$X$X` repeated cannot double the text on every assignment.
+      vars.set(w.text.slice(0, eq), expandVars(w.text.slice(eq + 1), vars).slice(0, MAX_VAR_LENGTH));
+    }
+    return;
+  }
+  seg.words = seg.words.flatMap((w) => {
+    if (!w.text.includes("$")) return [w];
+    const text = expandVars(w.text, vars);
+    if (text === w.text) return [w];
+    const parts = text.split(/\s+/).filter(Boolean);
+    return (parts.length ? parts : [""]).map((t) => ({ ...w, text: t }));
+  });
+  for (const r of seg.redirs) r.target = expandVars(r.target, vars);
+  for (const r of seg.inputs) r.target = expandVars(r.target, vars);
+}
+
 /**
  * The commands and redirects of a shell command line, each with the directories it may run in.
  * `bases` are absolute and grow linearly: the project root, the chain of every `cd` / `pushd` target
@@ -421,20 +456,23 @@ export function knownSafe(seg, fold) {
  * @param {string} root
  * @param {(t: string) => string} [expand] applied to every path word (home, case folding)
  * @param {(t: string) => string} [fold] applied to command names
+ * @param {Map<string, string>} [outer] variables assigned before this string runs (`X=a; bash -c 'rm $X'`)
  */
-export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t) {
+export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer = new Map()) {
+  const vars = new Map(outer);
   const commands = [];
   const redirects = [];
   const segments = [];
-  if (cmd.length > MAX_COMMAND_LENGTH) return { commands, redirects, segments, nested: [], tooComplex: true };
+  if (cmd.length > MAX_COMMAND_LENGTH) return { commands, redirects, segments, nested: [], vars, tooComplex: true };
   const parsed = shellSegments(cmd);
-  if (parsed.complex) return { commands, redirects, segments, nested: [], tooComplex: true };
+  if (parsed.complex) return { commands, redirects, segments, nested: [], vars, tooComplex: true };
   let chain = root;
   let bases = [root];
   let tight = [root];
   let cds = 0;
   let pipeStart = 0;
   for (const seg of parsed.segments) {
+    applyVars(seg, vars);
     for (const r of seg.redirs) redirects.push({ op: r.op, target: r.target, bases });
     const found = commandsOf(seg.words, fold);
     const bodies = seg.heredocs.map((h) => h.body);
@@ -445,7 +483,7 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t) {
       if (c.name !== "cd" && c.name !== "pushd") continue;
       const dir = splitArgs(c.args).operands[0];
       if (!dir || dir.text === "-") continue;
-      if (++cds > MAX_CDS) return { commands, redirects, segments, nested: parsed.nested, tooComplex: true };
+      if (++cds > MAX_CDS) return { commands, redirects, segments, nested: parsed.nested, vars, tooComplex: true };
       chain = path.resolve(chain, expand(dir.text));
       bases = [...new Set([...bases, chain, path.resolve(root, expand(dir.text))])];
       if (seg.sep === "&&" || seg.sep === ";") tight = [chain];
@@ -477,5 +515,5 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t) {
     const interp = [seg, ...pipe].some((x) => x.words.some((w) => !w.quoted && INTERPRETERS.test(fold(baseName(w.text)))));
     if (interp) seg.codeBodies = seg.bodies;
   }
-  return { commands, redirects, segments, nested: parsed.nested, checked, tooComplex: false };
+  return { commands, redirects, segments, nested: parsed.nested, checked, vars, tooComplex: false };
 }

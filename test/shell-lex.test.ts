@@ -46,4 +46,13 @@ describe("shell lexer", () => {
       operands: [{ text: "x" }, { text: "-y" }],
     });
   });
+
+  it("substitutes variables assigned earlier in the line and treats $IFS as whitespace", () => {
+    expect(words("X=rm; Y=a.json; $X $Y")).toEqual([["X=rm"], ["Y=a.json"], ["rm", "a.json"]]);
+    expect(words("echo $UNSET; rm$" + "{IFS}x")).toEqual([
+      ["echo", "$UNSET"],
+      ["rm", "x"],
+    ]);
+    expect(targetsOf("X=1", "/proj").vars.get("X")).toBe("1");
+  });
 });
