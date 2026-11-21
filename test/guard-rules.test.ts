@@ -420,3 +420,112 @@ describe("guard decision: bypass hardening (#29)", () => {
     });
   });
 });
+
+describe("guard decision: audit follow-ups (#29)", () => {
+  const PROTECTED = "protected path";
+
+  it("follows chained cd, pushd and cd options", () => {
+    for (const cmd of [
+      "cd apps/api && cd ../../scripts && echo > guard-rules.mjs",
+      "cd -- scripts && echo > guard-rules.mjs",
+      "cd -P scripts && echo > guard-rules.mjs",
+      "pushd scripts && rm guard-rules.mjs",
+      "cd apps; cd ../scripts; touch guard-rules.mjs",
+    ])
+      expect(blocked(bash(cmd)), cmd).toContain(PROTECTED);
+  });
+
+  it("blocks rm/mv behind a path, backslash, quotes or -t", () => {
+    for (const cmd of [
+      "/bin/rm -rf docs",
+      "\\rm -rf docs",
+      '"rm" -rf docs',
+      "'rm' -rf scripts",
+      "mv -t /tmp docs",
+      "mv --target-directory=/tmp scripts",
+      "sudo rm -rf docs",
+      "find . -exec rm -rf docs ;",
+    ])
+      expect(blocked(bash(cmd)), cmd).toContain("protected paths");
+  });
+
+  it("does not block rm of . after a cd elsewhere", () => {
+    expect(bash("cd /tmp/work && rm -rf .")).toEqual({ allow: true });
+    expect(bash("cd apps/api && rm -rf ./")).toEqual({ allow: true });
+    expect(blocked(bash("rm -rf ."))).toContain("protected paths");
+    expect(blocked(bash("cd apps && cd .. && rm -rf ."))).toContain("protected paths");
+  });
+
+  it("resolves only operands against cd bases, never command names or flags", () => {
+    expect(bash("cd apps && touch api/src/x.ts")).toEqual({ allow: true });
+    expect(bash("cd apps && mkdir -p web/src/components")).toEqual({ allow: true });
+    expect(blocked(bash("cd apps && mkdir -p newpkg/src"))).toContain("not a package declared");
+  });
+
+  it("does not treat quoted text as commands", () => {
+    expect(bash('git commit -m "docs: rm docs mention"')).toEqual({ allow: true });
+    expect(bash("echo 'rm -rf docs'")).toEqual({ allow: true });
+    expect(bash("node -e \"console.log('scripts are fine')\"")).toEqual({ allow: true });
+    expect(bash("node scripts/arch-check.mjs -c")).toEqual({ allow: true });
+    expect(bash("python3 -m pytest -c pytest.ini")).toEqual({ allow: true });
+  });
+
+  it("blocks one-liners that mention a protected folder as a path or quoted literal", () => {
+    expect(blocked(bash(`node -e "fs.rmSync('docs',{recursive:true})"`))).toBeDefined();
+    expect(blocked(bash(`node -e "fs.rmSync('docs/',{recursive:true})"`))).toBeDefined();
+    expect(blocked(bash(`node -pe "require('fs').readdirSync('scripts')"`))).toBeDefined();
+    expect(blocked(bash(`deno eval "Deno.removeSync('architecture.json')"`))).toBeDefined();
+    expect(blocked(bash(`npx tsx -e "fs.rmSync('biome.json')"`))).toBeDefined();
+    expect(blocked(bash(`perl -pi -e 's/a/b/' architecture.json`))).toBeDefined();
+  });
+
+  it("fails closed when shell strings nest too deeply", () => {
+    const deep = `bash -c "bash -c \\"bash -c \\\\\\"bash -c \\\\\\\\\\\\\\"npm install\\\\\\\\\\\\\\"\\\\\\"\\""`;
+    expect(blocked(bash(deep))).toBeDefined();
+  });
+
+  it("follows >| and >& redirects", () => {
+    expect(blocked(bash("echo x >| architecture.json"))).toContain(PROTECTED);
+    expect(blocked(bash("echo x >& architecture.json"))).toContain(PROTECTED);
+    expect(blocked(bash("echo x &> architecture.json"))).toContain(PROTECTED);
+    expect(bash("echo x 2>&1")).toEqual({ allow: true });
+    expect(bash("echo x >&2")).toEqual({ allow: true });
+  });
+
+  it("blocks whole-tree reverts from a revision", () => {
+    for (const cmd of [
+      "git checkout HEAD~5 -- .",
+      "git checkout main .",
+      "git restore --source=HEAD~5 .",
+      "git restore -s HEAD~5 .",
+    ])
+      expect(blocked(bash(cmd)), cmd).toContain("via git");
+    expect(bash("git checkout -- .")).toEqual({ allow: true });
+    expect(bash("git restore .")).toEqual({ allow: true });
+  });
+
+  it("documents known limits: these are allowed, CI arch-check is the backstop", () => {
+    for (const cmd of [
+      "echo 'rm -rf docs' | sh",
+      'bash <<< "npm install"',
+      "eval npm install",
+      "node <<EOF\nrequire('fs').rmSync('scripts/guard-rules.mjs')\nEOF",
+      "echo docs | xargs rm -rf",
+      "find docs -delete",
+      "git reset --hard HEAD~5",
+      "rm -rf d*",
+    ])
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+    // Windows aliases for the same file are not normalised.
+    for (const name of ["architecture.json.", "architecture.json::$DATA"])
+      expect(
+        decide({
+          tool: "Write",
+          input: { file_path: name, content: "x" },
+          contract,
+          root,
+          platform: "win32",
+        }),
+      ).toEqual({ allow: true });
+  });
+});

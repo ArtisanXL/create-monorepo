@@ -79,59 +79,263 @@ function fileRule({ contract, root, f }, tool, ti, claudeMdText) {
 
 const SHELL_STRING =
   /\b(?:(?:(?:ba|z|da|k)?sh\s+(?:-\S+\s+)*?-[A-Za-z]*c)|eval)\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')/g;
-const INTERPRETER = /\b(?:node|nodejs|bun|deno|python[\d.]*|perl|ruby|php)\b[^|;&\n]*?\s-(?:e|c|p|pe|E|r|-eval|-print)\b/;
+const WRAPPERS = new Set(["sudo", "time", "env", "command", "exec", "nohup", "nice", "corepack", "npx", "xargs", "builtin"]);
+const KEYWORDS = new Set(["if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}"]);
+const ASSIGNMENT = /^[A-Za-z_]\w*=/;
+const WRITERS = new Set(["mkdir", "touch", "cp", "mv", "rm", "tee", "truncate", "ln", "install"]);
+const INTERPRETERS = /^(?:node|nodejs|bun|deno|python[\d.]*|perl|ruby|php|tsx|ts-node)$/;
+const EVAL_FLAG = /^(?:-[A-Za-z]*[ecEp]|--eval(?:=.*)?|--print(?:=.*)?)$/;
+const baseName = (w) => w.replace(/^.*[\\/]/, "");
 
-function directRule({ contract, root, home, f, flags }, cmd) {
-  // Path-like tokens resolved against the project root (or a directory a `cd` / `git -C` moved to);
-  // paths outside the project are ignored.
-  const toRels = (tokens, base = ".", keepRoot = false) =>
-    tokens
-      .map((t) => f(t.replace(/^~(?=\/)/, home)))
-      .map((t) => toPosix(path.relative(root, path.resolve(root, base, t))))
-      .filter((r) => (keepRoot || r) && !r.startsWith("..") && !path.isAbsolute(r));
+/**
+ * Splits a shell command into simple commands: quotes are removed, `;` `&&` `||` `|` `&` newlines,
+ * parentheses and backticks separate commands, and redirects (`>`, `>>`, `>|`, `>&file`, `&>`) are
+ * collected apart from the words. Heredoc bodies are not understood (their lines parse as commands).
+ */
+function shellSegments(cmd) {
+  const segments = [];
+  let words = [];
+  let redirs = [];
+  let cur = null;
+  let pending = null;
+  const pushWord = () => {
+    if (cur === null) return;
+    const w = cur;
+    cur = null;
+    if (pending) {
+      const p = pending;
+      pending = null;
+      if (p.op === "<" || (p.amp && /^(\d+|-)$/.test(w.text))) return;
+      redirs.push({ op: p.op, target: w.text });
+    } else words.push(w);
+  };
+  const end = () => {
+    pushWord();
+    pending = null;
+    if (words.length || redirs.length) segments.push({ words, redirs });
+    words = [];
+    redirs = [];
+  };
+  const grow = () => {
+    cur ??= { text: "", quoted: false };
+    return cur;
+  };
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i];
+    if (c === "\\") {
+      if (cmd[i + 1] === "\n") i++;
+      else if (i + 1 < cmd.length) grow().text += cmd[++i];
+    } else if (c === "'") {
+      const e = cmd.indexOf("'", i + 1);
+      const stop = e < 0 ? cmd.length : e;
+      grow().quoted = true;
+      cur.text += cmd.slice(i + 1, stop);
+      i = stop;
+    } else if (c === '"') {
+      grow().quoted = true;
+      for (i++; i < cmd.length && cmd[i] !== '"'; i++) {
+        if (cmd[i] === "\\" && '"\\$`'.includes(cmd[i + 1] ?? "")) i++;
+        cur.text += cmd[i];
+      }
+    } else if (c === " " || c === "\t" || c === "\r") pushWord();
+    else if (c === "\n" || c === ";" || c === "(" || c === ")" || c === "`" || c === "|") {
+      end();
+      if (c === "|" && cmd[i + 1] === "|") i++;
+    } else if (c === "&" && cmd[i + 1] !== ">") {
+      end();
+      if (cmd[i + 1] === "&") i++;
+    } else if (c === ">" || c === "<" || c === "&") {
+      if (cur !== null && !cur.quoted && /^\d+$/.test(cur.text)) cur = null;
+      else pushWord();
+      if (c === "&") i++;
+      let op = c === "<" ? "<" : ">";
+      let amp = false;
+      if (c === "<") while (cmd[i + 1] === "<") i++;
+      else if (cmd[i + 1] === ">") {
+        op = ">>";
+        i++;
+      } else if (cmd[i + 1] === "|") i++;
+      else if (cmd[i + 1] === "&") {
+        amp = true;
+        i++;
+      }
+      pending = { op, amp };
+    } else grow().text += c;
+  }
+  end();
+  return segments;
+}
+
+/** Drops assignments, keywords and wrapper prefixes (and their flags); `find -exec` yields its inner command too. */
+function commandsOf(words) {
+  let i = 0;
+  while (i < words.length) {
+    const w = words[i].text;
+    if (ASSIGNMENT.test(w) || KEYWORDS.has(w)) i++;
+    else if (WRAPPERS.has(baseName(w))) {
+      i++;
+      while (i < words.length && words[i].text.startsWith("-")) i++;
+    } else break;
+  }
+  if (i >= words.length) return [];
+  const name = baseName(words[i].text);
+  const args = words.slice(i + 1);
+  const out = [{ name, args }];
+  if (name === "find") {
+    const k = args.findIndex((a) => /^-(?:exec|execdir|ok|okdir)$/.test(a.text));
+    if (k >= 0) out.push(...commandsOf(args.slice(k + 1)));
+  }
+  return out;
+}
+
+/** Splits arguments into flags and operands; everything after `--` is an operand. */
+function splitArgs(args) {
+  const flags = [];
+  const operands = [];
+  let rest = false;
+  for (const a of args) {
+    if (!rest && a.text === "--") rest = true;
+    else if (!rest && a.text.length > 1 && a.text.startsWith("-")) flags.push(a.text);
+    else operands.push(a);
+  }
+  return { flags, operands };
+}
+
+/**
+ * The commands and redirects of a shell command line, each with the directories it may run in.
+ * `bases` are absolute: the project root plus every directory a preceding `cd` / `pushd` may have
+ * led to (each resolved against all earlier ones, so chains are followed; the root stays in because
+ * a `cd` can fail). `tight` is only the directories after the latest `cd`.
+ */
+export function targetsOf(cmd, root, expand) {
+  const commands = [];
+  const redirects = [];
+  let bases = [root];
+  let tight = [root];
+  for (const seg of shellSegments(cmd)) {
+    for (const r of seg.redirs) redirects.push({ op: r.op, target: r.target, bases });
+    for (const c of commandsOf(seg.words)) {
+      commands.push({ ...c, bases, tight });
+      if (c.name === "cd" || c.name === "pushd") {
+        const dir = splitArgs(c.args).operands[0];
+        if (dir && dir.text !== "-") {
+          const next = bases.map((b) => path.resolve(b, expand(dir.text)));
+          tight = [...new Set(next)];
+          bases = [...new Set([...bases, ...next])];
+        }
+      }
+    }
+  }
+  return { commands, redirects };
+}
+
+function directRule({ contract, root, home, f }, cmd) {
+  const expand = (t) => f(t.replace(/^~(?=\/)/, home));
+  const { commands, redirects } = targetsOf(cmd, root, expand);
+  // Root-relative paths of the words, against each base; paths outside the project are ignored.
+  const relsOf = (words, bases, keepRoot = false) =>
+    words.flatMap((w) =>
+      bases.flatMap((b) => {
+        const r = toPosix(path.relative(root, path.resolve(b, expand(typeof w === "string" ? w : w.text))));
+        return (keepRoot || r) && !r.startsWith("..") && !path.isAbsolute(r) ? [r] : [];
+      }),
+    );
   const touchesProtectedPath = (r) => isProtectedOrDir(contract, r);
-  const tokens = [...cmd.matchAll(/[^\s"'<>|;&()]+/g)].map((m) => m[0]);
-  // Relative targets after `cd dir && ...` or `git -C dir ...` are also tried against that directory.
-  const dirs = [
-    ...[...cmd.matchAll(/\bcd\s+["']?([^\s"';&|)]+)/g)].map((m) => m[1]),
-    ...[...cmd.matchAll(/\bgit\s+(?:\S+\s+)*?-C\s+["']?([^\s"';&|)]+)/g)].map((m) => m[1]),
-  ].map((d) => f(d.replace(/^~(?=\/)/, home)));
-  const bases = [".", ...dirs];
-  const relsOf = (list, keepRoot) => bases.flatMap((b) => toRels(list, b, keepRoot));
-  const relTokens = relsOf(tokens);
-  const touchesProtected = relTokens.some(touchesProtectedPath);
-  const holdsAny = relTokens.some((r) => holdsProtected(contract, r));
+  const claudeMd = f("CLAUDE.md");
+  const claudeMsg = "CLAUDE.md must not be modified via Bash; use the Edit tool, outside the scaffold block only.";
+  const protectedMsg = "Command touches a protected path; only humans may change it.";
+  const gitMsg = "Command touches a protected path via git; only humans may change it.";
+  const folderMsg = "Command would delete or move a folder that contains protected paths; only humans may change them.";
+  const oneLinerMsg = "Command touches a protected path through an interpreter one-liner; only humans may change it.";
 
-  if (
-    relTokens.includes(f("CLAUDE.md")) &&
-    (/\b(sed\s+-i|perl\s+-p?i|rm|mv|cp|truncate)\b/.test(cmd) ||
-      new RegExp("(^|[^>])>\\s*[\"']?\\S*CLAUDE\\.md", flags).test(cmd) ||
-      new RegExp("\\btee\\s+(?!-a)\\S*CLAUDE\\.md", flags).test(cmd))
-  )
-    return "CLAUDE.md must not be modified via Bash; use the Edit tool, outside the scaffold block only.";
+  const writeRels = [];
+  for (const r of redirects) {
+    const rels = relsOf([r.target], r.bases);
+    if (r.op === ">" && rels.includes(claudeMd)) return claudeMsg;
+    writeRels.push(...rels);
+  }
+
+  for (const c of commands) {
+    const { flags: fl, operands } = splitArgs(c.args);
+    const rels = relsOf(operands, c.bases);
+    const isWriter =
+      WRITERS.has(c.name) ||
+      (c.name === "sed" && fl.some((x) => /^-[A-Za-z]*i|^--in-place/.test(x))) ||
+      (c.name === "perl" && fl.some((x) => /^-[A-Za-z]*i/.test(x)));
+    if (isWriter) {
+      const appends = fl.some((x) => /^-[A-Za-z]*a|^--append/.test(x));
+      if (rels.includes(claudeMd) && (["rm", "mv", "cp", "truncate", "sed", "perl"].includes(c.name) || (c.name === "tee" && !appends)))
+        return claudeMsg;
+      writeRels.push(...rels);
+    }
+    if (c.name === "dd")
+      for (const a of c.args) if (a.text.startsWith("of=")) writeRels.push(...relsOf([a.text.slice(3)], c.bases));
+
+    if (c.name === "git") {
+      let i = 0;
+      const dirs = [];
+      for (; i < c.args.length; i++) {
+        const t = c.args[i].text;
+        if (t === "-C" || t === "-c" || /^--(?:git-dir|work-tree|namespace)$/.test(t)) {
+          if (t === "-C" && c.args[i + 1]) dirs.push(c.args[i + 1].text);
+          i++;
+        } else if (!t.startsWith("-")) break;
+      }
+      const sub = c.args[i]?.text;
+      if (["clean", "checkout", "restore", "rm", "mv"].includes(sub ?? "")) {
+        const gb = [...c.bases, ...c.bases.flatMap((b) => dirs.map((d) => path.resolve(b, expand(d))))];
+        const g = splitArgs(c.args.slice(i + 1));
+        const grels = relsOf(g.operands, gb);
+        if (grels.some((r) => touchesProtectedPath(r) || holdsProtected(contract, r))) return gitMsg;
+        // A whole-tree revert from a revision rewrites protected files too: `checkout <rev> -- .`, `restore --source=<rev> .`.
+        const dots = g.operands.filter((o) => o.text === "." || o.text === "./" || o.text === ":/");
+        if (dots.length && ((sub === "checkout" && g.operands.length > dots.length) || (sub === "restore" && g.flags.some((x) => /^(?:--source|-s)/.test(x)))))
+          return gitMsg;
+      }
+    }
+
+    if (c.name === "rm" || c.name === "mv") {
+      const byTarget = fl.some((x) => /^--target-directory|^-[A-Za-z]*t$/.test(x));
+      const sources = c.name === "rm" || byTarget ? operands : operands.slice(0, -1);
+      // `rm -rf .` empties the project only when no `cd` moved elsewhere first.
+      if (
+        relsOf(sources, c.bases).some((r) => holdsProtected(contract, r)) ||
+        (c.name === "rm" && relsOf(sources, c.tight, true).includes(""))
+      )
+        return folderMsg;
+    }
+
+    // Interpreter one-liners hide the write inside a string; blocked when they mention a protected path
+    // (a protected file, or a protected folder written as `folder/` or as a quoted literal).
+    // Read-only one-liners that mention one are blocked too: a read cannot be told from a write.
+    if (INTERPRETERS.test(c.name)) {
+      let code;
+      if (c.name === "deno" && c.args[0]?.text === "eval") code = c.args.slice(1);
+      else
+        for (let i = 0; i < c.args.length; i++) {
+          const t = c.args[i].text;
+          if (!t.startsWith("-")) break;
+          if (EVAL_FLAG.test(t)) {
+            code = c.args.slice(i + 1);
+            break;
+          }
+          if (/^--?(?:r|require|import|loader|experimental-loader)$/.test(t)) i++;
+        }
+      if (code) {
+        for (const w of code)
+          for (const m of w.text.matchAll(/[^\s"'`<>|;&()]+/g)) {
+            const t = m[0];
+            const pathLike = t.endsWith("/") || ["'", '"', "`"].some((q) => w.text.includes(q + t + q));
+            for (const r of relsOf([t], c.bases))
+              if (isProtected(contract, r) || (pathLike && (touchesProtectedPath(r) || holdsProtected(contract, r))))
+                return oneLinerMsg;
+          }
+      }
+    }
+  }
   if (/--no-verify\b/.test(cmd) || /\bgit\s+commit\b[^|;&]*\s-n\b/.test(cmd))
     return "Skipping git hooks is forbidden (--no-verify).";
   if (/core\.hooksPath/.test(cmd) && !/\.githooks/.test(cmd)) return "Changing the git hooks path is forbidden.";
-  if (
-    /\bgit\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*(?:clean|checkout|restore|rm)\b/.test(cmd) &&
-    (touchesProtected || holdsAny)
-  )
-    return "Command touches a protected path via git; only humans may change it.";
-
-  // rm / mv of a folder that holds protected paths (`rm -rf docs`, `mv scripts x`) destroys them.
-  // Globs (`rm -rf d*`) and `find -delete` are not resolved; CI arch-check is the backstop.
-  for (const m of cmd.matchAll(/(?:^|[;&|(\s])(rm|mv)\s+([^;&|\n)]*)/g)) {
-    const args = m[2].split(/\s+/).map((a) => a.replace(/^["']|["']$/g, "")).filter((a) => a && !a.startsWith("-"));
-    const sources = m[1] === "rm" ? args : args.slice(0, -1);
-    if (relsOf(sources, true).some((r) => (r === "" ? m[1] === "rm" : holdsProtected(contract, r))))
-      return "Command would delete or move a folder that contains protected paths; only humans may change them.";
-  }
-
-  // Interpreter one-liners hide the write inside a string; blocked when they name a protected path.
-  // This also blocks read-only one-liners that mention one (`node -e "require('./architecture.json')"`).
-  if (INTERPRETER.test(cmd) && (touchesProtected || holdsAny))
-    return "Command touches a protected path through an interpreter one-liner; only humans may change it.";
-
   // pm-guard:begin
   const chosenPm = contract.packageManager;
   if (chosenPm) {
@@ -154,30 +358,21 @@ function directRule({ contract, root, home, f, flags }, cmd) {
     if (hit) return `"${hit.dep}" cannot be installed. ${deferredHint(hit.deferred)}`;
   }
 
-  const redirects = cmd.replace(/\d*>&\d/g, "").replace(/\d*>\s*\/dev\/null/g, "");
-  const writes = /\b(mkdir|touch|cp|mv|rm|tee|truncate|ln|install)\b|\bsed\s+-i|\bperl\s+-p?i/.test(redirects);
-  // A redirect (or dd's of=) writes only to its target; reading a protected file into a redirect is fine.
-  const redirectRels = relsOf([
-    ...[...redirects.matchAll(/\d*>>?\s*["']?([^\s"'<>|;&()]+)/g)].map((m) => m[1]),
-    ...[...cmd.matchAll(/\bdd\b[^|;&\n]*?\bof=["']?([^\s"']+)/g)].map((m) => m[1]),
-  ]);
-  const protectedMsg = "Command touches a protected path; only humans may change it.";
-  const firstPathRule = (rels) => {
-    for (const r of rels) if (packageOf(contract, r)) {
-      const msg = pathRule(contract, r);
-      if (msg) return msg;
-    }
-    return undefined;
-  };
-  if (redirectRels.some(touchesProtectedPath)) return protectedMsg;
-  if (!writes) return firstPathRule(redirectRels);
-  if (touchesProtected) return protectedMsg;
-  return firstPathRule(relTokens);
+  if (writeRels.some(touchesProtectedPath)) return protectedMsg;
+  for (const r of writeRels) if (packageOf(contract, r)) {
+    const msg = pathRule(contract, r);
+    if (msg) return msg;
+  }
+  return undefined;
 }
 
 function bashRule(ctx, cmd, depth = 0) {
   const own = directRule(ctx, cmd);
-  if (own !== undefined || depth >= 3) return own;
+  if (own !== undefined) return own;
+  if (depth >= 3)
+    return cmd.matchAll(SHELL_STRING).next().done
+      ? undefined
+      : "Shell strings are nested too deeply to check; run the inner command directly.";
   // The same rules apply to the command string inside `bash -c "..."`, `sh -c '...'` and `eval "..."`.
   for (const m of cmd.matchAll(SHELL_STRING)) {
     const inner = m[1] === undefined ? m[2] : m[1].replace(/\\(["\\$`])/g, "$1");
