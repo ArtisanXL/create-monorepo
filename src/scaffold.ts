@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { claudeBlockHash, hasBlock, upsertBlock } from "./claude-md.ts";
 import type { Command, PackageManagerAdapter } from "./pm/types.ts";
+import { catalogPackagesOf, listTemplateFiles, TEMPLATES_DIR } from "./templates.ts";
 
 export interface Options {
   target: string;
@@ -26,63 +26,6 @@ export interface Result {
   /** Paths relative to the target. */
   written: string[];
   skipped: string[];
-}
-
-/** Catalog packages, resolved from the registry. `@types/node` comes from the Node major. */
-const CATALOG_PACKAGES = [
-  "typescript",
-  "@biomejs/biome",
-  "turbo",
-  "vitest",
-  "tsx",
-  "tsdown",
-  "zod",
-  "hono",
-  "@hono/node-server",
-  "@hono/zod-validator",
-  "drizzle-orm",
-  "drizzle-kit",
-  "postgres",
-  "pg-boss",
-  "react",
-  "react-dom",
-  "@types/react",
-  "@types/react-dom",
-  "vite",
-  "@vitejs/plugin-react",
-  "@tanstack/react-query",
-];
-
-/** Generated files that must be executable. */
-const EXECUTABLE = new Set([
-  "scripts/worktree.mjs",
-  "scripts/arch-check.mjs",
-  ".claude/hooks/guard.mjs",
-  ".claude/hooks/stop-check.mjs",
-  ".githooks/pre-commit",
-]);
-
-const TEMPLATES_DIR = fileURLToPath(new URL("../templates/", import.meta.url));
-
-/** Template files starting with `_` are dotfiles (npm would drop real ones when packing). */
-function destinationOf(templatePath: string): string {
-  return templatePath
-    .split("/")
-    .map((seg) => (seg.startsWith("_") ? `.${seg.slice(1)}` : seg))
-    .join("/");
-}
-
-/** Template trees written into the target, in order. */
-const TEMPLATE_TREES = ["root", "packages", "apps"] as const;
-
-async function listTemplates(dir: string, rel = ""): Promise<string[]> {
-  const out: string[] = [];
-  for (const entry of await readdir(join(dir, rel), { withFileTypes: true })) {
-    const path = rel ? `${rel}/${entry.name}` : entry.name;
-    if (entry.isDirectory()) out.push(...(await listTemplates(dir, path)));
-    else out.push(path);
-  }
-  return out.sort();
 }
 
 /** Literal replacement: a replacer function keeps `$&`, `$'` etc. in values from being interpreted. */
@@ -132,7 +75,7 @@ export interface Gathered {
   packageManager: string;
   /** The target has its own `.git`. */
   hasGit: boolean;
-  templates: { dest: string; text: string }[];
+  templates: { dest: string; text: string; executable: boolean }[];
   /** `claude-md/block.md`, unfilled. */
   blockText: string;
   /** Target paths that already exist (destinations, the workspace file, `.git`). */
@@ -171,16 +114,11 @@ export async function gather(
   view: TargetView,
 ): Promise<Gathered> {
   const { pm } = deps;
-  const templates: { dest: string; text: string }[] = [];
-  for (const tree of TEMPLATE_TREES) {
-    const prefix = tree === "root" ? "" : `${tree}/`;
-    for (const rel of await listTemplates(join(TEMPLATES_DIR, tree))) {
-      templates.push({
-        dest: destinationOf(`${prefix}${rel}`),
-        text: await readFile(join(TEMPLATES_DIR, tree, rel), "utf8"),
-      });
-    }
-  }
+  const templates = (await listTemplateFiles()).map(({ dest, text, executable }) => ({
+    dest,
+    text,
+    executable,
+  }));
   const blockText = await readFile(join(TEMPLATES_DIR, "claude-md", "block.md"), "utf8");
 
   const existing = new Set<string>();
@@ -193,9 +131,11 @@ export async function gather(
 
   let versions: Record<string, string> | undefined;
   if (!existing.has(pm.workspaceFile)) {
-    const resolved = await Promise.all(CATALOG_PACKAGES.map((p) => deps.resolveVersion(p)));
+    // `@types/node` follows the Node major, not the registry.
+    const names = catalogPackagesOf(templates).filter((p) => p !== "@types/node");
+    const resolved = await Promise.all(names.map((p) => deps.resolveVersion(p)));
     versions = {};
-    CATALOG_PACKAGES.forEach((p, i) => {
+    names.forEach((p, i) => {
       (versions as Record<string, string>)[p] = resolved[i] as string;
     });
   }
@@ -248,6 +188,7 @@ export function plan(g: Gathered): Plan {
   const claudeMd = upsertBlock(existingClaudeMd, block);
   const values: Values = [...baseValues, ["__CLAUDE_SHA__", claudeBlockHash(claudeMd) ?? ""]];
 
+  const executable = new Set(g.templates.filter((t) => t.executable).map((t) => t.dest));
   const contents = new Map<string, string>();
   for (const t of g.templates) {
     if (missing.includes(t.dest)) contents.set(t.dest, fillTemplate(t.text, values));
@@ -259,7 +200,8 @@ export function plan(g: Gathered): Plan {
     const catalog: Record<string, string> = {};
     for (const [p, v] of Object.entries(g.versions)) catalog[p] = toRange(p, v);
     catalog["@types/node"] = `^${nodeMajor}`;
-    contents.set(pm.workspaceFile, pm.renderWorkspaceFile(catalog));
+    const sorted = Object.fromEntries(Object.entries(catalog).sort(([a], [b]) => (a < b ? -1 : 1)));
+    contents.set(pm.workspaceFile, pm.renderWorkspaceFile(sorted));
   }
 
   const commands: PlannedCommand[] = options.install
@@ -274,7 +216,7 @@ export function plan(g: Gathered): Plan {
     files: missing.map((path) => ({
       path,
       content: contents.get(path) as string,
-      executable: EXECUTABLE.has(path),
+      executable: executable.has(path),
     })),
     written: missing,
     skipped,

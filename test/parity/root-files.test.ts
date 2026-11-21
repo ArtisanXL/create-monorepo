@@ -106,8 +106,11 @@ describe.skipIf(!parityEnabled)("bash parity: root, worktree, packages and apps"
       },
     );
 
-    expect(
-      await diffTrees(bashDir, tsDir, [...ROOT_FILES, ...WORKTREE_FILES, ...WORKSPACE_FILES]),
-    ).toEqual([]);
+    // pnpm-workspace.yaml is excluded: since #22 the TS catalog is derived and sorted, while bash
+    // keeps a hand-written order. The golden test covers it. Removed with the bash harness (#12).
+    const files = [...ROOT_FILES, ...WORKTREE_FILES, ...WORKSPACE_FILES].filter(
+      (f) => f !== "pnpm-workspace.yaml",
+    );
+    expect(await diffTrees(bashDir, tsDir, files)).toEqual([]);
   });
 });

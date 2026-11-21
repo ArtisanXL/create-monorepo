@@ -4,26 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPnpmAdapter } from "../src/pm/pnpm.ts";
 import { type Deps, type Options, scaffold } from "../src/scaffold.ts";
-
-const ROOT_FILES = [
-  ".editorconfig",
-  ".env.example",
-  ".gitignore",
-  ".nvmrc",
-  ".worktreeinclude",
-  "biome.json",
-  "compose.yaml",
-  "docs/adr/0004-worktree-isolation.md",
-  "package.json",
-  "paseo.json",
-  "pnpm-workspace.yaml",
-  "scripts/worktree-lib.mjs",
-  "scripts/worktree-lib.test.mjs",
-  "scripts/worktree.mjs",
-  "tsconfig.base.json",
-  "turbo.json",
-  "vitest.config.ts",
-];
+import { listTemplateFiles } from "../src/templates.ts";
 
 let dir: string;
 let resolved: string[];
@@ -71,16 +52,24 @@ async function listFiles(root: string, rel = ""): Promise<string[]> {
 }
 
 describe("scaffold: fresh run", () => {
-  it("makes the worktree script executable", async () => {
+  it.skipIf(process.platform === "win32")("makes every shebang template executable", async () => {
     await scaffold(options(), deps());
-    const { mode } = await stat(join(dir, "scripts/worktree.mjs"));
-    expect(mode & 0o111).not.toBe(0);
+    const executable = (await listTemplateFiles()).filter((f) => f.executable);
+    expect(executable.length).toBeGreaterThan(0);
+    for (const f of executable) {
+      expect((await stat(join(dir, f.dest))).mode & 0o111, f.dest).not.toBe(0);
+    }
   });
 
   it("writes the root files with placeholders filled", async () => {
     const result = await scaffold(options(), deps());
 
-    expect(result.written).toEqual(expect.arrayContaining(ROOT_FILES));
+    const expected = [
+      ...(await listTemplateFiles()).map((f) => f.dest),
+      "pnpm-workspace.yaml",
+      "CLAUDE.md",
+    ].sort();
+    expect(result.written.slice().sort()).toEqual(expected);
     expect(result.skipped).toEqual([]);
     expect(await listFiles(dir)).toEqual(result.written.sort());
 

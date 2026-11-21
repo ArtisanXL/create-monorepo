@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { listTemplateFiles } from "../src/templates.ts";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 // npm/npx are .cmd shims on Windows and need a shell there.
@@ -51,16 +52,17 @@ try {
   const target = join(work, "generated");
   run("npx", ["--no-install", "create-monorepo", target, "-y", "--no-install"], consumer);
 
-  const expected = [
-    "package.json",
-    "architecture.json",
-    "CLAUDE.md",
-    ".gitignore",
-    ".github/workflows/ci.yml",
-    ".claude/hooks/guard.mjs",
-    "apps/api/package.json",
-    "packages/domain/package.json",
-  ];
+  // Expected files come from the repo tree; the installed package must ship exactly that tree.
+  const expected = (await listTemplateFiles()).map((f) => f.dest);
+  const shipped = (await listTemplateFiles(join(pkgDir, "templates"))).map((f) => f.dest);
+  const lost = expected.filter((f) => !shipped.includes(f));
+  const extra = shipped.filter((f) => !expected.includes(f));
+  if (lost.length || extra.length) {
+    throw new Error(
+      `packed templates differ from the repo tree (missing: ${lost.join(", ") || "none"}; unexpected: ${extra.join(", ") || "none"})`,
+    );
+  }
+  expected.push("pnpm-workspace.yaml", "CLAUDE.md");
   for (const f of expected) {
     if (!existsSync(join(target, f))) throw new Error(`generated repo lacks ${f}`);
   }

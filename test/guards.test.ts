@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -150,19 +150,6 @@ describe("generated stop-check hook", () => {
       });
     } finally {
       await rm(join(dir, "node_modules"), { recursive: true, force: true });
-    }
-  });
-});
-
-describe("generated file modes", () => {
-  it("marks scripts, hooks and the git hook executable", async () => {
-    for (const f of [
-      "scripts/arch-check.mjs",
-      ".claude/hooks/guard.mjs",
-      ".claude/hooks/stop-check.mjs",
-      ".githooks/pre-commit",
-    ]) {
-      expect((await stat(join(dir, f))).mode & 0o111, f).not.toBe(0);
     }
   });
 });
