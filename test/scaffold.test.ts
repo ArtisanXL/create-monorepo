@@ -204,8 +204,9 @@ describe("scaffold: registry failure", () => {
   it("aborts with an error and writes zero files", async () => {
     await mkdir(join(dir, "sub"));
     const failing = deps({
-      resolveVersion: async () => {
-        throw new Error("registry down");
+      resolveVersion: async (pkg) => {
+        if (pkg === "turbo") throw new Error("registry down");
+        return "1.0.0";
       },
     });
     await expect(scaffold(options({ target: join(dir, "sub") }), failing)).rejects.toThrow(

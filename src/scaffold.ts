@@ -113,11 +113,25 @@ export function fsTargetView(target: string): TargetView {
   };
 }
 
+/** The synchronous slice of the adapter that planning uses. */
+export type PlanAdapter = Pick<
+  PackageManagerAdapter,
+  | "name"
+  | "workspaceFile"
+  | "renderWorkspaceFile"
+  | "installCommand"
+  | "formatCommand"
+  | "verifyCommand"
+>;
+
 /** Everything the plan step needs; all I/O and network calls have already happened. */
 export interface Gathered {
-  options: Options;
-  pm: PackageManagerAdapter;
-  pmVersion: string;
+  options: Pick<Options, "scope" | "dbPrefix" | "nodeMajor" | "install">;
+  pm: PlanAdapter;
+  /** Value for package.json `packageManager`, already derived from the pm version. */
+  packageManager: string;
+  /** The target has its own `.git`. */
+  hasGit: boolean;
   templates: { dest: string; text: string }[];
   /** `claude-md/block.md`, unfilled. */
   blockText: string;
@@ -170,7 +184,7 @@ export async function gather(
   const blockText = await readFile(join(TEMPLATES_DIR, "claude-md", "block.md"), "utf8");
 
   const existing = new Set<string>();
-  for (const rel of [...templates.map((t) => t.dest), pm.workspaceFile, ".git"]) {
+  for (const rel of [...templates.map((t) => t.dest), pm.workspaceFile]) {
     if (await view.exists(rel)) existing.add(rel);
   }
   const existingClaudeMd = (await view.exists("CLAUDE.md"))
@@ -187,9 +201,15 @@ export async function gather(
   }
 
   return {
-    options,
+    options: {
+      scope: options.scope,
+      dbPrefix: options.dbPrefix,
+      nodeMajor: options.nodeMajor,
+      install: options.install,
+    },
     pm,
-    pmVersion: await pm.version(),
+    packageManager: pm.packageManagerField(await pm.version()),
+    hasGit: await view.exists(".git"),
     templates,
     blockText,
     existing,
@@ -221,7 +241,7 @@ export function plan(g: Gathered): Plan {
     ["__SCOPE_RE__", escapeRegex(scope)],
     ["__SCOPE__", scope],
     ["__NODE_MAJOR__", String(nodeMajor)],
-    ["__PACKAGE_MANAGER__", g.pm.packageManagerField(g.pmVersion)],
+    ["__PACKAGE_MANAGER__", g.packageManager],
     ["__PM__", pm.name],
   ];
   const block = fillTemplate(g.blockText, baseValues);
@@ -234,8 +254,10 @@ export function plan(g: Gathered): Plan {
   }
   if (claudeMdMissing) contents.set("CLAUDE.md", claudeMd);
   if (missing.includes(pm.workspaceFile)) {
+    if (!g.versions)
+      throw new Error("plan: workspace file is missing but no versions were gathered");
     const catalog: Record<string, string> = {};
-    for (const [p, v] of Object.entries(g.versions ?? {})) catalog[p] = toRange(p, v);
+    for (const [p, v] of Object.entries(g.versions)) catalog[p] = toRange(p, v);
     catalog["@types/node"] = `^${nodeMajor}`;
     contents.set(pm.workspaceFile, pm.renderWorkspaceFile(catalog));
   }
@@ -258,7 +280,7 @@ export function plan(g: Gathered): Plan {
     skipped,
     // `git rev-parse` would succeed inside a parent repository and skip the init, leaving the
     // `prepare` script to set core.hooksPath on the parent: look for the target's own `.git`.
-    gitInit: !existing.has(".git"),
+    gitInit: !g.hasGit,
     commands,
   };
 }

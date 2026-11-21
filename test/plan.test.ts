@@ -124,14 +124,13 @@ describe("plan: existing target", () => {
   });
 
   it("skips CLAUDE.md that already has the block and hashes the existing block", async () => {
-    const first = await planFor();
-    const claude = content(first, "CLAUDE.md");
-    const p = await planFor(options(), deps(), { "CLAUDE.md": claude });
+    const existing =
+      "# Mine\n\n<!-- scaffold:begin — managed by @artisanxl/create-monorepo -->\ncustom rules\n<!-- scaffold:end -->\n";
+    const p = await planFor(options(), deps(), { "CLAUDE.md": existing });
     expect(p.skipped).toEqual(["CLAUDE.md"]);
     expect(p.written).not.toContain("CLAUDE.md");
-    expect(first.files.some((f) => f.content.includes(claudeBlockHash(claude) as string))).toBe(
-      true,
-    );
+    const sha = claudeBlockHash(existing) as string;
+    expect(content(p, "architecture.json")).toContain(sha);
   });
 });
 
