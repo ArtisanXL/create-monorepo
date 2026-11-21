@@ -132,7 +132,7 @@ describe("arch-check rules", () => {
     const errors = check(snap);
     expect(errors).toEqual([
       expect.stringContaining('package.json → better-auth: This is deferred "auth"'),
-      expect.stringContaining('pnpm-workspace.yaml catalog → better-auth: This is deferred "auth"'),
+      expect.stringContaining('__CATALOG_FILE__ catalog → better-auth: This is deferred "auth"'),
       expect.stringContaining('packages/domain/src/a.ts: "better-auth": This is deferred "auth"'),
       expect.stringContaining('packages/db → lucia: This is deferred "auth"'),
     ]);

@@ -9,7 +9,6 @@ export interface Options {
   target: string;
   scope: string;
   dbPrefix: string;
-  pm: string;
   install: boolean;
   nodeMajor: number;
 }
@@ -57,15 +56,32 @@ export function fsTargetView(target: string): TargetView {
 }
 
 /** The synchronous slice of the adapter that planning uses. */
-export type PlanAdapter = Pick<
-  PackageManagerAdapter,
-  | "name"
-  | "workspaceFile"
-  | "renderWorkspaceFile"
-  | "installCommand"
-  | "formatCommand"
-  | "verifyCommand"
->;
+export type PlanAdapter = Omit<PackageManagerAdapter, "version">;
+
+/** Tokens whose values core derives; adapter tokens live in pm/types.ts. */
+export const CORE_TOKENS = [
+  "__DB_PREFIX__",
+  "__SCOPE_RE__",
+  "__SCOPE__",
+  "__NODE_MAJOR__",
+  "__PACKAGE_MANAGER__",
+  "__PM__",
+  "__RUN__",
+  "__CATALOG_FILE__",
+  "__CLAUDE_SHA__",
+] as const;
+
+const FORMAT_FLAGS = [
+  "biome",
+  "check",
+  "--write",
+  "--files-ignore-unknown=true",
+  "--no-errors-on-unmatched",
+] as const;
+
+/** The catalog is built (and versions resolved) when an adapter file or the catalog file is missing. */
+const needsCatalog = (pm: PlanAdapter, existing: ReadonlySet<string>): boolean =>
+  [...pm.files, pm.catalogFile].some((f) => !existing.has(f));
 
 /** Everything the plan step needs; all I/O and network calls have already happened. */
 export interface Gathered {
@@ -78,10 +94,10 @@ export interface Gathered {
   templates: { dest: string; text: string; executable: boolean }[];
   /** `claude-md/block.md`, unfilled. */
   blockText: string;
-  /** Target paths that already exist (destinations, the workspace file, `.git`). */
+  /** Target paths that already exist (destinations, the adapter files). */
   existing: ReadonlySet<string>;
   existingClaudeMd: string | undefined;
-  /** Registry versions; only resolved when the workspace file is going to be written. */
+  /** Registry versions; only resolved when the adapter files or the catalog file are going to be written. */
   versions: Readonly<Record<string, string>> | undefined;
 }
 
@@ -122,7 +138,7 @@ export async function gather(
   const blockText = await readFile(join(TEMPLATES_DIR, "claude-md", "block.md"), "utf8");
 
   const existing = new Set<string>();
-  for (const rel of [...templates.map((t) => t.dest), pm.workspaceFile]) {
+  for (const rel of [...templates.map((t) => t.dest), ...pm.files]) {
     if (await view.exists(rel)) existing.add(rel);
   }
   const existingClaudeMd = (await view.exists("CLAUDE.md"))
@@ -130,7 +146,7 @@ export async function gather(
     : undefined;
 
   let versions: Record<string, string> | undefined;
-  if (!existing.has(pm.workspaceFile)) {
+  if (needsCatalog(pm, existing)) {
     // `@types/node` follows the Node major, not the registry.
     const names = catalogPackagesOf(templates).filter((p) => p !== "@types/node");
     const resolved = await Promise.all(names.map((p) => deps.resolveVersion(p)));
@@ -148,7 +164,7 @@ export async function gather(
       install: options.install,
     },
     pm,
-    packageManager: pm.packageManagerField(await pm.version()),
+    packageManager: `${pm.name}@${await pm.version()}`,
     hasGit: await view.exists(".git"),
     templates,
     blockText,
@@ -166,7 +182,7 @@ export function plan(g: Gathered): Plan {
   const claudeMdMissing = existingClaudeMd === undefined || !hasBlock(existingClaudeMd);
   const all = [
     ...g.templates.map((t) => t.dest),
-    pm.workspaceFile,
+    ...pm.files,
     ...(claudeMdMissing ? ["CLAUDE.md"] : []),
   ].sort();
   const missing = all.filter((f) => f === "CLAUDE.md" || !existing.has(f));
@@ -183,6 +199,9 @@ export function plan(g: Gathered): Plan {
     ["__NODE_MAJOR__", String(nodeMajor)],
     ["__PACKAGE_MANAGER__", g.packageManager],
     ["__PM__", pm.name],
+    ["__RUN__", pm.commands.run.join(" ")],
+    ["__CATALOG_FILE__", pm.catalogFile],
+    ...(Object.entries(pm.tokens) as [string, string][]),
   ];
   const block = fillTemplate(g.blockText, baseValues);
   const claudeMd = upsertBlock(existingClaudeMd, block);
@@ -194,21 +213,33 @@ export function plan(g: Gathered): Plan {
     if (missing.includes(t.dest)) contents.set(t.dest, fillTemplate(t.text, values));
   }
   if (claudeMdMissing) contents.set("CLAUDE.md", claudeMd);
-  if (missing.includes(pm.workspaceFile)) {
-    if (!g.versions)
-      throw new Error("plan: workspace file is missing but no versions were gathered");
+  if (needsCatalog(pm, existing)) {
+    if (!g.versions) throw new Error("plan: the catalog is needed but no versions were gathered");
     const catalog: Record<string, string> = {};
     for (const [p, v] of Object.entries(g.versions)) catalog[p] = toRange(p, v);
     catalog["@types/node"] = `^${nodeMajor}`;
     const sorted = Object.fromEntries(Object.entries(catalog).sort(([a], [b]) => (a < b ? -1 : 1)));
-    contents.set(pm.workspaceFile, pm.renderWorkspaceFile(sorted));
+    const rendered = pm.renderFiles(sorted);
+    for (const f of pm.files) {
+      if (!missing.includes(f)) continue;
+      const text = rendered[f];
+      if (text === undefined) throw new Error(`plan: adapter ${pm.name} did not render ${f}`);
+      contents.set(f, text);
+    }
   }
 
   const commands: PlannedCommand[] = options.install
     ? [
-        { command: pm.installCommand(), tolerant: false },
-        ...(missing.length ? [{ command: pm.formatCommand(missing), tolerant: true }] : []),
-        { command: pm.verifyCommand(), tolerant: false },
+        { command: pm.commands.install, tolerant: false },
+        ...(missing.length
+          ? [
+              {
+                command: [...pm.commands.exec, ...FORMAT_FLAGS, ...missing] as Command,
+                tolerant: true,
+              },
+            ]
+          : []),
+        { command: [...pm.commands.run, "verify"], tolerant: false },
       ]
     : [];
 

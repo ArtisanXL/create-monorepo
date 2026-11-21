@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { PM_NAMES } from "../src/pm/index.ts";
 import { scaffoldFixture, stubDeclaredPackages } from "./support/fixture.ts";
 
 const execFileAsync = promisify(execFile);
@@ -101,9 +102,14 @@ describe("generated guard hook", () => {
     }
   });
 
-  it("records the chosen package manager in architecture.json", async () => {
-    const arch = JSON.parse(await readFile(join(dir, "architecture.json"), "utf8"));
-    expect(arch.package_manager).toBe("pnpm");
+  it.each(PM_NAMES)("records the chosen package manager (%s) in architecture.json", async (pm) => {
+    const fixture = await scaffoldFixture({}, pm);
+    try {
+      const arch = JSON.parse(await readFile(join(fixture.dir, "architecture.json"), "utf8"));
+      expect(arch.package_manager).toBe(pm);
+    } finally {
+      await fixture.cleanup();
+    }
   });
 });
 

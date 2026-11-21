@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createPnpmAdapter } from "./pm/pnpm.ts";
+import { createAdapter } from "./pm/index.ts";
 import { createRegistryResolver } from "./registry.ts";
 import { run } from "./run.ts";
 import { clackPrompter, nodeFsProbe } from "./wizard.ts";
@@ -13,7 +13,7 @@ process.exitCode = await run({
   fsProbe: nodeFsProbe,
   stdout: process.stdout,
   stderr: process.stderr,
-  makeDeps: () => ({
+  makeDeps: (resolved) => ({
     resolveVersion: createRegistryResolver(),
     run: (cmd, args, cwd) =>
       new Promise((done, reject) => {
@@ -25,6 +25,6 @@ process.exitCode = await run({
         child.on("error", reject);
         child.on("close", (code) => done({ code: code ?? 1 }));
       }),
-    pm: createPnpmAdapter(),
+    pm: createAdapter(resolved.pm),
   }),
 });

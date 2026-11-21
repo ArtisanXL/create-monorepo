@@ -112,7 +112,7 @@
   ],
   "agent_writable_exceptions": ["docs/adr/proposed/"],
   "claude_md_block": {
-    "$comment": "The scaffold block in CLAUDE.md is protected; everything outside it is free. If a human changes the block, update sha256 (pnpm arch --claude-hash).",
+    "$comment": "The scaffold block in CLAUDE.md is protected; everything outside it is free. If a human changes the block, update sha256 (__RUN__ arch --claude-hash).",
     "begin": "<!-- scaffold:begin",
     "end": "<!-- scaffold:end -->",
     "sha256": "__CLAUDE_SHA__"

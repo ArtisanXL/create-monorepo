@@ -13,6 +13,12 @@ beforeEach(async () => {
 });
 afterEach(() => rm(dir, { recursive: true, force: true }));
 
+const NEXT_STEPS = `Next steps:
+  cp .env.example .env && docker compose up -d
+  pnpm dev                       # api :3000, web :5173, worker
+  .github/CODEOWNERS             # assign owners for architecture files
+  git add -A && git commit -m "chore: scaffold"`;
+
 const probe: FsProbe = { exists: async () => false, isNonEmptyDir: async () => false };
 
 function harness(over: Partial<RunIo> = {}) {
@@ -97,5 +103,24 @@ describe("run", () => {
     expect(await run(h.io)).toBe(0);
     expect(h.out()).toContain(`Scaffold ready: ${dir}`);
     expect(h.out()).toContain("Next steps:");
+  });
+
+  it("hands the resolved package manager to makeDeps", async () => {
+    const seen: string[] = [];
+    const h = harness({
+      argv: [dir, "--no-install", "-y", "--pm", "pnpm"],
+      makeDeps: (resolved) => {
+        seen.push(resolved.pm);
+        return fakeDeps();
+      },
+    });
+    expect(await run(h.io)).toBe(0);
+    expect(seen).toEqual(["pnpm"]);
+  });
+
+  it("ends the report with the exact pnpm next-steps text", async () => {
+    const h = harness();
+    expect(await run(h.io)).toBe(0);
+    expect(h.out().endsWith(`${NEXT_STEPS}\n`)).toBe(true);
   });
 });

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
  * Per-worktree isolation on a shared local Postgres (see docs/adr/0004-worktree-isolation.md).
- *   pnpm worktree:setup     .env + database + migrations for this checkout (idempotent)
- *   pnpm worktree:teardown  drop this worktree's database (never the main checkout's; always exits 0)
- *   pnpm worktree:info      print the key and resource names
- *   pnpm worktree:gc [--yes] drop databases whose worktree folder no longer exists
+ *   __RUN__ worktree:setup     .env + database + migrations for this checkout (idempotent)
+ *   __RUN__ worktree:teardown  drop this worktree's database (never the main checkout's; always exits 0)
+ *   __RUN__ worktree:info      print the key and resource names
+ *   __RUN__ worktree:gc [--yes] drop databases whose worktree folder no longer exists
  * Works in Paseo worktrees, Claude Code worktrees and plain `git worktree add` checkouts.
  * Prints resource names only, never secret values.
  */
@@ -139,7 +139,7 @@ async function setup() {
   }
 
   if (existsSync(join(toplevel, "packages", "db", "migrations"))) {
-    const result = spawnSync("pnpm", ["--silent", "--filter", DB_PACKAGE, "migrate"], {
+    const result = spawnSync("__PM__", ["--silent", "--filter", DB_PACKAGE, "migrate"], {
       cwd: toplevel,
       env: { ...process.env, DATABASE_URL: env.DATABASE_URL },
       stdio: ["ignore", "ignore", "inherit"],
@@ -199,7 +199,7 @@ function info() {
     ["checkout", isMain ? `${toplevel} (main)` : toplevel],
     ["key", key ?? "(main checkout)"],
     ["database", database],
-    [".env", existsSync(envPath) ? envPath : "(missing; run pnpm worktree:setup)"],
+    [".env", existsSync(envPath) ? envPath : "(missing; run __RUN__ worktree:setup)"],
   ];
   for (const [label, value] of lines) console.log(`${`${label}:`.padEnd(10)} ${value}`);
 }

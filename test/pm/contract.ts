@@ -1,52 +1,66 @@
 import { describe, expect, it } from "vitest";
-import type { PackageManagerAdapter } from "../../src/pm/types.ts";
+import { createAdapter, PM_NAMES, type PmName } from "../../src/pm/index.ts";
+import { gather, plan, type TargetView } from "../../src/scaffold.ts";
+import { catalogPackagesOf, listTemplateFiles } from "../../src/templates.ts";
 
-/** Every package-manager adapter implementation must pass this contract. */
-export function adapterContract(name: string, create: (version: string) => PackageManagerAdapter) {
+export const TOKEN_RE = /__[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*__/;
+
+const emptyView: TargetView = { exists: () => false, read: () => "" };
+
+/** Every package-manager adapter in the table must pass this contract. */
+export function adapterContract(name: PmName) {
   describe(`package-manager adapter contract: ${name}`, () => {
-    const adapter = create("9.9.9");
-    const catalog = { typescript: "~5.0.0", "@biomejs/biome": "^2.0.0" };
+    const adapter = createAdapter(name, async () => "9.9.9");
 
-    it("reports its version and builds the packageManager field from it", async () => {
+    it("is registered under its own name", () => {
+      expect(adapter.name).toBe(name);
+      expect(PM_NAMES).toContain(name);
+    });
+
+    it("reports its version", async () => {
       expect(await adapter.version()).toBe("9.9.9");
-      expect(adapter.packageManagerField("9.9.9")).toBe(`${adapter.name}@9.9.9`);
     });
 
-    it("renders a workspace file with every catalog entry", () => {
-      const text = adapter.renderWorkspaceFile(catalog);
-      expect(adapter.workspaceFile).not.toBe("");
-      expect(text).toContain('"typescript": "~5.0.0"');
-      expect(text).toContain('"@biomejs/biome": "^2.0.0"');
-    });
-
-    it("allows install scripts only for the build allowlist (esbuild)", () => {
-      expect(adapter.renderWorkspaceFile(catalog)).toMatch(/esbuild/);
-    });
-
-    it("names a lockfile", () => {
-      expect(adapter.lockfile).toMatch(/lock/);
-    });
-
-    it("returns well-formed commands led by the package manager", () => {
-      const commands = [
-        adapter.installCommand(),
-        adapter.verifyCommand(),
-        adapter.execCommand(["biome", "--version"]),
-        adapter.filterCommand("@acme/api", "test"),
-        adapter.formatCommand(["a.json", "b.ts"]),
-      ];
-      for (const [cmd, ...args] of commands) {
-        expect(cmd).toBe(adapter.name);
-        expect(args.every((a) => typeof a === "string" && a.length > 0)).toBe(true);
+    it("puts every catalog entry into the catalog file", async () => {
+      const templates = await listTemplateFiles();
+      const names = [...catalogPackagesOf(templates), "@types/node"];
+      const versions = new Map(names.map((n, i) => [n, `1.${i}.0`]));
+      const g = await gather(
+        { target: "/nowhere", scope: "@acme", dbPrefix: "acme", install: false, nodeMajor: 24 },
+        { resolveVersion: async (p) => versions.get(p) as string, pm: adapter },
+        emptyView,
+      );
+      const catalogText = plan(g).files.find((f) => f.path === adapter.catalogFile)?.content;
+      expect(catalogText).toBeDefined();
+      for (const n of names) {
+        expect(catalogText).toContain(n);
+        if (n !== "@types/node")
+          expect(catalogText).toMatch(new RegExp(`1\\.${[...versions.keys()].indexOf(n)}\\.0`));
       }
-      expect(adapter.formatCommand(["a.json", "b.ts"]).slice(-2)).toEqual(["a.json", "b.ts"]);
+      expect(catalogText).toContain("^24");
     });
 
-    it("provides next-steps text using its own run wording", () => {
-      const steps = adapter.nextSteps();
-      expect(steps).toContain("Next steps:");
-      expect(steps).toContain(`${adapter.name} dev`);
-      expect(steps).toContain("docker compose up -d");
+    it("renders exactly the files it declares, none of which a template writes", async () => {
+      const rendered = adapter.renderFiles({ typescript: "~5.0.0" });
+      expect(Object.keys(rendered).sort()).toEqual([...adapter.files].sort());
+      const dests = (await listTemplateFiles()).map((t) => t.dest);
+      for (const f of adapter.files) expect(dests).not.toContain(f);
+      expect([...adapter.files, ...dests]).toContain(adapter.catalogFile);
+    });
+
+    it("has well-formed commands led by the package manager", () => {
+      for (const command of Object.values(adapter.commands)) {
+        expect(command.length).toBeGreaterThan(0);
+        expect(command.every((a) => typeof a === "string" && a.length > 0)).toBe(true);
+      }
+      expect(adapter.commands.run[0]).toBe(name);
+    });
+
+    it("has literal, non-empty token values", () => {
+      for (const [token, value] of Object.entries(adapter.tokens)) {
+        expect(value, token).not.toBe("");
+        expect(value, token).not.toMatch(TOKEN_RE);
+      }
     });
   });
 }

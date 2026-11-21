@@ -66,7 +66,7 @@ export function check(snapshot) {
     if (d) err(`package.json → ${dep}: ${hint(d)}`);
   }
   for (const { dep, deferred } of deferredDepsInCatalog(contract, catalogText))
-    err(`pnpm-workspace.yaml catalog → ${dep}: ${hint(deferred)}`);
+    err(`__CATALOG_FILE__ catalog → ${dep}: ${hint(deferred)}`);
 
   // 3) Per-package checks
   for (const [dir, spec] of Object.entries(packages)) {
@@ -148,7 +148,7 @@ export function check(snapshot) {
     const h = claudeMdText === null ? null : claudeBlockHash(claudeMdText, contract.claudeBlock);
     if (!h) err("CLAUDE.md: scaffold block missing");
     else if (h !== contract.claudeBlock.sha256)
-      err("CLAUDE.md: scaffold block was modified. Humans only; if intentional, write the output of `pnpm arch --claude-hash` into architecture.json > claude_md_block.sha256.");
+      err("CLAUDE.md: scaffold block was modified. Humans only; if intentional, write the output of `__RUN__ arch --claude-hash` into architecture.json > claude_md_block.sha256.");
   }
   return errors;
 }

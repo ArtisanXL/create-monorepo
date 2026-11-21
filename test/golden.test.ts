@@ -2,13 +2,12 @@ import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createPnpmAdapter } from "../src/pm/pnpm.ts";
+import { createAdapter, PM_NAMES } from "../src/pm/index.ts";
 import { scaffold } from "../src/scaffold.ts";
 import { fakeDeps, scaffoldOptions } from "./support/fixture.ts";
 
 // Update the golden files after an intentional template/output change with: pnpm test -u
 // (see test/golden/README.md). File modes are deliberately not captured (no-op on Windows).
-const GOLDEN_CASES = [{ name: "pnpm", adapter: () => createPnpmAdapter(async () => "9.9.9") }];
 
 async function listFiles(root: string, rel = ""): Promise<string[]> {
   const out: string[] = [];
@@ -36,9 +35,9 @@ beforeEach(async () => {
 });
 afterEach(() => rm(dir, { recursive: true, force: true }));
 
-describe.each(GOLDEN_CASES)("golden output: $name", ({ name, adapter }) => {
+describe.each(PM_NAMES)("golden output: %s", (name) => {
   it("matches the committed golden file byte for byte", async () => {
-    await scaffold(scaffoldOptions(dir), fakeDeps(adapter()));
+    await scaffold(scaffoldOptions(dir), fakeDeps(createAdapter(name, async () => "9.9.9")));
     await expect(await serialize(dir)).toMatchFileSnapshot(`golden/${name}.golden.txt`);
   });
 });

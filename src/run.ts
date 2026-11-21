@@ -35,6 +35,14 @@ function formatResult(result: Result, target: string, nextSteps: string): string
   ].join("\n");
 }
 
+function nextSteps(run: string): string {
+  return `Next steps:
+  cp .env.example .env && docker compose up -d
+  ${`${run} dev`.padEnd(31)}# api :3000, web :5173, worker
+  ${".github/CODEOWNERS".padEnd(31)}# assign owners for architecture files
+  git add -A && git commit -m "chore: scaffold"`;
+}
+
 /** Runs the CLI end to end and returns the process exit code. */
 export async function run(io: RunIo): Promise<number> {
   const out = (text: string) => io.stdout.write(`${text}\n`);
@@ -55,7 +63,7 @@ export async function run(io: RunIo): Promise<number> {
     const resolved = await resolveOptions(parsed, io.env, io.tty, io.prompter, io.fsProbe);
     const deps = io.makeDeps(resolved);
     const result = await scaffold({ ...resolved, nodeMajor }, deps);
-    out(formatResult(result, resolved.target, deps.pm.nextSteps()));
+    out(formatResult(result, resolved.target, nextSteps(deps.pm.commands.run.join(" "))));
     return 0;
   } catch (error) {
     if (error instanceof CancelledError) {
