@@ -1,16 +1,16 @@
 # Project rules
 
-This block is protected by `.claude/hooks/guard.mjs` and `pnpm arch`. Anything outside it may be edited freely.
+This block is protected by `.claude/hooks/guard.mjs` and `__RUN__ arch`. Anything outside it may be edited freely.
 
 ## Language
 Chat with the user in the user's language. Everything else — code, comments, docs, ADRs, commit messages, PR text, log and error messages — is written in English.
 
 ## Commands
-- `pnpm verify`: architecture, lint, typecheck and tests. **Work is done only when this passes.**
-- `pnpm dev`: all apps. Postgres via `docker compose up -d`.
-- `pnpm arch`: architecture check only.
-- `pnpm worktree:setup` / `worktree:info`: per-worktree `.env` + database (Paseo runs setup automatically; see `paseo.json`). Never hard-code ports; services get `$PASEO_PORT`.
-- `pnpm add <pkg> --filter __SCOPE__/<target>`: add a dependency; the version is written to the catalog.
+- `__RUN__ verify`: architecture, lint, typecheck and tests. **Work is done only when this passes.**
+- `__RUN__ dev`: all apps. Postgres via `docker compose up -d`.
+- `__RUN__ arch`: architecture check only.
+- `__RUN__ worktree:setup` / `worktree:info`: per-worktree `.env` + database (Paseo runs setup automatically; see `paseo.json`). Never hard-code ports; services get `$PASEO_PORT`.
+- `__ADD_DEP__ __SCOPE__/<target>`: add a dependency; the version is written to the catalog.
 
 ## Where code goes
 | Need | Location |

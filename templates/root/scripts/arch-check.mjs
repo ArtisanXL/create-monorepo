@@ -14,7 +14,7 @@ const rel = (p) => path.relative(root, p).split(path.sep).join("/");
 const contract = contractFrom(readJson("architecture.json"));
 const claudeMdText = existsSync(path.join(root, "CLAUDE.md")) ? readText("CLAUDE.md") : null;
 
-// A human intentionally changed the block: `pnpm arch --claude-hash` → write it into architecture.json.
+// A human intentionally changed the block: `__RUN__ arch --claude-hash` → write it into architecture.json.
 if (process.argv.includes("--claude-hash")) {
   const hash = contract.claudeBlock && claudeMdText !== null ? claudeBlockHash(claudeMdText, contract.claudeBlock) : null;
   console.log(hash ?? "CLAUDE.md scaffold block not found");
@@ -56,7 +56,7 @@ function gather() {
   return {
     contract,
     rootPackageJson: readJson("package.json"),
-    catalogText: readText("pnpm-workspace.yaml"),
+    catalogText: readText("__CATALOG_FILE__"),
     claudeMdText,
     groupDirs,
     packages,

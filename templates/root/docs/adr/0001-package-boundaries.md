@@ -19,6 +19,6 @@ worker ──▶ core, db, domain
 - Relative imports across packages (`../../packages/...`) are forbidden.
 
 ## Enforcement
-`scripts/arch-check.mjs` (`pnpm arch`): folder list, package names, package.json dependencies,
+`scripts/arch-check.mjs` (`__RUN__ arch`): folder list, package names, package.json dependencies,
 source imports, deferred dependencies, `@ts-ignore`/`@ts-nocheck`, empty placeholder files and the
 CLAUDE.md scaffold block. Runs in the pre-commit hook, CI and the Claude Code Stop hook.

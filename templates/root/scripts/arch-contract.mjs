@@ -102,7 +102,7 @@ export function deferredDepInCommand(contract, cmd) {
 }
 
 /**
- * Deferred dependencies declared as keys in a pnpm-workspace.yaml catalog.
+ * Deferred dependencies declared as keys in a __CATALOG_FILE__ catalog.
  * @returns {{ dep: string, deferred: Deferred }[]}
  */
 export function deferredDepsInCatalog(contract, text) {

@@ -1,4 +1,4 @@
 #!/bin/sh
 set -e
-pnpm -s arch
-pnpm -s lint
+__RUN_SILENT__ arch
+__RUN_SILENT__ lint

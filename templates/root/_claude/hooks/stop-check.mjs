@@ -18,7 +18,7 @@ if (existsSync(biome)) checks.push(["lint", run(process.execPath, [biome, "check
 const failed = checks.filter(([, r]) => r.status !== 0);
 if (failed.length) {
   const out = failed.map(([n, r]) => `## ${n}\n${r.stdout ?? ""}${r.stderr ?? ""}`).join("\n");
-  process.stderr.write(`Fix these checks before finishing (pnpm verify):\n${out.slice(-6000)}`);
+  process.stderr.write(`Fix these checks before finishing (__RUN__ verify):\n${out.slice(-6000)}`);
   process.exit(2);
 }
 process.exit(0);
