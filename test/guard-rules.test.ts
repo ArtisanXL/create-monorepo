@@ -164,7 +164,16 @@ describe("guard decision: Bash", () => {
   });
 
   it("blocks git commands that touch protected paths", () => {
-    expect(blocked(bash("git restore architecture.json"))).toContain("via git");
+    for (const cmd of [
+      "git restore architecture.json",
+      "git checkout -- architecture.json",
+      "git checkout HEAD -- docs/adr/0001-x.md",
+    ])
+      expect(blocked(bash(cmd)), cmd).toContain("via git");
+    // CLAUDE.md itself is not a protected path (only its scaffold block is).
+    expect(bash("git checkout -- CLAUDE.md")).toEqual({ allow: true });
+    expect(bash("git checkout -- src/x.ts")).toEqual({ allow: true });
+    expect(bash("git checkout main")).toEqual({ allow: true });
     expect(bash("git restore packages/domain/src/a.ts")).toEqual({ allow: true });
   });
 

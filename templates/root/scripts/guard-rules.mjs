@@ -68,7 +68,7 @@ function bashRule(contract, root, home, cmd) {
   if (/--no-verify\b/.test(cmd) || /\bgit\s+commit\b[^|;&]*\s-n\b/.test(cmd))
     return "Skipping git hooks is forbidden (--no-verify).";
   if (/core\.hooksPath/.test(cmd) && !/\.githooks/.test(cmd)) return "Changing the git hooks path is forbidden.";
-  if (/\bgit\s+(clean|checkout\s+--|restore|rm)\b/.test(cmd) && touchesProtected)
+  if (/\bgit\s+(?:(?:clean|restore|rm)\b|checkout\b[^|;&]*\s--(?:\s|$))/.test(cmd) && touchesProtected)
     return "Command touches a protected path via git; only humans may change it.";
 
   // pm-guard:begin
