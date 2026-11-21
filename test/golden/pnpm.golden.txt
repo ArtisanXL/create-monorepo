@@ -1523,7 +1523,7 @@ export function check(snapshot) {
   return errors;
 }
 
-=== scripts/guard-rules.mjs (40875 bytes) ===
+=== scripts/guard-rules.mjs (41987 bytes) ===
 // The guard hook's decision, free of I/O: no stdin, env, filesystem or exit. The first matching
 // rule wins, so each message stays the same as it always was. Imported by .claude/hooks/guard.mjs.
 import path from "node:path";
@@ -1788,6 +1788,7 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
   };
   // Arithmetic (`$((..))`, `$[..]`) and backticks are scanned for commands; returns the new index.
   const expansion = (i) => {
+    grow().dyn = true;
     if (cmd[i + 2] === "(") {
       const e = closeArith(cmd, i + 3);
       nested.push(cmd.slice(i + 3, e));
@@ -1830,12 +1831,14 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
         } else if (cmd[i] === "$" && cmd[i + 1] === "(") {
           const e = closeParen(cmd, i + 1, state, level);
           nested.push(cmd.slice(i + 2, e));
+          cur.dyn = true;
           i = e;
           continue;
         } else if (cmd[i] === "`") {
           let e = i + 1;
           while (e < cmd.length && cmd[e] !== "`") e += cmd[e] === "\\" ? 2 : 1;
           nested.push(cmd.slice(i + 1, e));
+          cur.dyn = true;
           i = e;
           continue;
         }
@@ -2255,12 +2258,16 @@ const WRITE_WORD = /\b(?:mkdir|touch|cp|mv|rm|tee|truncate|ln|install|dd)\b|\bse
  * protected path anywhere block it.
  */
 function runtimeTextRule(env, cmd, parsed) {
-  const f = env.fold;
+  const { contract, fold: f } = env;
   const isFlag = (t) => t.startsWith("-");
+  const dynamic = (w) => w.dyn || /\$[A-Za-z_{]|^\$$/.test(w.text);
   // Heredoc bodies are data (or checked on their own), so they are left out of the command-position test.
   let bare = cmd;
   for (const seg of parsed.segments) for (const b of seg.bodies) if (b) bare = bare.replace(b, "");
-  let runtime = /(?:^|[;&|(\n])\s*(?:\$[({\w]|`)/.test(bare);
+  // [ \t]* rather than \s*: a run of newlines must not be rescanned from every newline.
+  let runtime = /(?:^|[;&|(\n])[ \t]*"?(?:\$[({\w]|`)/.test(bare);
+  // Scripts under protected paths cannot have been changed by an agent; running one is not run-time text.
+  const ownScripts = [];
   for (const [idx, s] of parsed.segments.entries()) {
     if (runtime) break;
     const texts = s.words.map((w) => w.text);
@@ -2268,19 +2275,32 @@ function runtimeTextRule(env, cmd, parsed) {
     const k = s.words.findIndex((w) => !w.quoted && (SHELL_NAME.test(f(baseName(w.text))) || INTERPRETERS.test(f(baseName(w.text))) || [".", "source", "eval"].includes(w.text)));
     if (k < 0) continue;
     const name = f(baseName(texts[k]));
+    const args = s.words.slice(k + 1);
     const after = texts.slice(k + 1);
     if (name === "eval") runtime = true;
-    else if (SHELL_NAME.test(name) && after.some((t, j) => /^-[A-Za-z]*c$/.test(t) && after[j + 1] === "--")) runtime = true;
-    else {
-      const inline = SHELL_NAME.test(name) ? after.some((t) => /^-[A-Za-z]*c$/.test(t)) : (name === "deno" && after[0] === "eval") || after.slice(0, after.findIndex((t) => !isFlag(t)) + 1 || after.length).some((t) => EVAL_FLAG.test(t));
+    else if (SHELL_NAME.test(name) && after.some((t) => /^-[A-Za-z]*c$/.test(t))) {
+      // `-c` takes a string; one built at run time (`"$(...)"`, `$X`, `--`, or nothing before a backtick) is run-time text.
+      const j = after.findIndex((t) => /^-[A-Za-z]*c$/.test(t));
+      if (!args[j + 1] || after[j + 1] === "--" || dynamic(args[j + 1])) runtime = true;
+    } else {
+      const inline = (name === "deno" && after[0] === "eval") || after.slice(0, after.findIndex((t) => !isFlag(t)) + 1 || after.length).some((t) => EVAL_FLAG.test(t));
       const file = after.find((t) => !isFlag(t));
-      const fed = idx > s.pipeStart || s.inputs.length > 0 || s.procSub;
-      if (!inline && (fed || (file !== undefined && !parsed.checked.has(path.normalize(file))))) runtime = true;
+      if (inline) continue;
+      if (file === undefined) {
+        if (idx > s.pipeStart || s.inputs.length > 0 || s.procSub) runtime = true;
+      } else if (env.relsOf([file], s.bases).some((r) => isProtected(contract, r))) ownScripts.push(file);
+      else if (!parsed.checked.has(path.normalize(file))) runtime = true;
     }
   }
-  if (!runtime || !WRITE_WORD.test(cmd)) return undefined;
+  if (!runtime) return undefined;
+  const REDIRECT_TO = />[>|]?[ \t]*["']?([^\s"'<>|;&()\\]+)/g;
   const tokens = [...cmd.matchAll(/[^\s"'<>|;&()\\]+/g)].map((m) => m[0]);
-  return env.relsOf(tokens, [env.root]).some((r) => isProtectedOrDir(env.contract, r)) ? MSG.runtime : undefined;
+  const targets = [...cmd.matchAll(REDIRECT_TO)].map((m) => m[1]);
+  const protectedIn = (words) => env.relsOf(words, [env.root]).some((r) => isProtectedOrDir(contract, r));
+  // A redirect into a protected path is a write on its own; other writes need a write word.
+  if (protectedIn(targets)) return MSG.runtime;
+  if (!WRITE_WORD.test(cmd)) return undefined;
+  return protectedIn(tokens.filter((t) => !ownScripts.includes(t))) ? MSG.runtime : undefined;
 }
 
 function directRule(ctx, cmd, parsed) {

@@ -986,3 +986,71 @@ describe("guard decision: text built at run time (#29)", () => {
       expect(bash(cmd), cmd).toEqual({ allow: true });
   });
 });
+
+describe("guard decision: seventh audit follow-ups (#29)", () => {
+  it.each([
+    "echo 'echo x > architecture.json' | sh",
+    "echo 'echo x >> architecture.json' | sh",
+    "echo 'echo x >| architecture.json' | bash",
+    "sh -c \"$(printf 'rm architecture.json')\"",
+    "bash -c \"`printf 'rm architecture.json'`\"",
+    "bash -c $(printf 'rm architecture.json')",
+    "bash -c `printf 'rm architecture.json'`",
+    "X='rm architecture.json'; bash -c \"$X\"",
+    '"$(echo rm)" architecture.json',
+    'X=rm; "$X" architecture.json',
+    '"`echo rm`" architecture.json',
+  ])("blocks %s", (cmd) => {
+    expect(blocked(bash(cmd)), cmd).toBeDefined();
+  });
+
+  it("does not treat the project's own protected scripts as run-time text", () => {
+    for (const cmd of [
+      "node scripts/worktree.mjs setup && pnpm install",
+      "node scripts/arch-check.mjs | tee /tmp/a.log",
+      "rm -rf node_modules && node scripts/worktree.mjs setup",
+      "mkdir -p /tmp/x && node scripts/arch-check.mjs",
+      "bash scripts/check.sh && rm -rf dist",
+      "pnpm exec tsx scripts/seed.ts && rm -rf tmp",
+      "node scripts/arch-check.mjs && touch /tmp/ok",
+      'node scripts/arch-check.mjs; git commit -m "fix: rm stale docs/adr link"',
+      "node scripts/arch-check.mjs < input.txt",
+    ])
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+  });
+
+  it("still triggers on scripts outside protected paths and on stdin", () => {
+    expect(blocked(bash("node tools/x.mjs && rm architecture.json"))).toBeDefined();
+    expect(blocked(bash("bash /tmp/x.sh; cp architecture.json /tmp/a"))).toBeDefined();
+    expect(
+      blocked(
+        bash(
+          "echo 'rm architecture.json' | node scripts/arch-check.mjs && echo 'rm architecture.json' | sh",
+        ),
+      ),
+    ).toBeDefined();
+  });
+
+  it("decides in linear time on long runs of newlines, spaces and separators", () => {
+    for (const unit of ["\n", " ", ";", "\n ", "$", "(", "`", '"$('])
+      for (const n of [50_000 / unit.length]) {
+        const t0 = performance.now();
+        bash(unit.repeat(n));
+        expect(performance.now() - t0, JSON.stringify(unit)).toBeLessThan(500);
+      }
+  });
+
+  it("documents more known limits: allowed, CI arch-check is the backstop", () => {
+    for (const cmd of [
+      `echo "fs.unlinkSync('architecture.json')" | node`,
+      `echo "os.remove('architecture.json')" | python3`,
+      `echo "unlink 'architecture.json'" | perl`,
+      "echo 'dd of=architecture.json' | sh",
+      "echo cm0gYXJjaGl0ZWN0dXJlLmpzb24= | base64 -d | sh",
+      "echo \"'r''m architecture.json'\" | sh",
+      "printf 'r%s architecture.json' m | sh",
+      "echo 'rm -rf docs' | sh",
+    ])
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+  });
+});
