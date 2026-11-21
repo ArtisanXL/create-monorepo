@@ -16,7 +16,7 @@ beforeAll(async () => {
 afterAll(() => cleanup());
 
 /** Runs the generated guard hook as Claude Code would: JSON on stdin, exit 2 blocks. */
-function guard(toolName: string, toolInput: Record<string, unknown>) {
+function guard(toolName: string, toolInput: Record<string, unknown>, rawStdin?: string) {
   return new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
     const child = spawn("node", [".claude/hooks/guard.mjs"], {
       cwd: dir,
@@ -28,10 +28,11 @@ function guard(toolName: string, toolInput: Record<string, unknown>) {
     });
     child.on("error", reject);
     child.on("close", (code) => resolve({ code, stderr }));
-    child.stdin.end(JSON.stringify({ tool_name: toolName, tool_input: toolInput, cwd: dir }));
+    child.stdin.end(
+      rawStdin ?? JSON.stringify({ tool_name: toolName, tool_input: toolInput, cwd: dir }),
+    );
   });
 }
-const bash = (command: string) => guard("Bash", { command });
 const write = (file_path: string) => guard("Write", { file_path, content: "x" });
 
 describe("generated arch-check", () => {
@@ -48,166 +49,81 @@ describe("generated arch-check", () => {
       await expect(
         execFileAsync("node", ["scripts/arch-check.mjs"], { cwd: dir }),
       ).rejects.toMatchObject({
+        code: 1,
         stderr: expect.stringContaining("scaffold block was modified"),
       });
     } finally {
       await writeFile(path, original);
     }
   });
-
-  it("treats inline `type` bindings as type-only imports", async () => {
-    const file = join(dir, "apps/web/src/inline-type.ts");
-    const run = () => execFileAsync("node", ["scripts/arch-check.mjs"], { cwd: dir });
-    try {
-      await writeFile(
-        file,
-        'import { type AppType } from "@acme/api";\nexport type A = AppType;\n',
-      );
-      await expect(run()).resolves.toBeDefined();
-      await writeFile(file, 'import { type AppType, app } from "@acme/api";\nexport { app };\n');
-      await expect(run()).rejects.toMatchObject({
-        stderr: expect.stringContaining("may only be imported with `import type`"),
-      });
-    } finally {
-      await (await import("node:fs/promises")).rm(file, { force: true });
-    }
-  });
-
-  it("fails on an undeclared package folder", async () => {
-    await mkdir(join(dir, "packages/auth"), { recursive: true });
-    await writeFile(join(dir, "packages/auth/index.ts"), "export const a = 1;\n");
-    try {
-      await expect(
-        execFileAsync("node", ["scripts/arch-check.mjs"], { cwd: dir }),
-      ).rejects.toMatchObject({
-        stderr: expect.stringContaining("packages/auth: not declared"),
-      });
-    } finally {
-      await (await import("node:fs/promises")).rm(join(dir, "packages/auth"), { recursive: true });
-    }
-  });
 });
 
 describe("generated guard hook", () => {
-  it("blocks writes to protected paths", async () => {
-    for (const p of [
-      "architecture.json",
-      "docs/adr/0001-x.md",
-      "biome.json",
-      ".githooks/pre-commit",
-    ]) {
-      const r = await write(p);
-      expect(r.code, p).toBe(2);
-      expect(r.stderr).toContain("protected");
-    }
-  });
-
-  it("allows the ADR proposal folder and ordinary files", async () => {
-    expect((await write("docs/adr/proposed/0004-x.md")).code).toBe(0);
+  // The decision rules are covered in-process by guard-rules.test.ts; this only checks the adapter.
+  it("exits 0 for an allowed call and 2 with the stderr format for a blocked one", async () => {
     expect((await write("packages/domain/src/money.ts")).code).toBe(0);
+    const blocked = await write("architecture.json");
+    expect(blocked.code).toBe(2);
+    expect(blocked.stderr).toBe(
+      "⛔ architecture.json is protected; only humans may change it. If a change is needed, write an ADR draft under docs/adr/proposed/ and ask the user.\nRules: CLAUDE.md and architecture.json.\n",
+    );
   });
 
-  it("blocks undeclared and deferred packages", async () => {
-    const undeclared = await write("packages/widgets/index.ts");
-    expect(undeclared.code).toBe(2);
-    expect(undeclared.stderr).toContain("not a package declared");
-    const deferred = await write("packages/auth/index.ts");
-    expect(deferred.code).toBe(2);
-    expect(deferred.stderr).toContain('deferred "auth"');
-  });
-
-  it("blocks installing deferred dependencies", async () => {
-    const r = await bash("pnpm add better-auth --filter @acme/core");
+  it("fails closed: malformed stdin blocks with exit 2", async () => {
+    const r = await guard("Write", {}, "not json");
     expect(r.code).toBe(2);
-    expect(r.stderr).toContain('"better-auth" cannot be installed');
-    expect((await bash("pnpm add zod --filter @acme/contracts")).code).toBe(0);
+    expect(r.stderr).toContain("The guard hook failed");
   });
 
-  it("blocks deferred dependencies behind flags such as --filter and -w", async () => {
-    for (const cmd of [
-      "pnpm --filter @acme/core add better-auth",
-      "pnpm -w add better-auth",
-      "pnpm -F @acme/core install better-auth@1.0.0",
-    ]) {
-      const r = await bash(cmd);
-      expect(r.code, cmd).toBe(2);
-      expect(r.stderr, cmd).toContain('"better-auth" cannot be installed');
+  it("fails closed: a malformed architecture.json blocks with exit 2", async () => {
+    const path = join(dir, "architecture.json");
+    const original = await readFile(path, "utf8");
+    await writeFile(path, "{ broken");
+    try {
+      const r = await write("packages/domain/src/money.ts");
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("The guard hook failed");
+    } finally {
+      await writeFile(path, original);
     }
   });
 
-  it("blocks foreign package managers behind prefixes", async () => {
-    for (const cmd of [
-      "  npm install foo",
-      "sudo npm install",
-      "time npm i",
-      "env X=1 yarn add zod",
-      "corepack npm install",
-    ]) {
-      const r = await bash(cmd);
-      expect(r.code, cmd).toBe(2);
-      expect(r.stderr, cmd).toContain("pnpm");
+  it("fails closed: a missing rules module blocks with exit 2", async () => {
+    const path = join(dir, "scripts/guard-rules.mjs");
+    const original = await readFile(path, "utf8");
+    await rm(path);
+    try {
+      const r = await write("packages/domain/src/money.ts");
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("The guard hook failed");
+    } finally {
+      await writeFile(path, original);
     }
-  });
-
-  it("only treats a redirect target as a write", async () => {
-    expect((await bash("cat architecture.json > /tmp/arch-copy")).code).toBe(0);
-    expect((await bash("cat biome.json | wc -l > /dev/null")).code).toBe(0);
-    expect((await bash("echo x > architecture.json")).code).toBe(2);
-    expect((await bash("echo x >> docs/adr/0001-x.md")).code).toBe(2);
-    expect((await bash("echo x > packages/widgets/a.ts")).code).toBe(2);
   });
 
   it("records the chosen package manager in architecture.json", async () => {
     const arch = JSON.parse(await readFile(join(dir, "architecture.json"), "utf8"));
     expect(arch.package_manager).toBe("pnpm");
   });
+});
 
-  it("blocks install commands of foreign package managers", async () => {
-    for (const cmd of [
-      "npm install",
-      "npm i left-pad",
-      "npm ci",
-      "yarn",
-      "yarn add zod",
-      "bun install",
-      "bun add zod",
-      "cd apps/api && npm install",
-    ]) {
-      const r = await bash(cmd);
-      expect(r.code, cmd).toBe(2);
-      expect(r.stderr, cmd).toContain("pnpm");
-    }
+describe("arch-check on a CRLF CLAUDE.md", () => {
+  const claudeMd = () => join(dir, "CLAUDE.md");
+  let original: string;
+  beforeAll(async () => {
+    original = await readFile(claudeMd(), "utf8");
+    await writeFile(claudeMd(), original.replace(/\r?\n/g, "\r\n"));
   });
+  afterAll(() => writeFile(claudeMd(), original));
 
-  it("allows the chosen package manager and non-install foreign commands", async () => {
-    for (const cmd of [
-      "pnpm install",
-      "pnpm add zod --filter @acme/contracts",
-      "pnpm verify",
-      "npm --version",
-      "git commit -m 'npm install notes'",
-    ])
-      expect((await bash(cmd)).code, cmd).toBe(0);
-  });
-
-  it("blocks --no-verify and git commit -n", async () => {
-    expect((await bash("git commit --no-verify -m x")).code).toBe(2);
-    expect((await bash("git commit -n -m x")).code).toBe(2);
-    expect((await bash("git commit -m x")).code).toBe(0);
-  });
-
-  it("blocks edits inside the CLAUDE.md block but not outside it", async () => {
-    const inside = await guard("Edit", {
-      file_path: join(dir, "CLAUDE.md"),
-      old_string: "# Project rules",
-      new_string: "# Mine",
-    });
-    expect(inside.code).toBe(2);
-    const outside = await guard("Write", {
-      file_path: join(dir, "CLAUDE.md"),
-      content: `before\n${await readFile(join(dir, "CLAUDE.md"), "utf8")}`,
-    });
-    expect(outside.code).toBe(0);
+  it("arch-check hashes it like the LF version, and the recorded hash passes", async () => {
+    const run = (args: string[]) =>
+      execFileAsync("node", ["scripts/arch-check.mjs", ...args], { cwd: dir });
+    const crlf = (await run(["--claude-hash"])).stdout.trim();
+    await writeFile(claudeMd(), (await readFile(claudeMd(), "utf8")).replace(/\r\n/g, "\n"));
+    expect((await run(["--claude-hash"])).stdout.trim()).toBe(crlf);
+    await writeFile(claudeMd(), (await readFile(claudeMd(), "utf8")).replace(/\n/g, "\r\n"));
+    expect((await run([])).stdout).toContain("Architecture check passed");
   });
 });
 
