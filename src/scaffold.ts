@@ -89,86 +89,191 @@ async function listTemplates(dir: string, rel = ""): Promise<string[]> {
 const sub = (text: string, token: string, value: string) => text.replaceAll(token, () => value);
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 
-const fill0 = (text: string, scope: string) => sub(text, "__SCOPE__", scope);
+type Values = ReadonlyArray<readonly [token: string, value: string]>;
+
+/** The single template-filling path. Order matters: `__SCOPE_RE__` must precede `__SCOPE__`. */
+export function fillTemplate(text: string, values: Values): string {
+  return values.reduce((acc, [token, value]) => sub(acc, token, value), text);
+}
 
 function toRange(pkg: string, version: string): string {
   return `${pkg === "typescript" ? "~" : "^"}${version}`;
 }
 
-export async function scaffold(options: Options, deps: Deps): Promise<Result> {
-  const { target, scope, dbPrefix, nodeMajor } = options;
-  const { pm } = deps;
+/** Read-only view of the target directory; lets planning run without touching disk. */
+export interface TargetView {
+  exists(rel: string): boolean | Promise<boolean>;
+  read(rel: string): string | Promise<string>;
+}
 
-  const templates: { src: string; dest: string }[] = [];
+export function fsTargetView(target: string): TargetView {
+  return {
+    exists: (rel) => existsSync(join(target, rel)),
+    read: (rel) => readFile(join(target, rel), "utf8"),
+  };
+}
+
+/** Everything the plan step needs; all I/O and network calls have already happened. */
+export interface Gathered {
+  options: Options;
+  pm: PackageManagerAdapter;
+  pmVersion: string;
+  templates: { dest: string; text: string }[];
+  /** `claude-md/block.md`, unfilled. */
+  blockText: string;
+  /** Target paths that already exist (destinations, the workspace file, `.git`). */
+  existing: ReadonlySet<string>;
+  existingClaudeMd: string | undefined;
+  /** Registry versions; only resolved when the workspace file is going to be written. */
+  versions: Readonly<Record<string, string>> | undefined;
+}
+
+export interface PlannedFile {
+  path: string;
+  content: string;
+  executable: boolean;
+}
+
+export interface PlannedCommand {
+  command: Command;
+  /** A non-zero exit is ignored. */
+  tolerant: boolean;
+}
+
+export interface Plan {
+  /** Files to write, sorted by path. */
+  files: PlannedFile[];
+  written: string[];
+  skipped: string[];
+  /** Run a best-effort `git init` before the commands. */
+  gitInit: boolean;
+  commands: PlannedCommand[];
+}
+
+/** Gather: all reads, network and pm calls happen here. Writes nothing and never calls `deps.run`. */
+export async function gather(
+  options: Options,
+  deps: Pick<Deps, "resolveVersion" | "pm">,
+  view: TargetView,
+): Promise<Gathered> {
+  const { pm } = deps;
+  const templates: { dest: string; text: string }[] = [];
   for (const tree of TEMPLATE_TREES) {
     const prefix = tree === "root" ? "" : `${tree}/`;
     for (const rel of await listTemplates(join(TEMPLATES_DIR, tree))) {
       templates.push({
-        src: join(TEMPLATES_DIR, tree, rel),
         dest: destinationOf(`${prefix}${rel}`),
+        text: await readFile(join(TEMPLATES_DIR, tree, rel), "utf8"),
       });
     }
   }
-  const claudeMdPath = join(target, "CLAUDE.md");
-  const existingClaudeMd = existsSync(claudeMdPath)
-    ? await readFile(claudeMdPath, "utf8")
+  const blockText = await readFile(join(TEMPLATES_DIR, "claude-md", "block.md"), "utf8");
+
+  const existing = new Set<string>();
+  for (const rel of [...templates.map((t) => t.dest), pm.workspaceFile, ".git"]) {
+    if (await view.exists(rel)) existing.add(rel);
+  }
+  const existingClaudeMd = (await view.exists("CLAUDE.md"))
+    ? await view.read("CLAUDE.md")
     : undefined;
+
+  let versions: Record<string, string> | undefined;
+  if (!existing.has(pm.workspaceFile)) {
+    const resolved = await Promise.all(CATALOG_PACKAGES.map((p) => deps.resolveVersion(p)));
+    versions = {};
+    CATALOG_PACKAGES.forEach((p, i) => {
+      (versions as Record<string, string>)[p] = resolved[i] as string;
+    });
+  }
+
+  return {
+    options,
+    pm,
+    pmVersion: await pm.version(),
+    templates,
+    blockText,
+    existing,
+    existingClaudeMd,
+    versions,
+  };
+}
+
+/** Plan: pure and synchronous. Decides every file, its content, and the commands to run. */
+export function plan(g: Gathered): Plan {
+  const { options, pm, existing, existingClaudeMd } = g;
+  const { scope, dbPrefix, nodeMajor } = options;
+
   const claudeMdMissing = existingClaudeMd === undefined || !hasBlock(existingClaudeMd);
-  const files = [
-    ...templates.map((t) => t.dest),
+  const all = [
+    ...g.templates.map((t) => t.dest),
     pm.workspaceFile,
     ...(claudeMdMissing ? ["CLAUDE.md"] : []),
   ].sort();
-  const missing = files.filter((f) => f === "CLAUDE.md" || !existsSync(join(target, f)));
-  const skipped = [...files, ...(claudeMdMissing ? [] : ["CLAUDE.md"])]
+  const missing = all.filter((f) => f === "CLAUDE.md" || !existing.has(f));
+  const skipped = [...all, ...(claudeMdMissing ? [] : ["CLAUDE.md"])]
     .filter((f) => !missing.includes(f))
     .sort();
 
-  // Everything that can fail on the network happens before the first write.
-  const contents = new Map<string, string>();
-
-  if (missing.includes(pm.workspaceFile)) {
-    const versions = await Promise.all(CATALOG_PACKAGES.map((p) => deps.resolveVersion(p)));
-    const catalog: Record<string, string> = {};
-    CATALOG_PACKAGES.forEach((p, i) => {
-      catalog[p] = toRange(p, versions[i] as string);
-    });
-    catalog["@types/node"] = `^${nodeMajor}`;
-    contents.set(pm.workspaceFile, pm.renderWorkspaceFile(catalog));
-  }
-
-  // The CLAUDE.md block, then the hash recorded in architecture.json (same code as arch-check).
-  const block = fill0(await readFile(join(TEMPLATES_DIR, "claude-md", "block.md"), "utf8"), scope);
-  const claudeMd = upsertBlock(existingClaudeMd, block);
-  if (claudeMdMissing) contents.set("CLAUDE.md", claudeMd);
-  const claudeSha = claudeBlockHash(claudeMd) ?? "";
-
-  const packageManager = pm.packageManagerField(await pm.version());
-  const replacements: ReadonlyArray<readonly [string, string]> = [
+  // Values are built in stages so the CLAUDE.md hash ordering is structural: the block is filled
+  // without `__CLAUDE_SHA__`, hashed, and only then is the hash added for everything else.
+  const baseValues: Values = [
     ["__DB_PREFIX__", dbPrefix],
     ["__SCOPE_RE__", escapeRegex(scope)],
     ["__SCOPE__", scope],
     ["__NODE_MAJOR__", String(nodeMajor)],
-    ["__CLAUDE_SHA__", claudeSha],
-    ["__PACKAGE_MANAGER__", packageManager],
+    ["__PACKAGE_MANAGER__", g.pm.packageManagerField(g.pmVersion)],
     ["__PM__", pm.name],
   ];
-  const fill = (text: string) => replacements.reduce((acc, [t, v]) => sub(acc, t, v), text);
-  for (const t of templates) {
-    if (missing.includes(t.dest)) contents.set(t.dest, fill(await readFile(t.src, "utf8")));
+  const block = fillTemplate(g.blockText, baseValues);
+  const claudeMd = upsertBlock(existingClaudeMd, block);
+  const values: Values = [...baseValues, ["__CLAUDE_SHA__", claudeBlockHash(claudeMd) ?? ""]];
+
+  const contents = new Map<string, string>();
+  for (const t of g.templates) {
+    if (missing.includes(t.dest)) contents.set(t.dest, fillTemplate(t.text, values));
+  }
+  if (claudeMdMissing) contents.set("CLAUDE.md", claudeMd);
+  if (missing.includes(pm.workspaceFile)) {
+    const catalog: Record<string, string> = {};
+    for (const [p, v] of Object.entries(g.versions ?? {})) catalog[p] = toRange(p, v);
+    catalog["@types/node"] = `^${nodeMajor}`;
+    contents.set(pm.workspaceFile, pm.renderWorkspaceFile(catalog));
   }
 
+  const commands: PlannedCommand[] = options.install
+    ? [
+        { command: pm.installCommand(), tolerant: false },
+        ...(missing.length ? [{ command: pm.formatCommand(missing), tolerant: true }] : []),
+        { command: pm.verifyCommand(), tolerant: false },
+      ]
+    : [];
+
+  return {
+    files: missing.map((path) => ({
+      path,
+      content: contents.get(path) as string,
+      executable: EXECUTABLE.has(path),
+    })),
+    written: missing,
+    skipped,
+    // `git rev-parse` would succeed inside a parent repository and skip the init, leaving the
+    // `prepare` script to set core.hooksPath on the parent: look for the target's own `.git`.
+    gitInit: !existing.has(".git"),
+    commands,
+  };
+}
+
+/** Apply: the only step that writes files or spawns processes. */
+export async function apply(p: Plan, target: string, deps: Pick<Deps, "run">): Promise<Result> {
   await mkdir(target, { recursive: true });
-  for (const file of missing) {
-    const path = join(target, file);
+  for (const file of p.files) {
+    const path = join(target, file.path);
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, contents.get(file) as string);
-    if (EXECUTABLE.has(file)) await chmod(path, 0o755);
+    await writeFile(path, file.content);
+    if (file.executable) await chmod(path, 0o755);
   }
 
-  // `git rev-parse` would succeed inside a parent repository and skip the init, leaving the
-  // `prepare` script to set core.hooksPath on the parent: look for the target's own `.git`.
-  if (!existsSync(join(target, ".git"))) {
+  if (p.gitInit) {
     try {
       await run(deps, ["git", "init", "-q", "-b", "main"], target);
     } catch {
@@ -176,18 +281,18 @@ export async function scaffold(options: Options, deps: Deps): Promise<Result> {
     }
   }
 
-  if (options.install) {
-    await run(deps, pm.installCommand(), target);
-    // Formatting written files is best-effort.
-    if (missing.length) await run(deps, pm.formatCommand(missing), target, true);
-    await run(deps, pm.verifyCommand(), target);
-  }
+  for (const { command, tolerant } of p.commands) await run(deps, command, target, tolerant);
 
-  return { written: missing, skipped };
+  return { written: p.written, skipped: p.skipped };
+}
+
+export async function scaffold(options: Options, deps: Deps): Promise<Result> {
+  const gathered = await gather(options, deps, fsTargetView(options.target));
+  return apply(plan(gathered), options.target, deps);
 }
 
 /** Runs a command and throws on failure unless `tolerant`. */
-async function run(deps: Deps, command: Command, cwd: string, tolerant = false) {
+async function run(deps: Pick<Deps, "run">, command: Command, cwd: string, tolerant = false) {
   const [cmd, ...args] = command;
   const { code } = await deps.run(cmd, args, cwd);
   if (code !== 0 && !tolerant) throw new Error(`${command.join(" ")} failed (exit ${code})`);
