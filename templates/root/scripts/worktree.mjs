@@ -25,9 +25,12 @@ import { parseEnv } from "node:util";
 import postgres from "postgres";
 import {
   databaseName,
-  databaseOf,
   ensureSecrets,
+  likePatternFor,
+  mayDropDatabase,
+  protectedDatabases,
   rewriteIsolatedKeys,
+  sourceEnvCandidates,
   withDatabase,
   worktreeKey,
 } from "./worktree-lib.mjs";
@@ -60,16 +63,29 @@ function adminSql(env) {
   return postgres(url, { max: 1, onnotice: () => {} });
 }
 
+function existingSourceEnvs({ excludeOwn }) {
+  return sourceEnvCandidates({
+    paseoSource: process.env.PASEO_SOURCE_CHECKOUT_PATH,
+    mainCheckout,
+    toplevel,
+  }).filter((candidate) => !(excludeOwn && candidate === envPath) && existsSync(candidate));
+}
+
+/** Databases named by any existing source .env; throws on a malformed URL so callers fail closed. */
+function protectedSourceDatabases() {
+  return protectedDatabases({
+    prefix: PREFIX,
+    envs: existingSourceEnvs({ excludeOwn: false }).map((source) => ({
+      source,
+      text: readFileSync(source, "utf8"),
+    })),
+  });
+}
+
 /** Where a missing .env is copied from, and what "unchanged" isolated values are compared to. */
 function sourceEnvPath() {
-  const candidates = [
-    process.env.PASEO_SOURCE_CHECKOUT_PATH && join(process.env.PASEO_SOURCE_CHECKOUT_PATH, ".env"),
-    join(mainCheckout, ".env"),
-    join(toplevel, ".env.example"),
-  ];
-  for (const candidate of candidates) {
-    if (candidate && candidate !== envPath && existsSync(candidate)) return candidate;
-  }
+  const found = existingSourceEnvs({ excludeOwn: true });
+  if (found.length > 0) return found[0];
   throw new Error("no .env source found (expected .env.example at least)");
 }
 
@@ -139,15 +155,8 @@ async function setup() {
 async function teardown() {
   if (key === null) return warn("refusing to tear down the main checkout");
   const env = readEnv();
-  const protectedDbs = new Set([PREFIX]);
-  const sourceEnv = process.env.PASEO_SOURCE_CHECKOUT_PATH
-    ? join(process.env.PASEO_SOURCE_CHECKOUT_PATH, ".env")
-    : join(mainCheckout, ".env");
-  if (existsSync(sourceEnv)) {
-    const url = parseEnv(readFileSync(sourceEnv, "utf8")).DATABASE_URL;
-    if (url) protectedDbs.add(databaseOf(url));
-  }
-  if (!database.startsWith(`${PREFIX}_wt_`) || protectedDbs.has(database)) {
+  const protectedDbs = protectedSourceDatabases();
+  if (!mayDropDatabase({ prefix: PREFIX, database, protected: protectedDbs })) {
     return warn(`refusing: ${database} belongs to the main or source checkout`);
   }
   const sql = adminSql(env);
@@ -161,13 +170,17 @@ async function teardown() {
 
 async function gc(confirmed) {
   const env = readEnv();
+  const protectedDbs = protectedSourceDatabases();
   const sql = adminSql(env);
   try {
     const rows = await sql`
       select datname, shobj_description(oid, 'pg_database') as comment
-      from pg_database where datname like ${`${PREFIX}\\_wt\\_%`}`;
+      from pg_database where datname like ${likePatternFor(PREFIX)}`;
     const orphans = rows.filter(
-      (r) => r.comment?.startsWith(COMMENT_PREFIX) && !existsSync(r.comment.slice(COMMENT_PREFIX.length)),
+      (r) =>
+        mayDropDatabase({ prefix: PREFIX, database: r.datname, protected: protectedDbs }) &&
+        r.comment?.startsWith(COMMENT_PREFIX) &&
+        !existsSync(r.comment.slice(COMMENT_PREFIX.length)),
     );
     if (orphans.length === 0) return log("no orphaned worktree databases");
     for (const r of orphans) log(`orphaned: ${r.datname} (${r.comment.slice(COMMENT_PREFIX.length)} is gone)`);

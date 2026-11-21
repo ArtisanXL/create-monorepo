@@ -1423,10 +1423,10 @@ if (errors.length) {
 }
 console.log(`✓ Architecture check passed (${Object.keys(packages).length} packages)`);
 
-=== scripts/worktree-lib.mjs (2580 bytes) ===
+=== scripts/worktree-lib.mjs (4531 bytes) ===
 // Pure helpers for scripts/worktree.mjs (unit-tested in worktree-lib.test.mjs).
 import { createHash, randomBytes } from "node:crypto";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import { parseEnv } from "node:util";
 
 /** `<slug>_<sha1(path)[:6]>`; slug = lowercased basename, `[^a-z0-9]` → `_`, max 20 chars. */
@@ -1439,9 +1439,57 @@ export function worktreeKey(worktreePath) {
   return `${slug}_${hash}`;
 }
 
+/** Separates the project prefix from the worktree key in every worktree database name. */
+export const WORKTREE_SEPARATOR = "_wt_";
+
 /** Database name for the main checkout (`key === null`) or a worktree. */
 export function databaseName(prefix, key) {
-  return key === null ? prefix : `${prefix}_wt_${key}`;
+  return key === null ? prefix : `${prefix}${WORKTREE_SEPARATOR}${key}`;
+}
+
+/** True only for a database named `<prefix>_wt_<something>`; a literal comparison, no wildcards. */
+export function isWorktreeDatabase(prefix, name) {
+  const head = `${prefix}${WORKTREE_SEPARATOR}`;
+  return typeof name === "string" && name.length > head.length && name.startsWith(head);
+}
+
+/** SQL LIKE pattern (default `\` escape) matching worktree databases of `prefix`; `\`, `%`, `_` are literal. */
+export function likePatternFor(prefix) {
+  const literal = `${prefix}${WORKTREE_SEPARATOR}`.replace(/[\\%_]/g, "\\$&");
+  return `${literal}%`;
+}
+
+/** Ordered `.env` sources: Paseo source checkout, main checkout, then this checkout's `.env.example`. */
+export function sourceEnvCandidates({ paseoSource, mainCheckout, toplevel }) {
+  return [
+    ...(paseoSource ? [join(paseoSource, ".env")] : []),
+    join(mainCheckout, ".env"),
+    join(toplevel, ".env.example"),
+  ];
+}
+
+/**
+ * Databases that must never be dropped: the bare prefix plus each env's DATABASE_URL database.
+ * `envs` is `[{ source, text }]`. A malformed DATABASE_URL throws (naming its source) so callers
+ * fail closed instead of dropping a database they could not identify.
+ */
+export function protectedDatabases({ prefix, envs }) {
+  const names = new Set([prefix]);
+  for (const { source, text } of envs) {
+    const url = parseEnv(text).DATABASE_URL;
+    if (!url) continue;
+    try {
+      names.add(databaseOf(url));
+    } catch {
+      throw new Error(`DATABASE_URL in ${source} is not a valid URL; refusing to drop anything`);
+    }
+  }
+  return names;
+}
+
+/** Drop-safety rule: only this project's worktree databases that are not protected. */
+export function mayDropDatabase({ prefix, database, protected: protectedNames }) {
+  return isWorktreeDatabase(prefix, database) && !protectedNames.has(database);
 }
 
 /** `url` with its database name replaced; `undefined` passes through. */
@@ -1496,12 +1544,17 @@ export function ensureSecrets(text, names) {
   return result;
 }
 
-=== scripts/worktree-lib.test.mjs (1919 bytes) ===
+=== scripts/worktree-lib.test.mjs (4925 bytes) ===
 import { parseEnv } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
   databaseName,
   ensureSecrets,
+  isWorktreeDatabase,
+  likePatternFor,
+  mayDropDatabase,
+  protectedDatabases,
+  sourceEnvCandidates,
   rewriteIsolatedKeys,
   withDatabase,
   worktreeKey,
@@ -1518,6 +1571,78 @@ describe("worktree-lib", () => {
   it("names the main and worktree databases", () => {
     expect(databaseName("app", null)).toBe("app");
     expect(databaseName("app", "icky_emu_3f9a1c")).toBe("app_wt_icky_emu_3f9a1c");
+  });
+
+  it("recognises only this prefix's worktree databases", () => {
+    expect(isWorktreeDatabase("my_app", "my_app_wt_abc_123456")).toBe(true);
+    expect(isWorktreeDatabase("my_app", "myxapp_wt_abc_123456")).toBe(false);
+    expect(isWorktreeDatabase("my_app", "my_app")).toBe(false);
+    expect(isWorktreeDatabase("my_app", "my_app_wt_")).toBe(false);
+    expect(isWorktreeDatabase("app", databaseName("app", "k_123456"))).toBe(true);
+  });
+
+  it("escapes LIKE wildcards in the prefix", () => {
+    expect(likePatternFor("my_app")).toBe("my\\_app\\_wt\\_%");
+    expect(likePatternFor("a%b")).toBe("a\\%b\\_wt\\_%");
+    expect(likePatternFor("a\\b")).toBe("a\\\\b\\_wt\\_%");
+  });
+
+  it("lists .env source candidates in order, skipping an unset Paseo source", () => {
+    const dirs = { mainCheckout: "/main", toplevel: "/wt" };
+    expect(sourceEnvCandidates({ ...dirs, paseoSource: "/src" })).toEqual([
+      "/src/.env",
+      "/main/.env",
+      "/wt/.env.example",
+    ]);
+    expect(sourceEnvCandidates({ ...dirs, paseoSource: undefined })).toEqual([
+      "/main/.env",
+      "/wt/.env.example",
+    ]);
+  });
+
+  describe("drop safety", () => {
+    const prefix = "my_app";
+    const env = (db) => `DATABASE_URL=postgres://u:p@localhost:5432/${db}\n`;
+    const envsOf = (texts) => texts.map((text, i) => ({ source: `/env${i}`, text }));
+    const protect = (texts) => protectedDatabases({ prefix, envs: envsOf(texts) });
+    const may = (database, envTexts) =>
+      mayDropDatabase({ prefix, database, protected: protect(envTexts) });
+
+    it("refuses the main database", () => {
+      expect(may("my_app", [env("my_app")])).toBe(false);
+      expect(may("my_app", [])).toBe(false);
+    });
+
+    it("refuses the source checkout's database", () => {
+      expect(may("my_app_wt_x_123456", [env("my_app_wt_x_123456")])).toBe(false);
+    });
+
+    it("refuses a foreign-prefix name", () => {
+      expect(may("myxapp_wt_x_123456", [env("my_app")])).toBe(false);
+      expect(may("other", [])).toBe(false);
+    });
+
+    it("allows this project's own worktree database", () => {
+      expect(may("my_app_wt_x_123456", [env("my_app")])).toBe(true);
+    });
+
+    it("protects every given env, so a missing Paseo source still leaves the main .env protected", () => {
+      const texts = [env("paseo_db"), env("main_db")];
+      expect(protect(texts)).toEqual(
+        new Set(["my_app", "paseo_db", "main_db"]),
+      );
+      expect(protect([env("main_db")]).has("main_db")).toBe(true);
+    });
+
+    it("ignores a missing DATABASE_URL", () => {
+      expect(protect(["FOO=1\n"])).toEqual(new Set(["my_app"]));
+    });
+
+    it("fails closed on a malformed source URL, naming the file", () => {
+      const bad = "DATABASE_URL=postgres://u:pa/ss@localhost/my_app_wt_feat_abc123\n";
+      const decide = () => may("my_app_wt_feat_abc123", [bad]);
+      expect(decide).toThrow(/\/env0/);
+    });
   });
 
   it("replaces only the database in a URL", () => {
@@ -1549,7 +1674,7 @@ describe("worktree-lib", () => {
   });
 });
 
-=== scripts/worktree.mjs (7471 bytes) ===
+=== scripts/worktree.mjs (7776 bytes) ===
 #!/usr/bin/env node
 /**
  * Per-worktree isolation on a shared local Postgres (see docs/adr/0004-worktree-isolation.md).
@@ -1577,9 +1702,12 @@ import { parseEnv } from "node:util";
 import postgres from "postgres";
 import {
   databaseName,
-  databaseOf,
   ensureSecrets,
+  likePatternFor,
+  mayDropDatabase,
+  protectedDatabases,
   rewriteIsolatedKeys,
+  sourceEnvCandidates,
   withDatabase,
   worktreeKey,
 } from "./worktree-lib.mjs";
@@ -1612,16 +1740,29 @@ function adminSql(env) {
   return postgres(url, { max: 1, onnotice: () => {} });
 }
 
+function existingSourceEnvs({ excludeOwn }) {
+  return sourceEnvCandidates({
+    paseoSource: process.env.PASEO_SOURCE_CHECKOUT_PATH,
+    mainCheckout,
+    toplevel,
+  }).filter((candidate) => !(excludeOwn && candidate === envPath) && existsSync(candidate));
+}
+
+/** Databases named by any existing source .env; throws on a malformed URL so callers fail closed. */
+function protectedSourceDatabases() {
+  return protectedDatabases({
+    prefix: PREFIX,
+    envs: existingSourceEnvs({ excludeOwn: false }).map((source) => ({
+      source,
+      text: readFileSync(source, "utf8"),
+    })),
+  });
+}
+
 /** Where a missing .env is copied from, and what "unchanged" isolated values are compared to. */
 function sourceEnvPath() {
-  const candidates = [
-    process.env.PASEO_SOURCE_CHECKOUT_PATH && join(process.env.PASEO_SOURCE_CHECKOUT_PATH, ".env"),
-    join(mainCheckout, ".env"),
-    join(toplevel, ".env.example"),
-  ];
-  for (const candidate of candidates) {
-    if (candidate && candidate !== envPath && existsSync(candidate)) return candidate;
-  }
+  const found = existingSourceEnvs({ excludeOwn: true });
+  if (found.length > 0) return found[0];
   throw new Error("no .env source found (expected .env.example at least)");
 }
 
@@ -1691,15 +1832,8 @@ async function setup() {
 async function teardown() {
   if (key === null) return warn("refusing to tear down the main checkout");
   const env = readEnv();
-  const protectedDbs = new Set([PREFIX]);
-  const sourceEnv = process.env.PASEO_SOURCE_CHECKOUT_PATH
-    ? join(process.env.PASEO_SOURCE_CHECKOUT_PATH, ".env")
-    : join(mainCheckout, ".env");
-  if (existsSync(sourceEnv)) {
-    const url = parseEnv(readFileSync(sourceEnv, "utf8")).DATABASE_URL;
-    if (url) protectedDbs.add(databaseOf(url));
-  }
-  if (!database.startsWith(`${PREFIX}_wt_`) || protectedDbs.has(database)) {
+  const protectedDbs = protectedSourceDatabases();
+  if (!mayDropDatabase({ prefix: PREFIX, database, protected: protectedDbs })) {
     return warn(`refusing: ${database} belongs to the main or source checkout`);
   }
   const sql = adminSql(env);
@@ -1713,13 +1847,17 @@ async function teardown() {
 
 async function gc(confirmed) {
   const env = readEnv();
+  const protectedDbs = protectedSourceDatabases();
   const sql = adminSql(env);
   try {
     const rows = await sql`
       select datname, shobj_description(oid, 'pg_database') as comment
-      from pg_database where datname like ${`${PREFIX}\\_wt\\_%`}`;
+      from pg_database where datname like ${likePatternFor(PREFIX)}`;
     const orphans = rows.filter(
-      (r) => r.comment?.startsWith(COMMENT_PREFIX) && !existsSync(r.comment.slice(COMMENT_PREFIX.length)),
+      (r) =>
+        mayDropDatabase({ prefix: PREFIX, database: r.datname, protected: protectedDbs }) &&
+        r.comment?.startsWith(COMMENT_PREFIX) &&
+        !existsSync(r.comment.slice(COMMENT_PREFIX.length)),
     );
     if (orphans.length === 0) return log("no orphaned worktree databases");
     for (const r of orphans) log(`orphaned: ${r.datname} (${r.comment.slice(COMMENT_PREFIX.length)} is gone)`);
