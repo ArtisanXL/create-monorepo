@@ -776,7 +776,6 @@ describe("guard decision: third audit follow-ups (#29)", () => {
       `rm${"$"}{IFS}-rf${"$"}{IFS}docs`,
       "echo 'rm -rf docs' | bash",
       'bash <<< "npm install"',
-      'bash -c -- "rm architecture.json"',
       "git checkout HEAD -- 'docs/ad*'",
       "git reset --hard HEAD~3",
       "echo docs | xargs rm -rf",
@@ -926,6 +925,63 @@ describe("guard decision: fifth audit follow-ups (#29)", () => {
       'MSG="update the docs" git commit -m "$MSG"',
       "NODE_ENV=test pnpm test",
       "X='ls docs'; $X",
+    ])
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+  });
+});
+
+describe("guard decision: text built at run time (#29)", () => {
+  it.each([
+    "echo 'rm architecture.json' | sh",
+    "printf 'rm architecture.json\\n' | bash",
+    "bash <<< 'rm architecture.json'",
+    'sh <<< "rm architecture.json"',
+    "bash -c -- 'rm architecture.json'",
+    "bash < <(echo 'rm architecture.json')",
+    "source <(echo 'rm architecture.json')",
+    ". <(echo 'rm architecture.json')",
+    "eval \"$(echo 'rm architecture.json')\"",
+    "$(echo rm) architecture.json",
+    "`echo rm` architecture.json",
+    'echo "rm architecture.json" > /tmp/x.sh; bash /tmp/x.sh',
+    "cat > /tmp/x.sh <<'EOF'\nrm architecture.json\nEOF\nbash < /tmp/x.sh",
+    "cat > /tmp/x.sh <<'EOF'\nrm architecture.json\nEOF\ncat /tmp/x.sh | bash",
+    "cat > /tmp/x.sh <<'EOF'\nrm architecture.json\nEOF\nxargs -a /tmp/x.sh rm",
+    "cat > /tmp/x.sh <<'EOF'\nrm architecture.json\nEOF\ncd /tmp && bash x.sh",
+    "cat > /tmp/x.sh <<'EOF'\nrm architecture.json\nEOF\nbash ~/../../tmp/x.sh",
+    "read -r X <<< 'rm architecture.json'; $X",
+  ])("blocks %s", (cmd) => {
+    expect(blocked(bash(cmd)), JSON.stringify(cmd)).toBeDefined();
+  });
+
+  it("keeps ordinary uses of these constructs allowed", () => {
+    for (const cmd of [
+      "echo 'pnpm test' | bash",
+      "cat > /tmp/run.sh <<'EOF'\npnpm test\nEOF\nbash /tmp/run.sh",
+      'FILES="a b"; rm $FILES',
+      "cat <<EOF | node\nconsole.log(1)\nEOF",
+      "psql <<EOF\nselect 1;\nEOF",
+      "bash scripts/verify.sh",
+      "node scripts/arch-check.mjs",
+      'bash -c "ls docs"',
+      "eval ls",
+      'echo hi | node -e "console.log(1)"',
+    ])
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+  });
+
+  it("suggests git commit -F - when a message variable trips the guard", () => {
+    expect(blocked(bash('MSG="rm docs/adr/0001-x.md" git commit -m "$MSG"'))).toContain(
+      "git commit -F -",
+    );
+  });
+
+  it("documents known limits: allowed, CI arch-check is the backstop", () => {
+    for (const cmd of [
+      "X=rm; Y=architecture.json; $X $Y",
+      "X=architecture.json; rm $X",
+      "git --config-env=core.pager=X log",
+      'python3 -c "$(echo \'import os; os.remove("architecture.json")\')"',
     ])
       expect(bash(cmd), cmd).toEqual({ allow: true });
   });

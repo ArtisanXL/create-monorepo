@@ -1523,7 +1523,7 @@ export function check(snapshot) {
   return errors;
 }
 
-=== scripts/guard-rules.mjs (37308 bytes) ===
+=== scripts/guard-rules.mjs (40875 bytes) ===
 // The guard hook's decision, free of I/O: no stdin, env, filesystem or exit. The first matching
 // rule wins, so each message stays the same as it always was. Imported by .claude/hooks/guard.mjs.
 import path from "node:path";
@@ -1755,6 +1755,8 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
   let words = [];
   let redirs = [];
   let heredocs = [];
+  let inputs = [];
+  let procSub = false;
   let waiting = [];
   let cur = null;
   let pending = null;
@@ -1766,17 +1768,19 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
     if (pending) {
       const p = pending;
       pending = null;
-      if (p.op === "<" || (p.amp && /^(\d+|-)$/.test(w.text))) return;
-      redirs.push({ op: p.op, target: w.text });
+      if (p.op === "<" || p.op === "<<<") inputs.push({ op: p.op, target: w.text });
+      else if (!(p.amp && /^(\d+|-)$/.test(w.text))) redirs.push({ op: p.op, target: w.text });
     } else words.push(w);
   };
   const end = (sep) => {
     pushWord();
     pending = null;
-    if (words.length || redirs.length) segments.push({ words, redirs, sep, heredocs });
+    if (words.length || redirs.length || inputs.length || procSub) segments.push({ words, redirs, sep, heredocs, inputs, procSub });
     words = [];
     redirs = [];
     heredocs = [];
+    inputs = [];
+    procSub = false;
   };
   const grow = () => {
     cur ??= { text: "", quoted: false };
@@ -1879,14 +1883,24 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
       const sep = cmd[i + 1] === "&" ? "&&" : "&";
       end(sep);
       if (sep === "&&") i++;
+    } else if (c === "<" && cmd[i + 1] === "(") {
+      // `<(...)`: process substitution, a command's output read as a file.
+      pushWord();
+      procSub = true;
     } else if (c === ">" || c === "<" || c === "&") {
       if (cur !== null && !cur.quoted && /^\d+$/.test(cur.text)) cur = null;
       else pushWord();
       if (c === "&") i++;
       let op = c === "<" ? "<" : ">";
       let amp = false;
-      if (c === "<") while (cmd[i + 1] === "<") i++;
-      else if (cmd[i + 1] === ">") {
+      if (c === "<") {
+        let n = 1;
+        while (cmd[i + 1] === "<") {
+          i++;
+          n++;
+        }
+        if (n >= 3) op = "<<<";
+      } else if (cmd[i + 1] === ">") {
         op = ">>";
         i++;
       } else if (cmd[i + 1] === "|") i++;
@@ -2029,7 +2043,7 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t) {
     for (const r of seg.redirs) redirects.push({ op: r.op, target: r.target, bases });
     const found = commandsOf(seg.words, fold);
     const bodies = seg.heredocs.map((h) => h.body);
-    segments.push({ words: seg.words, redirs: seg.redirs, pipeStart, bases, tight, name: found[0]?.name, sep: seg.sep, bodies });
+    segments.push({ words: seg.words, redirs: seg.redirs, inputs: seg.inputs, procSub: seg.procSub, pipeStart, bases, tight, name: found[0]?.name, sep: seg.sep, bodies });
     if (seg.sep !== "|") pipeStart = segments.length;
     for (const c of found) {
       commands.push({ ...c, bases, tight });
@@ -2042,6 +2056,7 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t) {
       if (seg.sep === "&&" || seg.sep === ";") tight = [chain];
     }
   }
+  const checked = new Set();
   for (const [idx, seg] of segments.entries()) {
     seg.scriptBodies = [];
     seg.codeBodies = [];
@@ -2058,6 +2073,7 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t) {
       const targets = writtenTargets(seg, fold);
       const runner = targets.length ? segments.slice(idx + 1).find((x) => runs(x, targets, fold)) : undefined;
       if (!runner) continue;
+      for (const t of targets) checked.add(t);
       seg.scriptBodies = seg.bodies;
       if (runner.words.some((w) => !w.quoted && INTERPRETERS.test(fold(baseName(w.text))))) seg.codeBodies = seg.bodies;
       continue;
@@ -2066,7 +2082,7 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t) {
     const interp = [seg, ...pipe].some((x) => x.words.some((w) => !w.quoted && INTERPRETERS.test(fold(baseName(w.text)))));
     if (interp) seg.codeBodies = seg.bodies;
   }
-  return { commands, redirects, segments, nested: parsed.nested, tooComplex: false };
+  return { commands, redirects, segments, nested: parsed.nested, checked, tooComplex: false };
 }
 
 /** Command strings that other commands run: `$(...)`, `sh -c`, `eval`, `watch`, `su -c`, git aliases, pager variables, heredoc scripts. */
@@ -2081,7 +2097,7 @@ function innerStrings({ commands, nested, segments }) {
       if (env && (COMMAND_ENV.test(env[1]) || /^GIT_CONFIG_VALUE_\d+$/.test(env[1])))
         out.push(env[2].replace(/^[|!]/, "").replace(/%s/g, others));
       // A value with whitespace may be a command line that a later `eval $X` / `$X` / `bash -c '$X'` runs.
-      else if (env && /\s/.test(env[2])) out.push(env[2]);
+      else if (env && /\s/.test(env[2])) out.push({ text: env[2], hint: MSG.assignmentHint });
       const opt = /^--(?:pre|pager)(?:=(.*))?$/s.exec(w.text) ?? (seg.name === "man" ? /^-P(.*)$/s.exec(w.text) : null);
       if (opt) out.push(`${opt[1] || seg.words[k + 1]?.text || ""} ${others}`);
     });
@@ -2113,6 +2129,8 @@ const MSG = {
   folder: "Command would delete or move a folder that contains protected paths; only humans may change them.",
   oneLiner:
     "Command touches a protected path through interpreter code; only humans may change it. Code that only reads a protected file is blocked too: read it with cat instead.",
+  assignmentHint: "If this is a commit or PR message, pass it with `git commit -F -` or `gh ... --body-file -` and a heredoc instead of a variable.",
+  runtime: "This command runs text built at run time (a pipe into a shell, a here-string, a script file, a variable as the command) and also names a write command and a protected path; only humans may change protected paths. Run the commands directly instead.",
   complex: "Command is too complex for the guard to check; split it into simpler commands.",
   nested: "Shell strings are nested too deeply to check; run the inner command directly.",
 };
@@ -2228,6 +2246,43 @@ const inPlace = (name, flags) =>
   (name === "sed" && flags.some((x) => /^-[A-Za-z]*i|^--in-place/.test(x))) ||
   (name === "perl" && flags.some((x) => /^-[A-Za-z]*i/.test(x)));
 
+const WRITE_WORD = /\b(?:mkdir|touch|cp|mv|rm|tee|truncate|ln|install|dd)\b|\bsed\s+-i|\bperl\s+-p?i/;
+
+/**
+ * Backstop for text that becomes a command at run time (`echo 'rm x' | sh`, `bash <<< '...'`, `bash <(...)`,
+ * `bash script.sh`, `eval`, `$X` or `$(...)` as the command, `bash -c --`, `xargs -a`): it cannot be parsed
+ * ahead, so the old rough check applies to the whole raw command, quotes included: a write word and a
+ * protected path anywhere block it.
+ */
+function runtimeTextRule(env, cmd, parsed) {
+  const f = env.fold;
+  const isFlag = (t) => t.startsWith("-");
+  // Heredoc bodies are data (or checked on their own), so they are left out of the command-position test.
+  let bare = cmd;
+  for (const seg of parsed.segments) for (const b of seg.bodies) if (b) bare = bare.replace(b, "");
+  let runtime = /(?:^|[;&|(\n])\s*(?:\$[({\w]|`)/.test(bare);
+  for (const [idx, s] of parsed.segments.entries()) {
+    if (runtime) break;
+    const texts = s.words.map((w) => w.text);
+    if (s.words.some((w, k) => !w.quoted && f(baseName(w.text)) === "xargs" && texts.slice(k + 1).some((t) => /^-[A-Za-z]*a$|^--arg-file/.test(t)))) runtime = true;
+    const k = s.words.findIndex((w) => !w.quoted && (SHELL_NAME.test(f(baseName(w.text))) || INTERPRETERS.test(f(baseName(w.text))) || [".", "source", "eval"].includes(w.text)));
+    if (k < 0) continue;
+    const name = f(baseName(texts[k]));
+    const after = texts.slice(k + 1);
+    if (name === "eval") runtime = true;
+    else if (SHELL_NAME.test(name) && after.some((t, j) => /^-[A-Za-z]*c$/.test(t) && after[j + 1] === "--")) runtime = true;
+    else {
+      const inline = SHELL_NAME.test(name) ? after.some((t) => /^-[A-Za-z]*c$/.test(t)) : (name === "deno" && after[0] === "eval") || after.slice(0, after.findIndex((t) => !isFlag(t)) + 1 || after.length).some((t) => EVAL_FLAG.test(t));
+      const file = after.find((t) => !isFlag(t));
+      const fed = idx > s.pipeStart || s.inputs.length > 0 || s.procSub;
+      if (!inline && (fed || (file !== undefined && !parsed.checked.has(path.normalize(file))))) runtime = true;
+    }
+  }
+  if (!runtime || !WRITE_WORD.test(cmd)) return undefined;
+  const tokens = [...cmd.matchAll(/[^\s"'<>|;&()\\]+/g)].map((m) => m[0]);
+  return env.relsOf(tokens, [env.root]).some((r) => isProtectedOrDir(env.contract, r)) ? MSG.runtime : undefined;
+}
+
 function directRule(ctx, cmd, parsed) {
   const { contract, root, f, expand, budget } = ctx;
   if (parsed.tooComplex) return MSG.complex;
@@ -2288,6 +2343,8 @@ function directRule(ctx, cmd, parsed) {
     const msg = removeRule(env, c);
     if (msg) return msg;
   }
+  const runtimeMsg = runtimeTextRule(env, cmd, parsed);
+  if (runtimeMsg) return runtimeMsg;
   if (budget.over) return MSG.complex;
   if (/--no-verify\b/.test(cmd) || /\bgit\s+commit\b[^|;&]*\s-n\b/.test(cmd))
     return "Skipping git hooks is forbidden (--no-verify).";
@@ -2330,9 +2387,9 @@ function bashRule(ctx, cmd, depth = 0) {
   // The same rules apply to every command string another command runs (`bash -c`, `eval`, `$(...)`...).
   const inner = innerStrings(parsed);
   if (depth >= 3) return inner.length ? MSG.nested : undefined;
-  for (const s of inner) {
-    const msg = bashRule(ctx, s, depth + 1);
-    if (msg !== undefined) return msg;
+  for (const item of inner) {
+    const msg = bashRule(ctx, typeof item === "string" ? item : item.text, depth + 1);
+    if (msg !== undefined) return typeof item === "string" ? msg : `${msg} ${item.hint}`;
   }
   return undefined;
 }
