@@ -1,28 +1,35 @@
-=== .claude/hooks/guard.mjs (1051 bytes) ===
+=== .claude/hooks/guard.mjs (1487 bytes) ===
 #!/usr/bin/env node
 // PreToolUse: blocks writes to protected files, undeclared packages, deferred dependencies and
 // hook bypass attempts (exit 2 → the tool call is cancelled and the message goes to the agent).
-// Thin adapter: the decision lives in scripts/guard-rules.mjs.
+// Thin adapter: the decision lives in scripts/guard-rules.mjs. Any failure here (broken module,
+// malformed stdin or architecture.json) blocks too: only exit 2 stops a call, so it must fail closed.
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { loadContract } from "../../scripts/arch-contract.mjs";
-import { decide } from "../../scripts/guard-rules.mjs";
 
-const input = JSON.parse(readFileSync(0, "utf8") || "{}");
-const root = process.env.CLAUDE_PROJECT_DIR || input.cwd || process.cwd();
-const claudeMd = path.join(root, "CLAUDE.md");
-
-const result = decide({
-  tool: input.tool_name,
-  input: input.tool_input,
-  contract: loadContract(root),
-  root,
-  home: process.env.HOME ?? "~",
-  claudeMdText: existsSync(claudeMd) ? readFileSync(claudeMd, "utf8") : undefined,
-});
-if (!result.allow) {
-  process.stderr.write(`⛔ ${result.message}\nRules: CLAUDE.md and architecture.json.\n`);
+const deny = (message) => {
+  process.stderr.write(`⛔ ${message}\nRules: CLAUDE.md and architecture.json.\n`);
   process.exit(2);
+};
+
+try {
+  const { loadContract } = await import("../../scripts/arch-contract.mjs");
+  const { decide } = await import("../../scripts/guard-rules.mjs");
+  const input = JSON.parse(readFileSync(0, "utf8") || "{}");
+  const root = process.env.CLAUDE_PROJECT_DIR || input.cwd || process.cwd();
+  const claudeMd = path.join(root, "CLAUDE.md");
+
+  const result = decide({
+    tool: input.tool_name,
+    input: input.tool_input,
+    contract: loadContract(root),
+    root,
+    home: process.env.HOME ?? "~",
+    claudeMdText: existsSync(claudeMd) ? readFileSync(claudeMd, "utf8") : undefined,
+  });
+  if (!result.allow) deny(result.message);
+} catch (error) {
+  deny(`The guard hook failed (${error instanceof Error ? error.message : String(error)}); blocking this call. Ask the user to check .claude/hooks/guard.mjs and architecture.json.`);
 }
 process.exit(0);
 
@@ -98,7 +105,7 @@ pnpm -s lint
 # /architecture.json        OWNER
 # /CLAUDE.md                OWNER
 # /docs/adr/                OWNER
-# /scripts/arch-check.mjs   OWNER
+# /scripts/                 OWNER
 # /.claude/                 OWNER
 # /.github/                 OWNER
 
@@ -1515,7 +1522,7 @@ export function check(snapshot) {
   return errors;
 }
 
-=== scripts/guard-rules.mjs (6261 bytes) ===
+=== scripts/guard-rules.mjs (6697 bytes) ===
 // The guard hook's decision, free of I/O: no stdin, env, filesystem or exit. The first matching
 // rule wins, so each message stays the same as it always was. Imported by .claude/hooks/guard.mjs.
 import path from "node:path";
@@ -1549,11 +1556,19 @@ function claudeMdRule(contract, tool, ti, text) {
   const msg = "The scaffold block in CLAUDE.md is protected; edit only outside the block.";
   if (tool === "Write") return String(ti.content ?? "").includes(text.slice(b, end)) ? undefined : msg;
   const edits = tool === "MultiEdit" ? (ti.edits ?? []) : [ti];
+  // Checked on the file's own text and on its LF form, so an LF old_string cannot slip past a CRLF file.
+  const lf = text.replace(/\r\n/g, "\n");
+  const lfSpan = claudeBlockSpan(lf, contract.claudeBlock);
+  const touches = (haystack, old, from, to) => {
+    for (let i = haystack.indexOf(old); i >= 0; i = haystack.indexOf(old, i + 1))
+      if (i < to && i + old.length > from) return true;
+    return false;
+  };
   for (const ed of edits) {
     const old = String(ed.old_string ?? "");
     if (!old) continue;
-    for (let i = text.indexOf(old); i >= 0; i = text.indexOf(old, i + 1))
-      if (i < end && i + old.length > b) return msg;
+    if (touches(text, old, b, end)) return msg;
+    if (lfSpan && touches(lf, old.replace(/\r\n/g, "\n"), lfSpan.start, lfSpan.end)) return msg;
   }
   return undefined;
 }
