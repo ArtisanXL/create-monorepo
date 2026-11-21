@@ -24,6 +24,7 @@ try {
     contract: loadContract(root),
     root,
     home: process.env.HOME ?? "~",
+    platform: process.platform,
     claudeMdText: existsSync(claudeMd) ? readFileSync(claudeMd, "utf8") : undefined,
   });
   if (!result.allow) deny(result.message);
