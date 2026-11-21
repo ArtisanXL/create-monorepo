@@ -114,19 +114,24 @@ const suggestScope = (dirName: string) => {
   return SCOPE_RE.test(`@${name}`) ? `@${name}` : DEFAULT_SCOPE;
 };
 
+export type ParsedArgs = ReturnType<typeof parse>;
+
+/** Parses argv once; an invalid flag throws an OptionsError carrying the usage text. */
+export function parseCli(argv: readonly string[]): ParsedArgs {
+  try {
+    return parse(argv);
+  } catch (error) {
+    throw new OptionsError(`${(error as Error).message}\n${USAGE}`);
+  }
+}
+
 export async function resolveOptions(
-  argv: readonly string[],
+  parsed: ParsedArgs,
   env: Record<string, string | undefined>,
   tty: boolean,
   prompter: Prompter,
   fsProbe: FsProbe,
 ): Promise<ResolvedOptions> {
-  let parsed: ReturnType<typeof parse>;
-  try {
-    parsed = parse(argv);
-  } catch (error) {
-    throw new OptionsError(`${(error as Error).message}\n${USAGE}`);
-  }
   const { values, positionals } = parsed;
   const interactive = tty && !isCi(env) && !values.yes;
 
@@ -199,12 +204,4 @@ function parse(argv: readonly string[]) {
       help: { type: "boolean", short: "h", default: false },
     },
   });
-}
-
-export function wantsHelp(argv: readonly string[]): boolean {
-  try {
-    return parse(argv).values.help === true;
-  } catch {
-    return false;
-  }
 }
