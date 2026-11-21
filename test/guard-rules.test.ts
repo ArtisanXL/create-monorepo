@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { decide, targetsOf } from "../templates/root/scripts/guard-rules.mjs";
+import { decide } from "../templates/root/scripts/guard-rules.mjs";
+import { targetsOf } from "../templates/root/scripts/shell-lex.mjs";
 import { CLAUDE_MD, templateContract } from "./support/contract.ts";
 
 const root = join("/", "proj");
@@ -505,14 +506,7 @@ describe("guard decision: audit follow-ups (#29)", () => {
   });
 
   it("documents known limits: these are allowed, CI arch-check is the backstop", () => {
-    for (const cmd of [
-      "echo 'rm -rf docs' | sh",
-      'bash <<< "npm install"',
-      "echo docs | xargs rm -rf",
-      "find docs -delete",
-      "git reset --hard HEAD~5",
-      "rm -rf d*",
-    ])
+    for (const cmd of ['bash <<< "npm install"', "rm -rf d*"])
       expect(bash(cmd), cmd).toEqual({ allow: true });
     // Windows aliases for the same file are not normalised.
     for (const name of ["architecture.json.", "architecture.json::$DATA"])
@@ -770,18 +764,7 @@ describe("guard decision: third audit follow-ups (#29)", () => {
   });
 
   it("documents more known limits: allowed, CI arch-check is the backstop", () => {
-    for (const cmd of [
-      "rsync -a --delete empty/ docs/",
-      "chmod 000 architecture.json",
-      `rm${"$"}{IFS}-rf${"$"}{IFS}docs`,
-      "echo 'rm -rf docs' | bash",
-      'bash <<< "npm install"',
-      "git checkout HEAD -- 'docs/ad*'",
-      "git reset --hard HEAD~3",
-      "echo docs | xargs rm -rf",
-      "find docs -delete",
-    ])
-      expect(bash(cmd), cmd).toEqual({ allow: true });
+    for (const cmd of ['bash <<< "npm install"']) expect(bash(cmd), cmd).toEqual({ allow: true });
   });
 });
 
@@ -975,16 +958,6 @@ describe("guard decision: text built at run time (#29)", () => {
       "git commit -F -",
     );
   });
-
-  it("documents known limits: allowed, CI arch-check is the backstop", () => {
-    for (const cmd of [
-      "X=rm; Y=architecture.json; $X $Y",
-      "X=architecture.json; rm $X",
-      "git --config-env=core.pager=X log",
-      'python3 -c "$(echo \'import os; os.remove("architecture.json")\')"',
-    ])
-      expect(bash(cmd), cmd).toEqual({ allow: true });
-  });
 });
 
 describe("guard decision: seventh audit follow-ups (#29)", () => {
@@ -1041,15 +1014,327 @@ describe("guard decision: seventh audit follow-ups (#29)", () => {
   });
 
   it("documents more known limits: allowed, CI arch-check is the backstop", () => {
-    for (const cmd of [
+    // The rest was closed by #34; only printf-built text is still allowed (see "remaining limits" below).
+    expect(bash("printf 'r%s architecture.json' m | sh")).toEqual({ allow: true });
+  });
+});
+
+describe("guard decision: remaining limits (#34)", () => {
+  describe("code piped or redirected into interpreters", () => {
+    it.each([
       `echo "fs.unlinkSync('architecture.json')" | node`,
+      `echo "fs.writeFileSync('architecture.json', 'x')" | node`,
       `echo "os.remove('architecture.json')" | python3`,
+      `echo "shutil.rmtree('docs/adr')" | python3`,
+      `echo "Path('architecture.json').write_text('x')" | python3`,
       `echo "unlink 'architecture.json'" | perl`,
-      "echo 'dd of=architecture.json' | sh",
+      `echo "open(F, '>architecture.json')" | perl`,
+      `node <<< "fs.renameSync('architecture.json', 'x')"`,
+      `echo "fs.openSync('architecture.json', 'w')" | node`,
+      `python3 -c "$(echo 'import os; os.remove("architecture.json")')"`,
+      `node -e "$(echo "fs.rmSync('docs/adr/0001-package-boundaries.md')")"`,
+    ])("blocks %s", (cmd) => {
+      expect(blocked(bash(cmd)), cmd).toContain("runs text built at run time");
+    });
+
+    it.each([
+      "echo 'console.log(1)' | node",
+      "echo \"print('hi')\" | python3",
+      "echo \"fs.unlinkSync('/tmp/x')\" | node",
+      "echo \"fs.readFileSync('package.json')\" | node",
+      "python3 -c \"$(echo 'print(1)')\"",
+    ])("allows %s", (cmd) => {
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+    });
+  });
+
+  describe("decoders piped into executors", () => {
+    it.each([
       "echo cm0gYXJjaGl0ZWN0dXJlLmpzb24= | base64 -d | sh",
+      "echo cm0= | base64 --decode | bash",
+      "echo 726d | xxd -r -p | sh",
+      "openssl enc -d -aes-256-cbc -in x.enc | sh",
+      "zcat x.gz | sh",
+      "gunzip -c x.gz | bash",
+      "base64 -d x.b64 | node",
+      "bash <(base64 -d x.b64)",
+      'eval "$(base64 -d x.b64)"',
+    ])("blocks %s", (cmd) => {
+      expect(blocked(bash(cmd)), cmd).toContain("decoded or decompressed");
+    });
+
+    it.each([
+      "base64 -d x.b64 > /tmp/out",
+      "zcat x.gz | grep error",
+      "gunzip -c x.gz | wc -l",
+      "echo hi | base64",
+      "base64 -d x.b64 | node scripts/arch-check.mjs",
+      "tar xzf x.tgz && bash run.sh",
+    ])("allows %s", (cmd) => {
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+    });
+  });
+
+  describe("obfuscated and folder-only text piped into a shell", () => {
+    it.each([
+      "echo 'dd of=architecture.json' | sh",
       "echo \"'r''m architecture.json'\" | sh",
-      "printf 'r%s architecture.json' m | sh",
       "echo 'rm -rf docs' | sh",
+      "echo 'rm -rf docs' | bash",
+      "echo 'rm -r .github' | sh",
+      "echo 'rsync -a --delete empty/ docs/' | sh",
+      "echo 'find docs -delete' | sh",
+      "echo 'mv docs /tmp/x' | sh",
+    ])("blocks %s", (cmd) => {
+      expect(blocked(bash(cmd)), cmd).toBeDefined();
+    });
+
+    it.each([
+      "echo 'rm -rf dist' | sh",
+      "echo 'rm -rf node_modules' | sh",
+      "echo 'mkdir -p dist' | sh",
+      "echo 'dd if=/dev/zero of=/tmp/x' | sh",
+    ])("allows %s", (cmd) => {
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+    });
+  });
+
+  describe("folder-only deletes", () => {
+    it.each([
+      "echo docs | xargs rm -rf",
+      "echo .claude | xargs rm -r",
+      "find docs -delete",
+      "find docs -name '*.md' -delete",
+      "find docs -exec rm {} ;",
+      "find docs -type f -exec rm -f {} +",
+      "find scripts -delete",
+      "cd docs && find adr -delete",
+      "rsync -a --delete empty/ docs/",
+      "rsync -a --delete empty/ docs/adr/",
+      "rsync -a src/ docs/adr/",
+    ])("blocks %s", (cmd) => {
+      expect(blocked(bash(cmd)), cmd).toBeDefined();
+    });
+
+    it.each([
+      "find . -name '*.log' -delete",
+      "find dist -delete",
+      "find packages -name '*.tmp' -exec rm {} ;",
+      "find docs -name '*.md'",
+      "find docs -exec grep -l x {} ;",
+      "rsync -a --delete dist/ /tmp/x/",
+      "rsync -a docs/ /tmp/backup/",
+      "rsync -a src/ docs/",
+      "echo dist | xargs rm -rf",
+      "echo docs | xargs ls",
+      "find docs -name '*.md' | xargs rm",
+    ])("allows %s", (cmd) => {
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+    });
+  });
+
+  describe("variables", () => {
+    it.each([
+      "X=architecture.json; rm $X",
+      "X=rm; Y=architecture.json; $X $Y",
+      `X=architecture.json && rm ${"$"}{X}`,
+      "export X=architecture.json; rm $X",
+      "X=docs; rm -rf $X",
+      "D=docs; F=adr/0001-package-boundaries.md; rm $D/$F",
+      "A=architecture; B=$A.json; rm $B",
+      "X='rm architecture.json'; $X",
+      "X=architecture.json; echo hi > $X",
+      "X=docs; cd $X && cd adr && rm 0001-package-boundaries.md",
+      "X=architecture.json; bash -c 'rm $X'",
+      'X=architecture.json; echo "$(rm $X)"',
+      `rm${"$"}{IFS}architecture.json`,
+      "rm$IFS$9architecture.json",
+      `rm${"$"}{IFS}-rf${"$"}{IFS}docs`,
+      `cat${"$"}{IFS}x;rm${"$"}{IFS}architecture.json`,
+    ])("blocks %s", (cmd) => {
+      expect(blocked(bash(cmd)), cmd).toBeDefined();
+    });
+
+    it.each([
+      "X=foo; echo $X",
+      "X=foo; rm $X",
+      "X=dist; rm -rf $X",
+      "X=a; X=b; rm $X",
+      `echo ${"$"}{IFS}`,
+      "FOO=1 node scripts/arch-check.mjs",
+    ])("allows %s", (cmd) => {
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+    });
+
+    it("keeps growing values bounded", () => {
+      const t0 = performance.now();
+      bash(`X=a;${"X=$X$X;".repeat(1000)}rm $X`);
+      expect(performance.now() - t0).toBeLessThan(500);
+    });
+  });
+
+  describe("git", () => {
+    it.each([
+      "git -c include.path=/tmp/evil log",
+      "git -c includeIf.gitdir:/x.path=/tmp/evil status",
+      "git -c Include.Path=x status",
+      "git --config-env=include.path=P log",
+      "git --config-env=core.pager=PAGER_CMD log",
+      "git --config-env core.pager=PAGER_CMD log",
+      "git --config-env=core.editor=ED commit",
+      "PAGER_CMD='rm architecture.json' git --config-env=core.pager=PAGER_CMD log",
+      "P='rm architecture.json'; git --config-env=core.pager=P log",
+      "git checkout HEAD~5 -- '*'",
+      "git checkout HEAD~5 -- '*.json'",
+      "git checkout main -- 'arch*'",
+      "git checkout main -- 'docs/*'",
+      "git checkout main -- 'docs/adr/0*.md'",
+      "git checkout main '*.md'",
+      "git restore -s HEAD~5 '*.json'",
+      "git restore --source=main '*'",
+      "git restore --source=main 'scripts/*.mjs'",
+      "git reset --hard origin/main",
+      "git reset --hard v1.0.0",
+      "git reset --hard feature/x~2",
+      "git reset --hard abc1234",
+      "git reset -q --hard main",
+    ])("blocks %s", (cmd) => {
+      expect(blocked(bash(cmd)), cmd).toBeDefined();
+    });
+
+    it.each([
+      "git reset --hard",
+      "git reset --hard HEAD",
+      "git reset --hard @",
+      "git reset --hard HEAD~1",
+      "git reset --hard HEAD~5",
+      "git reset --hard HEAD^",
+      "git reset --hard HEAD^^",
+      "git reset --hard @~2",
+      "git reset --hard @{u}",
+      "git reset --hard @{upstream}",
+      "git reset --hard ORIG_HEAD",
+      "git reset --hard HEAD@{1}",
+      "git reset --soft HEAD~1",
+      "git reset HEAD~1",
+      "git reset HEAD file.ts",
+      "git --config-env=user.name=GIT_NAME commit -m x",
+      "GIT_PAGER='less' git --config-env=core.pager=GIT_PAGER log",
+      "git -c user.name=x commit -m y",
+      "git -c core.pager=less log",
+      "git checkout HEAD~5 -- 'src/*.ts'",
+      "git checkout HEAD~5 -- apps/api/src/app.ts",
+      "git checkout -- '*.ts'",
+      "git restore '*.ts'",
+      "git restore -s HEAD~1 'packages/domain/*.ts'",
+      "git checkout main",
+      "git checkout -b feature/x",
+    ])("allows %s", (cmd) => {
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+    });
+  });
+
+  describe("chmod, chown and chgrp", () => {
+    it.each([
+      "chmod 000 architecture.json",
+      "chmod +x scripts/new.sh",
+      "chmod -R a-w docs",
+      "chown root architecture.json",
+      "chgrp wheel docs/adr/0001-package-boundaries.md",
+      "sudo chmod 777 .github/workflows/ci.yml",
+      "echo 'chmod 000 architecture.json' | sh",
+      "unlink architecture.json",
+      "shred -u architecture.json",
+      "rmdir docs/adr",
+    ])("blocks %s", (cmd) => {
+      expect(blocked(bash(cmd)), cmd).toBeDefined();
+    });
+
+    it.each([
+      "chmod +x run.sh",
+      "chmod 644 apps/api/src/app.ts",
+      "chmod -R u+w dist",
+      "chown me /tmp/x",
+    ])("allows %s", (cmd) => {
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+    });
+  });
+
+  describe("variables of unknown value (audit of #36)", () => {
+    it.each([
+      `X="$(printf '\\x72\\x6d')"; $X architecture.json`,
+      "X=`printf '\\x72\\x6d'`; $X architecture.json",
+      `X="$(cat f)"; $X architecture.json`,
+      `X="$(printf r)"m; $X architecture.json`,
+      "X=r; X+=m; $X architecture.json",
+      "X=echo; read X < f; $X architecture.json",
+      "X=echo; getopts r X; $X architecture.json",
+      "X=echo; for X in a b; do $X architecture.json; done",
+      "X=echo; printf -v X rm; $X architecture.json",
+      "X=echo; mapfile X < f; $X architecture.json",
+      "X=echo; unset X; $X architecture.json",
+      `export X="$(cat f)"; $X architecture.json`,
+      "X=$(cat f); $X architecture.json",
+    ])("blocks %s", (cmd) => {
+      expect(blocked(bash(cmd)), cmd).toBeDefined();
+    });
+
+    it.each([
+      'TMP="$(mktemp -d)"; cp x "$TMP"; rm -rf "$TMP"',
+      "TMP=`mktemp -d`; rm -rf $TMP",
+      'd="$(mktemp -d)" && cd "$d" && rm -rf "$d"',
+      "TMP=$(mktemp -d); rm -rf $TMP",
+    ])("allows %s", (cmd) => {
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+    });
+  });
+
+  describe("expansion budget (audit of #36)", () => {
+    const X = "a ".repeat(512).trim();
+    it.each([
+      ["many references in one word", `X='${X}'; echo ${"$X".repeat(20_000)}`],
+      ["many references as words", `X='${X}'; echo ${"$X ".repeat(15_000)}`],
+      ["inside bash -c", `X='${X}'; bash -c "echo ${"$X".repeat(15_000)}"`],
+      ["chained doubling", `A='${X}'; B=$A$A; C=$B$B; D=$C$C; echo ${"$D".repeat(10_000)}`],
+    ])("is bounded: %s", (_n, cmd) => {
+      const t0 = performance.now();
+      const r = bash(cmd);
+      expect(performance.now() - t0).toBeLessThan(500);
+      expect(blocked(r)).toContain("too complex");
+    });
+
+    it("still expands ordinary uses", () => {
+      expect(blocked(bash("X=architecture.json; rm $X $X $X"))).toBeDefined();
+    });
+  });
+
+  describe("review follow-ups (audit of #36)", () => {
+    it("blocks an oversized glob after a revision instead of crashing", () => {
+      const r = bash(`git checkout HEAD~5 -- '${"a*".repeat(6000)}'`);
+      expect(blocked(r)).toBeDefined();
+    });
+
+    it("keeps plain interpreter scripts with copy in a name allowed", () => {
+      expect(bash("tsx tools/copy-assets.ts && cat vitest.config.ts")).toEqual({ allow: true });
+      expect(bash("echo 'copy-assets' | node")).toEqual({ allow: true });
+    });
+
+    it.each(["gzip -dc x.gz | sh", "gzip -cd x.gz | bash", "zcat x.gz | node"])(
+      "blocks %s",
+      (cmd) => {
+        expect(blocked(bash(cmd)), cmd).toBeDefined();
+      },
+    );
+  });
+
+  it("documents remaining limits: allowed, CI arch-check is the backstop", () => {
+    for (const cmd of [
+      // printf formats text at run time, so the words are never spelled out.
+      "printf 'r%s architecture.json' m | sh",
+      // The last of several conditional assignments wins; the guard cannot tell which branch ran.
+      '[ -n "$Z" ] && X=architecture.json || X=foo; rm $X',
+      // Brace expansion builds the command name from parts.
+      "{r,}m architecture.json",
     ])
       expect(bash(cmd), cmd).toEqual({ allow: true });
   });
