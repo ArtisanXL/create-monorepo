@@ -8,7 +8,6 @@ export const scaffoldOptions = (target: string, over: Partial<Options> = {}): Op
   target,
   scope: "@acme",
   dbPrefix: "acme",
-  pm: "pnpm",
   install: false,
   nodeMajor: 24,
   ...over,

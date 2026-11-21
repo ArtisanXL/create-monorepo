@@ -95,7 +95,6 @@ describe.skipIf(!parityEnabled)("bash parity: root, worktree, packages and apps"
         target: tsDir,
         scope: "@acme",
         dbPrefix: "acme",
-        pm: "pnpm",
         install: false,
         nodeMajor: Number(process.versions.node.split(".")[0]),
       },

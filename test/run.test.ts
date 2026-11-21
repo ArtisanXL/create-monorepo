@@ -105,6 +105,19 @@ describe("run", () => {
     expect(h.out()).toContain("Next steps:");
   });
 
+  it("hands the resolved package manager to makeDeps", async () => {
+    const seen: string[] = [];
+    const h = harness({
+      argv: [dir, "--no-install", "-y", "--pm", "pnpm"],
+      makeDeps: (resolved) => {
+        seen.push(resolved.pm);
+        return fakeDeps();
+      },
+    });
+    expect(await run(h.io)).toBe(0);
+    expect(seen).toEqual(["pnpm"]);
+  });
+
   it("ends the report with the exact pnpm next-steps text", async () => {
     const h = harness();
     expect(await run(h.io)).toBe(0);

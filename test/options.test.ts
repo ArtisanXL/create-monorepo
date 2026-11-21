@@ -7,8 +7,8 @@ import {
   type Prompter,
   parseCli,
   resolveOptions,
-  SUPPORTED_PMS,
 } from "../src/options.ts";
+import { PM_NAMES } from "../src/pm/index.ts";
 
 const fsProbe: FsProbe = { exists: async () => false, isNonEmptyDir: async () => false };
 
@@ -277,6 +277,6 @@ describe("resolveOptions: package manager", () => {
   it("rejects an unsupported --pm listing the supported ones", async () => {
     const error = await failure(["p", "--pm", "yarn"]);
     expect(error).toBeInstanceOf(OptionsError);
-    for (const pm of SUPPORTED_PMS) expect((error as Error).message).toContain(pm);
+    for (const pm of PM_NAMES) expect((error as Error).message).toContain(pm);
   });
 });

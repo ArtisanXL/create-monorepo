@@ -9,7 +9,6 @@ export interface Options {
   target: string;
   scope: string;
   dbPrefix: string;
-  pm: string;
   install: boolean;
   nodeMajor: number;
 }

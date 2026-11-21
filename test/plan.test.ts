@@ -7,7 +7,6 @@ const options = (over: Partial<Options> = {}): Options => ({
   target: "/nowhere",
   scope: "@acme",
   dbPrefix: "acme",
-  pm: "pnpm",
   install: false,
   nodeMajor: 24,
   ...over,

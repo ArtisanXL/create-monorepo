@@ -1,9 +1,7 @@
 import { basename, resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { isPmName, PM_NAMES, type PmName } from "./pm/index.ts";
 import type { Options } from "./scaffold.ts";
-
-/** Package managers with an adapter. */
-export const SUPPORTED_PMS = ["pnpm"] as const;
 
 export const USAGE =
   "Usage: create-monorepo <target-dir> [--scope @app] [--db-prefix app] [--pm pnpm] [--no-install] [-y|--yes]";
@@ -54,7 +52,7 @@ export interface FsProbe {
   isNonEmptyDir(path: string): Promise<boolean>;
 }
 
-export type ResolvedOptions = Omit<Options, "nodeMajor">;
+export type ResolvedOptions = Omit<Options, "nodeMajor"> & { pm: PmName };
 
 const DEFAULT_SCOPE = "@app";
 const DB_PREFIX_RE = /^[a-z][a-z0-9_]{0,29}$/;
@@ -64,9 +62,9 @@ function isCi(env: Record<string, string | undefined>): boolean {
   return ci !== undefined && ci !== "" && ci !== "0" && ci.toLowerCase() !== "false";
 }
 
-function detectPm(env: Record<string, string | undefined>): string {
-  const name = env.npm_config_user_agent?.split("/")[0];
-  return (SUPPORTED_PMS as readonly string[]).includes(name ?? "") ? (name as string) : "pnpm";
+function detectPm(env: Record<string, string | undefined>): PmName {
+  const name = env.npm_config_user_agent?.split("/")[0] ?? "";
+  return isPmName(name) ? name : "pnpm";
 }
 
 function uncancel<T>(answer: T | Cancel): T {
@@ -178,11 +176,11 @@ export async function resolveOptions(
   if (pm === undefined) {
     const detected = detectPm(env);
     pm = interactive
-      ? uncancel(await prompter.select("Package manager", SUPPORTED_PMS, detected))
+      ? uncancel(await prompter.select("Package manager", PM_NAMES, detected))
       : detected;
   }
-  if (!(SUPPORTED_PMS as readonly string[]).includes(pm))
-    throw new OptionsError(`Unsupported --pm '${pm}'. Supported: ${SUPPORTED_PMS.join(", ")}`);
+  if (!isPmName(pm))
+    throw new OptionsError(`Unsupported --pm '${pm}'. Supported: ${PM_NAMES.join(", ")}`);
 
   let install = !values["no-install"];
   if (install && interactive)
