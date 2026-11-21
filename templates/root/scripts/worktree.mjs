@@ -25,11 +25,13 @@ import { parseEnv } from "node:util";
 import postgres from "postgres";
 import {
   databaseName,
-  databaseOf,
   ensureSecrets,
   isWorktreeDatabase,
   likePatternFor,
+  mayDropDatabase,
+  protectedDatabases,
   rewriteIsolatedKeys,
+  sourceEnvCandidates,
   withDatabase,
   worktreeKey,
 } from "./worktree-lib.mjs";
@@ -62,16 +64,18 @@ function adminSql(env) {
   return postgres(url, { max: 1, onnotice: () => {} });
 }
 
+function existingSourceEnvs() {
+  return sourceEnvCandidates({
+    paseoSource: process.env.PASEO_SOURCE_CHECKOUT_PATH,
+    mainCheckout,
+    toplevel,
+  }).filter((candidate) => candidate !== envPath && existsSync(candidate));
+}
+
 /** Where a missing .env is copied from, and what "unchanged" isolated values are compared to. */
 function sourceEnvPath() {
-  const candidates = [
-    process.env.PASEO_SOURCE_CHECKOUT_PATH && join(process.env.PASEO_SOURCE_CHECKOUT_PATH, ".env"),
-    join(mainCheckout, ".env"),
-    join(toplevel, ".env.example"),
-  ];
-  for (const candidate of candidates) {
-    if (candidate && candidate !== envPath && existsSync(candidate)) return candidate;
-  }
+  const found = existingSourceEnvs();
+  if (found.length > 0) return found[0];
   throw new Error("no .env source found (expected .env.example at least)");
 }
 
@@ -141,15 +145,11 @@ async function setup() {
 async function teardown() {
   if (key === null) return warn("refusing to tear down the main checkout");
   const env = readEnv();
-  const protectedDbs = new Set([PREFIX]);
-  const sourceEnv = process.env.PASEO_SOURCE_CHECKOUT_PATH
-    ? join(process.env.PASEO_SOURCE_CHECKOUT_PATH, ".env")
-    : join(mainCheckout, ".env");
-  if (existsSync(sourceEnv)) {
-    const url = parseEnv(readFileSync(sourceEnv, "utf8")).DATABASE_URL;
-    if (url) protectedDbs.add(databaseOf(url));
-  }
-  if (!isWorktreeDatabase(PREFIX, database) || protectedDbs.has(database)) {
+  const protectedDbs = protectedDatabases({
+    prefix: PREFIX,
+    envTexts: existingSourceEnvs().map((path) => readFileSync(path, "utf8")),
+  });
+  if (!mayDropDatabase({ prefix: PREFIX, database, protected: protectedDbs })) {
     return warn(`refusing: ${database} belongs to the main or source checkout`);
   }
   const sql = adminSql(env);

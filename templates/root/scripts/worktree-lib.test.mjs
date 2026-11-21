@@ -5,6 +5,9 @@ import {
   ensureSecrets,
   isWorktreeDatabase,
   likePatternFor,
+  mayDropDatabase,
+  protectedDatabases,
+  sourceEnvCandidates,
   rewriteIsolatedKeys,
   withDatabase,
   worktreeKey,
@@ -35,6 +38,58 @@ describe("worktree-lib", () => {
     expect(likePatternFor("my_app")).toBe("my\\_app\\_wt\\_%");
     expect(likePatternFor("a%b")).toBe("a\\%b\\_wt\\_%");
     expect(likePatternFor("a\\b")).toBe("a\\\\b\\_wt\\_%");
+  });
+
+  it("lists .env source candidates in order, skipping an unset Paseo source", () => {
+    const dirs = { mainCheckout: "/main", toplevel: "/wt" };
+    expect(sourceEnvCandidates({ ...dirs, paseoSource: "/src" })).toEqual([
+      "/src/.env",
+      "/main/.env",
+      "/wt/.env.example",
+    ]);
+    expect(sourceEnvCandidates({ ...dirs, paseoSource: undefined })).toEqual([
+      "/main/.env",
+      "/wt/.env.example",
+    ]);
+  });
+
+  describe("drop safety", () => {
+    const prefix = "my_app";
+    const env = (db) => `DATABASE_URL=postgres://u:p@localhost:5432/${db}\n`;
+    const may = (database, envTexts) =>
+      mayDropDatabase({ prefix, database, protected: protectedDatabases({ prefix, envTexts }) });
+
+    it("refuses the main database", () => {
+      expect(may("my_app", [env("my_app")])).toBe(false);
+      expect(may("my_app", [])).toBe(false);
+    });
+
+    it("refuses the source checkout's database", () => {
+      expect(may("my_app_wt_x_123456", [env("my_app_wt_x_123456")])).toBe(false);
+    });
+
+    it("refuses a foreign-prefix name", () => {
+      expect(may("myxapp_wt_x_123456", [env("my_app")])).toBe(false);
+      expect(may("other", [])).toBe(false);
+    });
+
+    it("allows this project's own worktree database", () => {
+      expect(may("my_app_wt_x_123456", [env("my_app")])).toBe(true);
+    });
+
+    it("protects every given env, so a missing Paseo source still leaves the main .env protected", () => {
+      const texts = [env("paseo_db"), env("main_db")];
+      expect(protectedDatabases({ prefix, envTexts: texts })).toEqual(
+        new Set(["my_app", "paseo_db", "main_db"]),
+      );
+      expect(protectedDatabases({ prefix, envTexts: [env("main_db")] }).has("main_db")).toBe(true);
+    });
+
+    it("ignores missing or unparseable DATABASE_URL values", () => {
+      expect(protectedDatabases({ prefix, envTexts: ["FOO=1\n", "DATABASE_URL=not a url\n"] })).toEqual(
+        new Set(["my_app"]),
+      );
+    });
   });
 
   it("replaces only the database in a URL", () => {
