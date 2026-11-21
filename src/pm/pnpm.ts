@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { PackageManagerAdapter } from "./types.ts";
+import type { Catalog, PackageManagerAdapter } from "./types.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -9,19 +9,11 @@ async function installedPnpmVersion(): Promise<string> {
   return stdout.trim();
 }
 
-export function createPnpmAdapter(
-  getVersion: () => Promise<string> = installedPnpmVersion,
-): PackageManagerAdapter {
-  return {
-    name: "pnpm",
-    workspaceFile: "pnpm-workspace.yaml",
-    version: getVersion,
-    packageManagerField: (version) => `pnpm@${version}`,
-    renderWorkspaceFile(catalog) {
-      const entries = Object.entries(catalog)
-        .map(([pkg, range]) => `  "${pkg}": "${range}"\n`)
-        .join("");
-      return `packages:
+function renderWorkspaceYaml(catalog: Catalog): string {
+  const entries = Object.entries(catalog)
+    .map(([pkg, range]) => `  "${pkg}": "${range}"\n`)
+    .join("");
+  return `packages:
   - "apps/*"
   - "packages/*"
 
@@ -33,26 +25,32 @@ ${entries}
 allowBuilds:
   esbuild: true
 `;
+}
+
+export function createPnpmAdapter(
+  getVersion: () => Promise<string> = installedPnpmVersion,
+): PackageManagerAdapter {
+  return {
+    name: "pnpm",
+    version: getVersion,
+    commands: { install: ["pnpm", "install"], run: ["pnpm"], exec: ["pnpm", "exec"] },
+    tokens: {
+      __RUN_SILENT__: "pnpm -s",
+      __FILTER__: "pnpm --filter",
+      __INSTALL_FROZEN__: "pnpm install --frozen-lockfile",
+      __PM_ENSURE__:
+        'command -v pnpm >/dev/null || corepack enable --install-directory \\"$HOME/.local/bin\\" pnpm',
+      __CI_SETUP__: [
+        "      - uses: pnpm/action-setup@v4",
+        "      - uses: actions/setup-node@v5",
+        "        with:",
+        "          node-version-file: .nvmrc",
+        "          cache: pnpm",
+      ].join("\n"),
+      __ADD_DEP__: "pnpm add <pkg> --filter",
     },
-    lockfile: "pnpm-lock.yaml",
-    installCommand: () => ["pnpm", "install"],
-    execCommand: (args) => ["pnpm", "exec", ...args],
-    filterCommand: (pkg, script) => ["pnpm", "--filter", pkg, script],
-    formatCommand: (files) => [
-      "pnpm",
-      "exec",
-      "biome",
-      "check",
-      "--write",
-      "--files-ignore-unknown=true",
-      "--no-errors-on-unmatched",
-      ...files,
-    ],
-    verifyCommand: () => ["pnpm", "verify"],
-    nextSteps: () => `Next steps:
-  cp .env.example .env && docker compose up -d
-  pnpm dev                       # api :3000, web :5173, worker
-  .github/CODEOWNERS             # assign owners for architecture files
-  git add -A && git commit -m "chore: scaffold"`,
+    files: ["pnpm-workspace.yaml"],
+    catalogFile: "pnpm-workspace.yaml",
+    renderFiles: (catalog) => ({ "pnpm-workspace.yaml": renderWorkspaceYaml(catalog) }),
   };
 }
