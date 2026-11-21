@@ -211,6 +211,34 @@ describe("generated guard hook", () => {
   });
 });
 
+describe("CLAUDE.md with CRLF line endings", () => {
+  const claudeMd = () => join(dir, "CLAUDE.md");
+  let original: string;
+  beforeAll(async () => {
+    original = await readFile(claudeMd(), "utf8");
+    await writeFile(claudeMd(), original.replace(/\r?\n/g, "\r\n"));
+  });
+  afterAll(() => writeFile(claudeMd(), original));
+
+  it("the guard blocks an Edit inside the block and allows one outside it", async () => {
+    const edit = (old_string: string) =>
+      guard("Edit", { file_path: claudeMd(), old_string, new_string: "x" });
+    expect((await edit("# Project rules")).code).toBe(2);
+    await writeFile(claudeMd(), `# Mine\r\n${await readFile(claudeMd(), "utf8")}`);
+    expect((await edit("# Mine")).code).toBe(0);
+  });
+
+  it("arch-check hashes it like the LF version, and the recorded hash passes", async () => {
+    const run = (args: string[]) =>
+      execFileAsync("node", ["scripts/arch-check.mjs", ...args], { cwd: dir });
+    const crlf = (await run(["--claude-hash"])).stdout.trim();
+    await writeFile(claudeMd(), (await readFile(claudeMd(), "utf8")).replace(/\r\n/g, "\n"));
+    expect((await run(["--claude-hash"])).stdout.trim()).toBe(crlf);
+    await writeFile(claudeMd(), (await readFile(claudeMd(), "utf8")).replace(/\n/g, "\r\n"));
+    expect((await run([])).stdout).toContain("Architecture check passed");
+  });
+});
+
 describe("generated stop-check hook", () => {
   const entry = () => join(dir, "node_modules/@biomejs/biome/bin/biome");
   const stop = () => {

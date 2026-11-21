@@ -1,41 +1,43 @@
 #!/usr/bin/env node
 // Enforces the contract in architecture.json. Dependency-free; does not need the TS compiler API.
-import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import {
+  claudeBlockHash,
+  contractFrom,
+  deferredDepsInCatalog,
+  deferredHint,
+  deferredOfDep,
+  PACKAGE_GROUPS,
+  packageOf,
+} from "./arch-contract.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
-const arch = JSON.parse(readFileSync(path.join(root, "architecture.json"), "utf8"));
-
-/** sha256 of the CLAUDE.md scaffold block (markers included); null if missing. */
-function claudeBlockHash() {
-  const cb = arch.claude_md_block;
+const contract = contractFrom(JSON.parse(readFileSync(path.join(root, "architecture.json"), "utf8")));
+const claudeMdText = () => {
   const p = path.join(root, "CLAUDE.md");
-  if (!cb || !existsSync(p)) return null;
-  const text = readFileSync(p, "utf8").replace(/\r\n/g, "\n");
-  const b = text.indexOf(cb.begin);
-  const e = b < 0 ? -1 : text.indexOf(cb.end, b);
-  if (e < 0) return null;
-  return createHash("sha256").update(text.slice(b, e + cb.end.length)).digest("hex");
+  return existsSync(p) ? readFileSync(p, "utf8") : null;
+};
+/** sha256 of the CLAUDE.md scaffold block (markers included); null if missing. */
+function currentBlockHash() {
+  const text = claudeMdText();
+  return contract.claudeBlock && text !== null ? claudeBlockHash(text, contract.claudeBlock) : null;
 }
 // A human intentionally changed the block: `pnpm arch --claude-hash` → write it into architecture.json.
 if (process.argv.includes("--claude-hash")) {
-  console.log(claudeBlockHash() ?? "CLAUDE.md scaffold block not found");
+  console.log(currentBlockHash() ?? "CLAUDE.md scaffold block not found");
   process.exit(0);
 }
 
-const { scope, packages } = arch;
-const deferred = arch.deferred ?? [];
-const testAllow = new Set(arch.test_allow ?? []);
+const { scope, packages } = contract;
+const testAllow = new Set(contract.testAllow);
 const errors = [];
 const err = (m) => errors.push(m);
 const rel = (p) => path.relative(root, p).split(path.sep).join("/");
 
 const nameToDir = new Map(Object.keys(packages).map((d) => [`${scope}/${path.basename(d)}`, d]));
-const deferredByPath = new Map(deferred.filter((d) => d.path).map((d) => [d.path, d]));
-const forbiddenDeps = new Map(deferred.flatMap((d) => (d.deps ?? []).map((dep) => [dep, d])));
-const hint = (d) =>
-  `deferred "${d.name}". Trigger: ${d.trigger} If needed, write an ADR draft under docs/adr/proposed/ and ask a human.`;
+const hint = deferredHint;
+const forbidden = (dep) => deferredOfDep(contract, dep);
 const pkgNameOf = (spec) => (spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]);
 
 function* walk(dir) {
@@ -51,14 +53,14 @@ function* walk(dir) {
 }
 
 // 1) Only declared packages under apps/ and packages/
-for (const group of ["apps", "packages"]) {
+for (const group of PACKAGE_GROUPS) {
   const g = path.join(root, group);
   if (!existsSync(g)) continue;
   for (const e of readdirSync(g, { withFileTypes: true })) {
-    const dir = `${group}/${e.name}`;
-    if (packages[dir]) continue;
-    const d = deferredByPath.get(dir);
-    err(`${dir}: not declared in architecture.json — ${d ? hint(d) : "new packages require an accepted ADR."}`);
+    const owner = packageOf(contract, `${group}/${e.name}`);
+    if (owner?.declared) continue;
+    const d = owner?.deferred;
+    err(`${group}/${e.name}: not declared in architecture.json — ${d ? hint(d) : "new packages require an accepted ADR."}`);
   }
 }
 
@@ -66,14 +68,12 @@ for (const group of ["apps", "packages"]) {
 const depsOf = (pj) => ({ ...pj.dependencies, ...pj.devDependencies, ...pj.peerDependencies, ...pj.optionalDependencies });
 const rootPj = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
 for (const dep of Object.keys(depsOf(rootPj))) {
-  const d = forbiddenDeps.get(dep);
+  const d = forbidden(dep);
   if (d) err(`package.json → ${dep}: ${hint(d)}`);
 }
 const ws = readFileSync(path.join(root, "pnpm-workspace.yaml"), "utf8");
-for (const [dep, d] of forbiddenDeps) {
-  const re = new RegExp(`^\\s+["']?${dep.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}["']?\\s*:`, "m");
-  if (re.test(ws)) err(`pnpm-workspace.yaml catalog → ${dep}: ${hint(d)}`);
-}
+for (const { dep, deferred } of deferredDepsInCatalog(contract, ws))
+  err(`pnpm-workspace.yaml catalog → ${dep}: ${hint(deferred)}`);
 
 // 3) Per-package checks
 const IMPORT_RE =
@@ -103,7 +103,7 @@ for (const [dir, spec] of Object.entries(packages)) {
       if (!mayDepend.has(target) && !typeOnly.has(target))
         err(`${dir} → ${dep}: dependency not allowed (allowed: ${[...mayDepend, ...typeOnly].join(", ") || "none"})`);
     } else if (dep.startsWith(`${scope}/`)) err(`${dir} → ${dep}: unknown workspace package`);
-    else if (forbiddenDeps.has(dep)) err(`${dir} → ${dep}: ${hint(forbiddenDeps.get(dep))}`);
+    else if (forbidden(dep)) err(`${dir} → ${dep}: ${hint(forbidden(dep))}`);
     else if (extAllow && !extAllow.has(dep) && !testAllow.has(dep))
       err(`${dir} → ${dep}: external dependency not in allow list (${[...extAllow].join(", ") || "none"})`);
   }
@@ -138,8 +138,8 @@ for (const [dir, spec] of Object.entries(packages)) {
         else if (!mayDepend.has(target) && !typeOnly.has(target)) err(`${r}: import of "${name}" is not allowed`);
         continue;
       }
-      if (forbiddenDeps.has(name)) {
-        err(`${r}: "${name}" ${hint(forbiddenDeps.get(name))}`);
+      if (forbidden(name)) {
+        err(`${r}: "${name}": ${hint(forbidden(name))}`);
         continue;
       }
       if (extAllow && !(isTest && testAllow.has(name))) {
@@ -151,10 +151,10 @@ for (const [dir, spec] of Object.entries(packages)) {
 }
 
 // 4) The CLAUDE.md scaffold block must exist and be unchanged (outside the block is free)
-if (arch.claude_md_block) {
-  const h = claudeBlockHash();
+if (contract.claudeBlock) {
+  const h = currentBlockHash();
   if (!h) err("CLAUDE.md: scaffold block missing");
-  else if (h !== arch.claude_md_block.sha256)
+  else if (h !== contract.claudeBlock.sha256)
     err("CLAUDE.md: scaffold block was modified. Humans only; if intentional, write the output of `pnpm arch --claude-hash` into architecture.json > claude_md_block.sha256.");
 }
 

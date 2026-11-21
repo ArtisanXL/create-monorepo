@@ -13,12 +13,11 @@ import {
   runBash,
 } from "./harness.ts";
 
+// guard.mjs and arch-check.mjs diverge from the bash originals on purpose (shared arch-contract module).
 const CONTRACT_FILES = [
   "architecture.json",
   "CLAUDE.md",
-  "scripts/arch-check.mjs",
   ".claude/settings.json",
-  ".claude/hooks/guard.mjs",
   ".claude/hooks/stop-check.mjs",
   ".githooks/pre-commit",
   ".github/workflows/ci.yml",

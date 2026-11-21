@@ -3,36 +3,33 @@
 // hook bypass attempts (exit 2 → the tool call is cancelled and the message goes to the agent).
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import {
+  claudeBlockSpan,
+  deferredDepInCommand,
+  deferredHint,
+  isProtected,
+  isProtectedOrDir,
+  loadContract,
+  packageOf,
+} from "../../scripts/arch-contract.mjs";
 
 const input = JSON.parse(readFileSync(0, "utf8") || "{}");
 const root = process.env.CLAUDE_PROJECT_DIR || input.cwd || process.cwd();
-const arch = JSON.parse(readFileSync(path.join(root, "architecture.json"), "utf8"));
-const allowed = new Set(Object.keys(arch.packages));
-const deferred = arch.deferred ?? [];
-const protectedPaths = arch.protected_paths ?? [];
-const exceptions = arch.agent_writable_exceptions ?? [];
+const arch = loadContract(root);
 
 const block = (msg) => {
   process.stderr.write(`⛔ ${msg}\nRules: CLAUDE.md and architecture.json.\n`);
   process.exit(2);
 };
-const hint = (d) =>
-  `This is deferred "${d.name}" (trigger: ${d.trigger}). If you think it is needed, stop, write an ADR draft under docs/adr/proposed/ and ask the user.`;
-const esc = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
-const isProtected = (r) =>
-  !exceptions.some((e) => r.startsWith(e)) &&
-  protectedPaths.some((p) => (p.endsWith("/") ? r.startsWith(p) : r === p));
+const hint = deferredHint;
 
 function checkPath(r) {
   if (r.startsWith("..") || path.isAbsolute(r)) return;
-  if (isProtected(r))
+  if (isProtected(arch, r))
     block(`${r} is protected; only humans may change it. If a change is needed, write an ADR draft under docs/adr/proposed/ and ask the user.`);
-  const m = r.match(/^(apps|packages)\/([^/]+)/);
-  if (m && !allowed.has(`${m[1]}/${m[2]}`)) {
-    const dir = `${m[1]}/${m[2]}`;
-    const d = deferred.find((x) => x.path === dir);
-    block(`${dir} is not a package declared in architecture.json. ${d ? hint(d) : "Adding a package requires an accepted ADR."}`);
-  }
+  const owner = packageOf(arch, r);
+  if (owner && !owner.declared)
+    block(`${owner.dir} is not a package declared in architecture.json. ${owner.deferred ? hint(owner.deferred) : "Adding a package requires an accepted ADR."}`);
 }
 
 const tool = input.tool_name;
@@ -40,14 +37,12 @@ const ti = input.tool_input ?? {};
 
 /** CLAUDE.md: blocks edits touching the scaffold block; outside the block is free. */
 function checkClaudeMd() {
-  const cb = arch.claude_md_block;
   const p = path.join(root, "CLAUDE.md");
-  if (!cb || !existsSync(p)) return;
+  if (!arch.claudeBlock || !existsSync(p)) return;
   const text = readFileSync(p, "utf8");
-  const b = text.indexOf(cb.begin);
-  const e = b < 0 ? -1 : text.indexOf(cb.end, b);
-  if (e < 0) return;
-  const end = e + cb.end.length;
+  const span = claudeBlockSpan(text, arch.claudeBlock);
+  if (!span) return;
+  const { start: b, end } = span;
   const msg = "The scaffold block in CLAUDE.md is protected; edit only outside the block.";
   if (tool === "Write") {
     if (!String(ti.content ?? "").includes(text.slice(b, end))) block(msg);
@@ -80,10 +75,9 @@ if (tool === "Bash") {
       .map((t) => t.replace(/^~(?=\/)/, home))
       .map((t) => path.relative(root, path.resolve(root, t)).split(path.sep).join("/"))
       .filter((r) => r && !r.startsWith("..") && !path.isAbsolute(r));
-  const isProtectedOrDir = (r) =>
-    isProtected(r) || protectedPaths.some((p) => p.endsWith("/") && r === p.slice(0, -1));
+  const touchesProtectedPath = (r) => isProtectedOrDir(arch, r);
   const relTokens = toRels([...cmd.matchAll(/[^\s"'<>|;&()]+/g)].map((m) => m[0]));
-  const touchesProtected = relTokens.some(isProtectedOrDir);
+  const touchesProtected = relTokens.some(touchesProtectedPath);
 
   if (
     relTokens.includes("CLAUDE.md") &&
@@ -99,7 +93,7 @@ if (tool === "Bash") {
     block("Command touches a protected path via git; only humans may change it.");
 
   // pm-guard:begin
-  const chosenPm = arch.package_manager;
+  const chosenPm = arch.packageManager;
   if (chosenPm) {
     // Optional command prefixes: sudo/time/env/corepack..., their flags and VAR=value assignments.
     const wrappers =
@@ -116,10 +110,8 @@ if (tool === "Bash") {
 
   // Flags and their values may sit between the PM and the verb (`pnpm --filter x add`, `pnpm -w add`).
   if (/\b(pnpm|npm|yarn|bun)\b[^|;&\n]*\s(add|install|i|update|up)\b/.test(cmd)) {
-    for (const d of deferred)
-      for (const dep of d.deps ?? [])
-        if (new RegExp(`(^|[\\s"'])${esc(dep)}(@[^\\s"']*)?(?=$|[\\s"'])`).test(cmd))
-          block(`"${dep}" cannot be installed. ${hint(d)}`);
+    const hit = deferredDepInCommand(arch, cmd);
+    if (hit) block(`"${hit.dep}" cannot be installed. ${hint(hit.deferred)}`);
   }
 
   const redirects = cmd.replace(/\d*>&\d/g, "").replace(/\d*>\s*\/dev\/null/g, "");
@@ -129,12 +121,12 @@ if (tool === "Bash") {
     [...redirects.matchAll(/\d*>>?\s*["']?([^\s"'<>|;&()]+)/g)].map((m) => m[1]),
   );
   if (!writes && redirectRels.length) {
-    if (redirectRels.some(isProtectedOrDir)) block("Command touches a protected path; only humans may change it.");
-    for (const r of redirectRels) if (/^(apps|packages)\/[^/]+/.test(r)) checkPath(r);
+    if (redirectRels.some(touchesProtectedPath)) block("Command touches a protected path; only humans may change it.");
+    for (const r of redirectRels) if (packageOf(arch, r)) checkPath(r);
   }
   if (writes) {
     if (touchesProtected) block("Command touches a protected path; only humans may change it.");
-    for (const r of relTokens) if (/^(apps|packages)\/[^/]+/.test(r)) checkPath(r);
+    for (const r of relTokens) if (packageOf(arch, r)) checkPath(r);
   }
 }
 
