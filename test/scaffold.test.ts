@@ -53,7 +53,6 @@ const deps = (over: Partial<Deps> = {}): Deps => ({
   },
   run: async (cmd, args) => {
     commands.push([cmd, ...args].join(" "));
-    // `git rev-parse` would report an enclosing repository; the scaffold must not rely on it.
     return { code: 0 };
   },
   pm: createPnpmAdapter(async () => "9.9.9"),
@@ -134,8 +133,19 @@ describe("scaffold: fresh run", () => {
   });
 
   it("initialises git in a target nested inside another repository", async () => {
-    await scaffold(options(), deps()); // the fake reports an enclosing repo: rev-parse exits 0
-    expect(commands).toContain("git init -q -b main");
+    await mkdir(join(dir, ".git"));
+    const sub = join(dir, "sub");
+    const cwds: string[] = [];
+    await scaffold(
+      options({ target: sub }),
+      deps({
+        run: async (cmd, args, cwd) => {
+          if (cmd === "git" && args[0] === "init") cwds.push(cwd);
+          return { code: 0 };
+        },
+      }),
+    );
+    expect(cwds).toEqual([sub]);
   });
 
   it("does not re-initialise a target that has its own .git", async () => {

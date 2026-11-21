@@ -5,6 +5,7 @@ import {
   type FsProbe,
   OptionsError,
   type Prompter,
+  parseCli,
   resolveOptions,
   SUPPORTED_PMS,
 } from "../src/options.ts";
@@ -42,7 +43,7 @@ async function resolve(
   probe: FsProbe = fsProbe,
 ) {
   const { prompter, asked } = fakePrompter(answers);
-  const options = await resolveOptions(argv, env, tty, prompter, probe);
+  const options = await resolveOptions(parseCli(argv), env, tty, prompter, probe);
   return { options, asked };
 }
 

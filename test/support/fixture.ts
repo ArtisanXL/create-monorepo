@@ -16,7 +16,7 @@ export const scaffoldOptions = (target: string, over: Partial<Options> = {}): Op
 
 export const fakeDeps = (pm: Deps["pm"] = createPnpmAdapter(async () => "9.9.9")): Deps => ({
   resolveVersion: async () => "1.2.3",
-  run: async (cmd, args) => ({ code: cmd === "git" && args[0] === "rev-parse" ? 128 : 0 }),
+  run: async () => ({ code: 0 }),
   pm,
 });
 
