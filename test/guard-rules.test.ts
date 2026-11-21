@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { decide, targetsOf } from "../templates/root/scripts/guard-rules.mjs";
+import { decide } from "../templates/root/scripts/guard-rules.mjs";
+import { targetsOf } from "../templates/root/scripts/shell-lex.mjs";
 import { CLAUDE_MD, templateContract } from "./support/contract.ts";
 
 const root = join("/", "proj");
