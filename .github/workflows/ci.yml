@@ -17,8 +17,12 @@ env:
 
 jobs:
   test:
-    name: Unit tests, typecheck, lint
-    runs-on: ubuntu-latest
+    name: Unit tests, typecheck, lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
@@ -30,8 +34,14 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+        if: matrix.os == 'ubuntu-latest'
       - run: pnpm lint
+        if: matrix.os == 'ubuntu-latest'
       - run: pnpm test
+        if: matrix.os == 'ubuntu-latest'
+      - name: Golden output
+        if: matrix.os != 'ubuntu-latest'
+        run: pnpm vitest run test/golden.test.ts
 
   pack-smoke:
     name: Pack smoke (${{ matrix.os }})
