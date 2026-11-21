@@ -168,6 +168,12 @@ describe("guard decision: Bash", () => {
       "git restore architecture.json",
       "git checkout -- architecture.json",
       "git checkout HEAD -- docs/adr/0001-x.md",
+      "git checkout main architecture.json",
+      "git checkout --ours architecture.json",
+      "git checkout --theirs architecture.json",
+      "git checkout --force architecture.json",
+      "git checkout --patch architecture.json",
+      "git checkout --orphan x architecture.json",
     ])
       expect(blocked(bash(cmd)), cmd).toContain("via git");
     // CLAUDE.md itself is not a protected path (only its scaffold block is).
