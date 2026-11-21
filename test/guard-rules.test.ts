@@ -725,7 +725,7 @@ describe("guard decision: third audit follow-ups (#29)", () => {
       expect(blocked(bash(`sh <<EOF\nnpm install\nEOF`))).toContain("This project uses pnpm");
       expect(
         blocked(bash(`node <<EOF\nrequire('fs').rmSync('scripts/guard-rules.mjs')\nEOF`)),
-      ).toContain("one-liner");
+      ).toContain("interpreter code");
       expect(
         blocked(bash(`python3 - <<'EOF'\nimport os; os.remove("architecture.json")\nEOF`)),
       ).toBeDefined();
@@ -783,5 +783,107 @@ describe("guard decision: third audit follow-ups (#29)", () => {
       "find docs -delete",
     ])
       expect(bash(cmd), cmd).toEqual({ allow: true });
+  });
+});
+
+describe("guard decision: fourth audit follow-ups (#29)", () => {
+  describe("heredoc scanning: safe by default", () => {
+    it.each([
+      "cat <<$'EOF'\nx\nEOF\nrm architecture.json",
+      'cat <<$"EOF"\nx\nEOF\nrm architecture.json',
+      "echo $((1<<2))\nrm architecture.json\n2",
+      "(( x = 1<<3 ))\nrm architecture.json\n3",
+      "echo $[1<<2]\nrm architecture.json\n2",
+      "if (( x = 1<<3 )); then\nrm architecture.json\n3\nfi",
+      "echo hi # <<EOF\nrm architecture.json\nEOF",
+      'echo "$((1<<2))"\nrm architecture.json\n2',
+      "cat <<'EOF' | sh\nrm architecture.json\nEOF",
+      "cat <<'EOF' | bash\nrm architecture.json\nEOF",
+      "bash <<X\ncat <<'Y' | sh\nrm architecture.json\nY\nX",
+      "sudo -u x bash <<EOF\nrm architecture.json\nEOF",
+      "timeout 5 bash <<EOF\nrm architecture.json\nEOF",
+      "source /dev/stdin <<EOF\nrm architecture.json\nEOF",
+      ". /dev/stdin <<EOF\nrm architecture.json\nEOF",
+      "xargs rm <<'EOF'\narchitecture.json\nEOF",
+      "cat <<'EOF' | xargs rm\narchitecture.json\nEOF",
+      "cat <<EOF | node\nrequire('fs').rmSync('scripts/guard-rules.mjs')\nEOF",
+      "echo $(( $(rm architecture.json) ))",
+      "((rm architecture.json))",
+    ])("blocks %s", (cmd) => {
+      expect(blocked(bash(cmd)), JSON.stringify(cmd)).toBeDefined();
+    });
+
+    it("treats a comment as a comment", () => {
+      expect(bash("echo hi # rm architecture.json")).toEqual({ allow: true });
+      expect(bash("echo hi # <<EOF")).toEqual({ allow: true });
+      expect(bash(`echo \${#PATH} $#`)).toEqual({ allow: true });
+    });
+
+    it("still skips bodies for known data sinks", () => {
+      const body = "block rm of docs/adr, cp into scripts/\n";
+      for (const cmd of [
+        `cat <<'EOF'\n${body}EOF`,
+        `cat > notes.md <<'EOF'\n${body}EOF`,
+        `cat <<'EOF' | grep rm\n${body}EOF`,
+        `cat <<'EOF' | tee notes.md\n${body}EOF`,
+        `git commit -F - <<'EOF'\n${body}EOF`,
+        `gh pr create --body-file - <<'EOF'\n${body}EOF`,
+        `git commit -m "$(cat <<'EOF'\n${body}EOF\n)"`,
+        `echo $((1<<2))\nls\n`,
+      ])
+        expect(bash(cmd), cmd).toEqual({ allow: true });
+    });
+  });
+
+  describe("read-only exemption: safe by default", () => {
+    it.each([
+      "rg --pre rm x architecture.json",
+      "rg --pre=rm x scripts",
+      "man -P 'rm architecture.json' ls",
+      "MANPAGER='rm architecture.json' man ls",
+      "LESSOPEN='|rm %s' less architecture.json",
+      "PAGER='rm architecture.json' git log",
+      "GIT_PAGER='rm architecture.json' git log",
+      "git -c core.pager='rm architecture.json' log",
+      "git -c diff.external='rm architecture.json' diff",
+      "git -c core.fsmonitor='rm architecture.json' status",
+      "git -c core.sshCommand='rm architecture.json' fetch",
+      "git -c core.editor='rm architecture.json' commit",
+      "git -c credential.helper='!rm architecture.json' fetch",
+      "git diff --output=architecture.json",
+      "git log --output architecture.json",
+      "sort -o architecture.json x",
+      "sort -oarchitecture.json x",
+      "less -o architecture.json x",
+    ])("blocks %s", (cmd) => {
+      expect(blocked(bash(cmd)), cmd).toBeDefined();
+    });
+
+    it("keeps plain readers allowed", () => {
+      for (const cmd of [
+        "git log -p -- scripts",
+        "git diff HEAD architecture.json",
+        "rg -n pre scripts",
+        "man ls",
+        "less architecture.json",
+        "sort x -o /tmp/out",
+        "git -C . log",
+      ])
+        expect(bash(cmd), cmd).toEqual({ allow: true });
+    });
+  });
+
+  it("explains that read-only interpreter code is blocked on purpose", () => {
+    expect(
+      blocked(bash(`python3 - <<'EOF'\nimport json; json.load(open('architecture.json'))\nEOF`)),
+    ).toContain("read it with cat");
+  });
+
+  it("keeps the unterminated-heredoc and deep nesting cases bounded", () => {
+    const t0 = performance.now();
+    const r = bash(`${'echo "$('.repeat(400)}x`);
+    expect(performance.now() - t0).toBeLessThan(500);
+    expect(blocked(r)).toContain("too complex");
+    expect(bash("cat <<EOF\nno end")).toEqual({ allow: true });
   });
 });
