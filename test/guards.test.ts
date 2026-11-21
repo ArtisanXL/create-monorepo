@@ -102,6 +102,54 @@ describe("generated guard hook", () => {
     }
   });
 
+  describe("supervisor fails closed when decide() misbehaves", () => {
+    const withRules = async (source: string, run: () => Promise<void>) => {
+      const path = join(dir, "scripts/guard-rules.mjs");
+      const original = await readFile(path, "utf8");
+      await writeFile(path, source);
+      try {
+        await run();
+      } finally {
+        await writeFile(path, original);
+      }
+    };
+    const blocks = async (source: string, message: string) =>
+      withRules(source, async () => {
+        const r = await write("packages/domain/src/money.ts");
+        expect(r.code).toBe(2);
+        expect(r.stderr).toContain(`The guard hook failed (${message}`);
+        expect(r.stderr.endsWith("Rules: CLAUDE.md and architecture.json.\n")).toBe(true);
+      });
+
+    it("a decide() that throws blocks", () =>
+      blocks('export const decide = () => { throw new Error("boom"); };', "boom"));
+
+    it(
+      "a decide() that never returns blocks at the wall-clock limit",
+      () => blocks("export const decide = () => { for (;;); };", "timed out"),
+      30_000,
+    );
+
+    it(
+      "an out-of-memory decide() blocks",
+      () =>
+        blocks(
+          "export const decide = () => { const a = []; for (;;) a.push(new Array(1e6).fill(a.length)); };",
+          "worker ",
+        ),
+      30_000,
+    );
+
+    it("a stack-overflowing decide() blocks", () =>
+      blocks("const f = () => f() + 1; export const decide = () => f();", "Maximum call stack"));
+
+    it("a decide() that kills the process with a signal blocks", () =>
+      blocks('export const decide = () => process.kill(process.pid, "SIGSEGV");', "worker killed"));
+
+    it("a decide() that exits with code 1 blocks", () =>
+      blocks("export const decide = () => process.exit(1);", "worker exited with code 1"));
+  });
+
   it.each(PM_NAMES)("records the chosen package manager (%s) in architecture.json", async (pm) => {
     const fixture = await scaffoldFixture({}, pm);
     try {
