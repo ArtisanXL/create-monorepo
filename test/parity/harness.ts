@@ -50,56 +50,6 @@ export async function runBash(target: string, shimDir: string, args: string[] = 
 const FIXED_BUGS: ReadonlyArray<{ file: string; reason: string; original: string; fixed: string }> =
   [
     {
-      file: ".claude/hooks/guard.mjs",
-      reason: "redirect targets, not any `>`, count as writes; token resolution is shared",
-      original: [
-        `  const relTokens = [...cmd.matchAll(/[^\\s"'<>|;&()]+/g)]`,
-        `    .map((m) => m[0].replace(/^~(?=\\/)/, home))`,
-        `    .map((t) => path.relative(root, path.resolve(root, t)).split(path.sep).join("/"))`,
-        `    .filter((r) => r && !r.startsWith("..") && !path.isAbsolute(r));`,
-        `  const touchesProtected = relTokens.some(`,
-        `    (r) => isProtected(r) || protectedPaths.some((p) => p.endsWith("/") && r === p.slice(0, -1)),`,
-        `  );`,
-      ].join("\n"),
-      fixed: [
-        `  const toRels = (tokens) =>`,
-        `    tokens`,
-        `      .map((t) => t.replace(/^~(?=\\/)/, home))`,
-        `      .map((t) => path.relative(root, path.resolve(root, t)).split(path.sep).join("/"))`,
-        `      .filter((r) => r && !r.startsWith("..") && !path.isAbsolute(r));`,
-        `  const isProtectedOrDir = (r) =>`,
-        `    isProtected(r) || protectedPaths.some((p) => p.endsWith("/") && r === p.slice(0, -1));`,
-        `  const relTokens = toRels([...cmd.matchAll(/[^\\s"'<>|;&()]+/g)].map((m) => m[0]));`,
-        `  const touchesProtected = relTokens.some(isProtectedOrDir);`,
-      ].join("\n"),
-    },
-    {
-      file: ".claude/hooks/guard.mjs",
-      reason: "deferred-dependency guard sees flags between the package manager and the verb",
-      original: "  if (/\\b(pnpm|npm|yarn|bun)\\s+(add|install|i|update|up)\\b/.test(cmd)) {",
-      fixed: [
-        "  // Flags and their values may sit between the PM and the verb (`pnpm --filter x add`, `pnpm -w add`).",
-        "  if (/\\b(pnpm|npm|yarn|bun)\\b[^|;&\\n]*\\s(add|install|i|update|up)\\b/.test(cmd)) {",
-      ].join("\n"),
-    },
-    {
-      file: ".claude/hooks/guard.mjs",
-      reason: "only a redirect's target is checked, not every protected token in the command",
-      original:
-        "  const writes = /\\b(mkdir|touch|cp|mv|rm|tee|truncate|ln|install)\\b|\\bsed\\s+-i|\\bperl\\s+-p?i|>/.test(redirects);",
-      fixed: [
-        "  const writes = /\\b(mkdir|touch|cp|mv|rm|tee|truncate|ln|install)\\b|\\bsed\\s+-i|\\bperl\\s+-p?i/.test(redirects);",
-        "  // A redirect writes only to its target; reading a protected file into a redirect is fine.",
-        "  const redirectRels = toRels(",
-        `    [...redirects.matchAll(/\\d*>>?\\s*["']?([^\\s"'<>|;&()]+)/g)].map((m) => m[1]),`,
-        "  );",
-        "  if (!writes && redirectRels.length) {",
-        `    if (redirectRels.some(isProtectedOrDir)) block("Command touches a protected path; only humans may change it.");`,
-        `    for (const r of redirectRels) if (/^(apps|packages)\\/[^/]+/.test(r)) checkPath(r);`,
-        "  }",
-      ].join("\n"),
-    },
-    {
       file: ".claude/hooks/stop-check.mjs",
       reason: "biome runs via its JS entry (the .bin shim cannot be spawned on Windows)",
       original: [
@@ -111,24 +61,6 @@ const FIXED_BUGS: ReadonlyArray<{ file: string; reason: string; original: string
         "// package's JS entry with this Node instead.",
         `const biome = path.join(root, "node_modules", "@biomejs", "biome", "bin", "biome");`,
         `if (existsSync(biome)) checks.push(["lint", run(process.execPath, [biome, "check", "."])]);`,
-      ].join("\n"),
-    },
-    {
-      file: "scripts/arch-check.mjs",
-      reason: "`import { type A }` with only type bindings is a type-only import (regex part)",
-      original: String.raw`(type\s+)?(?:[\w*{}\s,$]+?\s+from\s+)?["']`,
-      fixed: String.raw`(type\s+)?(?:([\w*{}\s,$]+?)\s+from\s+)?["']`,
-    },
-    {
-      file: "scripts/arch-check.mjs",
-      reason: "`import { type A }` with only type bindings is a type-only import (logic part)",
-      original: ["      const isType = Boolean(m[2]);", "      const s = m[3] ?? m[4];"].join("\n"),
-      fixed: [
-        "      // `import type ...` or `import { type A, type B } ...` (every binding type-prefixed) is type-only.",
-        "      const named = m[3]?.trim().match(/^\\{([^}]*)\\}$/);",
-        `      const items = named ? named[1].split(",").map((x) => x.trim()).filter(Boolean) : [];`,
-        "      const isType = Boolean(m[2]) || (items.length > 0 && items.every((x) => /^type\\s/.test(x)));",
-        "      const s = m[4] ?? m[5];",
       ].join("\n"),
     },
     {
@@ -208,13 +140,6 @@ export const ALLOWED_DIFFERENCES: ReadonlyArray<{
     reason: "TS records the chosen package manager in architecture.json",
     normalise: (file, text) =>
       file === "architecture.json" ? text.replace(/^\s*"package_manager":.*\n/m, "") : text,
-  },
-  {
-    reason: "TS guard blocks foreign package managers (pm-guard block)",
-    normalise: (file, text) =>
-      file === ".claude/hooks/guard.mjs"
-        ? text.replace(/ *\/\/ pm-guard:begin[\s\S]*?\/\/ pm-guard:end\n\n?/, "")
-        : text,
   },
   ...FIXED_BUGS.map(({ file: target, reason, original, fixed }) => ({
     reason: `TS fixes a bash-inherited bug: ${reason}`,
