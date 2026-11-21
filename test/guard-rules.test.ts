@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { decide } from "../templates/root/scripts/guard-rules.mjs";
+import { decide, targetsOf } from "../templates/root/scripts/guard-rules.mjs";
 import { CLAUDE_MD, templateContract } from "./support/contract.ts";
 
 const root = join("/", "proj");
@@ -446,7 +446,7 @@ describe("guard decision: audit follow-ups (#29)", () => {
       "sudo rm -rf docs",
       "find . -exec rm -rf docs ;",
     ])
-      expect(blocked(bash(cmd)), cmd).toContain("protected paths");
+      expect(blocked(bash(cmd)), cmd).toMatch(/protected path/);
   });
 
   it("does not block rm of . after a cd elsewhere", () => {
@@ -508,7 +508,6 @@ describe("guard decision: audit follow-ups (#29)", () => {
     for (const cmd of [
       "echo 'rm -rf docs' | sh",
       'bash <<< "npm install"',
-      "eval npm install",
       "node <<EOF\nrequire('fs').rmSync('scripts/guard-rules.mjs')\nEOF",
       "echo docs | xargs rm -rf",
       "find docs -delete",
@@ -527,5 +526,119 @@ describe("guard decision: audit follow-ups (#29)", () => {
           platform: "win32",
         }),
       ).toEqual({ allow: true });
+  });
+});
+
+describe("guard decision: re-audit follow-ups (#29)", () => {
+  it("decides in linear time however many cds a command chains", () => {
+    for (const n of [20, 200]) {
+      const cmd = `${"cd a && ".repeat(n)}touch f0 f1 f2 f3 f4 f5 f6 f7 f8 f9 architecture.json`;
+      const t0 = performance.now();
+      const r = bash(cmd);
+      expect(performance.now() - t0, `${n} cds`).toBeLessThan(200);
+      expect(r.allow, `${n} cds`).toBe(false);
+    }
+    const words = Array.from({ length: 900 }, (_, i) => `w${i}`).join(" ");
+    const t0 = performance.now();
+    expect(bash(`${"cd a; ".repeat(30)}cat ${words}`)).toEqual({ allow: true });
+    expect(performance.now() - t0).toBeLessThan(200);
+  });
+
+  it("blocks commands with too many directory changes or too long", () => {
+    expect(blocked(bash(`${"cd a; ".repeat(40)}ls`))).toContain("too complex");
+    expect(blocked(bash(`echo ${"x".repeat(300_000)}`))).toContain("too complex");
+  });
+
+  describe("no regression vs main (all blocked)", () => {
+    it.each([
+      "sudo -u root rm architecture.json",
+      "nice -n 10 rm architecture.json",
+      "env -u FOO rm architecture.json",
+      "timeout 5 rm architecture.json",
+      "stdbuf -o0 rm architecture.json",
+      "ionice -c3 rm architecture.json",
+      "busybox rm architecture.json",
+      "parallel rm ::: architecture.json",
+      "echo architecture.json | xargs rm",
+      "find . -name architecture.json -exec rm {} +",
+      'echo "$(rm architecture.json)"',
+      'x="$(rm -rf docs)"',
+      'echo "`rm architecture.json`"',
+      "$'rm' architecture.json",
+      '$"rm" architecture.json',
+      "X=rm; $X architecture.json",
+      "bash -c $'rm architecture.json'",
+      "bash -c rm\\ architecture.json",
+      "eval rm architecture.json",
+      "eval npm install",
+      'watch -n1 "rm architecture.json"',
+      'flock /tmp/l -c "rm architecture.json"',
+      'su -c "rm architecture.json"',
+      'script -qc "rm architecture.json" /dev/null',
+      "git -c alias.x='!rm architecture.json' x",
+      "sudo -u root git restore architecture.json",
+      `pnpm exec node -e "fs.unlinkSync('architecture.json')"`,
+      `npm exec -- node -e "fs.unlinkSync('architecture.json')"`,
+      `sudo -u root node -e "fs.unlinkSync('architecture.json')"`,
+    ])("blocks %s", (cmd) => {
+      expect(blocked(bash(cmd)), cmd).toBeDefined();
+    });
+
+    it("still allows quoted text and plain commands", () => {
+      for (const cmd of [
+        'echo "rm architecture.json"',
+        "echo '$(rm architecture.json)'",
+        'echo "$(date)"',
+        "timeout 5 ls docs",
+        "sudo -u root ls",
+        "pnpm exec node scripts/x.mjs",
+        "bash -c 'ls docs'",
+        "eval ls",
+      ])
+        expect(bash(cmd), cmd).toEqual({ allow: true });
+    });
+  });
+
+  it("keeps the root for `cd x || rm -rf .` and narrows for && and ;", () => {
+    expect(blocked(bash("cd nowhere || rm -rf ."))).toContain("protected paths");
+    expect(bash("cd /tmp/work && rm -rf .")).toEqual({ allow: true });
+  });
+
+  it("folds command names on case-insensitive platforms", () => {
+    const run = (platform: string, command: string) =>
+      decide({ tool: "Bash", input: { command }, contract, root, platform });
+    expect(blocked(run("darwin", "RM -rf docs"))).toBeDefined();
+    expect(blocked(run("win32", "Git Restore architecture.json"))).toBeDefined();
+    expect(run("linux", "RM -rf docs")).toEqual({ allow: true });
+  });
+
+  describe("targetsOf", () => {
+    const parse = (cmd: string) => targetsOf(cmd, "/proj");
+    it("returns commands without wrappers, quotes or flags-as-paths", () => {
+      const { commands } = parse(`sudo rm -rf "my docs" && echo 'a b'`);
+      expect(commands.map((c) => c.name)).toEqual(["rm", "echo"]);
+      expect(commands[0]?.args.map((a: { text: string }) => a.text)).toEqual(["-rf", "my docs"]);
+    });
+    it("collects redirects apart from words", () => {
+      const { redirects, commands } = parse("echo x 2>&1 >| a.txt >> b.txt");
+      expect(redirects.map((r) => [r.op, r.target])).toEqual([
+        [">", "a.txt"],
+        [">>", "b.txt"],
+      ]);
+      expect(commands[0]?.args.map((a: { text: string }) => a.text)).toEqual(["x"]);
+    });
+    it("tracks cd bases and tight directories", () => {
+      const { commands } = parse("cd a && cd ../b; ls");
+      expect(commands[2]?.bases).toEqual(["/proj", "/proj/a", "/proj/b", "/b"]);
+      expect(commands[2]?.tight).toEqual(["/proj/b"]);
+      expect(parse("cd a || ls").commands[1]?.tight).toEqual(["/proj"]);
+    });
+    it("returns substitutions inside double quotes as nested commands", () => {
+      expect(parse("echo \"$(rm x) `ls`\" '$(no)'").nested).toEqual(["rm x", "ls"]);
+    });
+    it("keeps the number of bases linear", () => {
+      const { commands } = parse(`${"cd a && ".repeat(30)}ls`);
+      expect(commands.at(-1)?.bases.length).toBeLessThanOrEqual(61);
+    });
   });
 });
