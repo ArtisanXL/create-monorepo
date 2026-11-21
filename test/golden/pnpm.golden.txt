@@ -1523,7 +1523,7 @@ export function check(snapshot) {
   return errors;
 }
 
-=== scripts/guard-rules.mjs (22641 bytes) ===
+=== scripts/guard-rules.mjs (28112 bytes) ===
 // The guard hook's decision, free of I/O: no stdin, env, filesystem or exit. The first matching
 // rule wins, so each message stays the same as it always was. Imported by .claude/hooks/guard.mjs.
 import path from "node:path";
@@ -1615,21 +1615,110 @@ const EVAL_FLAG = /^(?:-[A-Za-z]*[ecEp]|--eval(?:=.*)?|--print(?:=.*)?)$/;
 const COMMAND_STRING_RUNNERS = new Set(["su", "flock", "script", "runuser", "sg"]);
 const SHELL_NAME = /^(?:ba|z|da|k|a)?sh$/;
 const MAX_CDS = 32;
-const MAX_COMMAND_LENGTH = 200_000;
+const MAX_COMMAND_LENGTH = 50_000;
+// Path lookups (words x directories) one decision may spend, shared by nested strings; past it the call is blocked.
+const WORK_BUDGET = 50_000;
+const READ_ONLY = new Set(["grep", "egrep", "fgrep", "rg", "ag", "ack", "man", "which", "whereis", "cat", "less", "more", "head", "tail", "ls", "wc", "stat", "file", "diff"]);
+const READ_ONLY_GIT = new Set(["log", "grep", "show", "diff", "status", "blame", "ls-files", "describe", "rev-parse"]);
 const baseName = (w) => w.replace(/^.*[\\/]/, "");
+
+// Index of the `)` closing the `(` at i. Quotes and heredoc bodies inside are skipped.
+function closeParen(s, i) {
+  let depth = 0;
+  const open = [];
+  for (; i < s.length; i++) {
+    const c = s[i];
+    if (c === "\\") i++;
+    else if (c === "'" || c === '"') {
+      let e = i + 1;
+      while (e < s.length && s[e] !== c) e += c === '"' && s[e] === "\\" ? 2 : 1;
+      i = e;
+    } else if (c === "<" && s[i + 1] === "<" && s[i + 2] !== "<") {
+      const h = readHeredocDelimiter(s, i + 2);
+      if (h.delim) open.push(h);
+      i = h.end - 1;
+    } else if (c === "\n" && open.length) {
+      for (const h of open) i = heredocBody(s, i + 1, h).next;
+      open.length = 0;
+    } else if (c === "(") depth++;
+    else if (c === ")" && --depth === 0) return i;
+  }
+  return s.length;
+}
+
+// `<<[-]WORD` starting just after the `<<`: the delimiter and where the word ends.
+function readHeredocDelimiter(s, i) {
+  let j = i;
+  const strip = s[j] === "-";
+  if (strip) j++;
+  while (s[j] === " " || s[j] === "\t") j++;
+  let delim = "";
+  let quoted = false;
+  for (; j < s.length && !/[\s;|&()<>]/.test(s[j]); j++) {
+    const c = s[j];
+    if (c === "'" || c === '"') {
+      quoted = true;
+      const e = s.indexOf(c, j + 1);
+      const stop = e < 0 ? s.length : e;
+      delim += s.slice(j + 1, stop);
+      j = stop;
+    } else if (c === "\\") {
+      quoted = true;
+      delim += s[++j] ?? "";
+    } else delim += c;
+  }
+  return { delim, quoted, strip, end: j, body: "" };
+}
+
+// The body starting at `from` (just after a newline) up to its delimiter line; `next` is the index of
+// the newline that ends the delimiter line (or the string length).
+function heredocBody(s, from, h) {
+  for (let pos = from; pos <= s.length; ) {
+    const e = s.indexOf("\n", pos);
+    const stop = e < 0 ? s.length : e;
+    const line = s.slice(pos, stop).replace(/\r$/, "");
+    if ((h.strip ? line.replace(/^\t+/, "") : line) === h.delim) {
+      h.body = s.slice(from, pos);
+      return { next: stop };
+    }
+    if (e < 0) break;
+    pos = e + 1;
+  }
+  h.body = s.slice(from);
+  return { next: s.length };
+}
+
+// `$(...)` and backtick substitutions in text that the shell expands (double quotes, unquoted heredoc bodies).
+function substitutionsIn(text, out) {
+  for (let j = 0; j < text.length; j++) {
+    if (text[j] === "\\") j++;
+    else if (text[j] === "$" && text[j + 1] === "(") {
+      const e = closeParen(text, j + 1);
+      out.push(text.slice(j + 2, e));
+      j = e;
+    } else if (text[j] === "`") {
+      let e = j + 1;
+      while (e < text.length && text[e] !== "`") e += text[e] === "\\" ? 2 : 1;
+      out.push(text.slice(j + 1, e));
+      j = e;
+    }
+  }
+}
 
 /**
  * Splits a shell command into simple commands: quotes are removed, `;` `&&` `||` `|` `&` newlines,
  * parentheses and backticks separate commands, and redirects (`>`, `>>`, `>|`, `>&file`, `&>`) are
  * collected apart from the words. `$(...)` and backticks inside double quotes are returned in `nested`
  * as command strings of their own. Each segment records the operator that ended it (`sep`).
- * Heredoc bodies are not understood (their lines parse as commands).
+ * Heredoc bodies are skipped, not parsed as commands: each segment lists its `heredocs` (with `body`).
  */
 function shellSegments(cmd) {
   const segments = [];
   const nested = [];
   let words = [];
   let redirs = [];
+  let heredocs = [];
+  let waiting = [];
   let cur = null;
   let pending = null;
   const pushWord = () => {
@@ -1646,25 +1735,14 @@ function shellSegments(cmd) {
   const end = (sep) => {
     pushWord();
     pending = null;
-    if (words.length || redirs.length) segments.push({ words, redirs, sep });
+    if (words.length || redirs.length) segments.push({ words, redirs, sep, heredocs });
     words = [];
     redirs = [];
+    heredocs = [];
   };
   const grow = () => {
     cur ??= { text: "", quoted: false };
     return cur;
-  };
-  // Index just past the `)` closing the `$(` whose `(` is at i; quotes inside are skipped.
-  const closeParen = (i) => {
-    let depth = 0;
-    for (; i < cmd.length; i++) {
-      const c = cmd[i];
-      if (c === "\\") i++;
-      else if (c === "'") i = cmd.indexOf("'", i + 1) < 0 ? cmd.length : cmd.indexOf("'", i + 1);
-      else if (c === "(") depth++;
-      else if (c === ")" && --depth === 0) return i;
-    }
-    return cmd.length;
   };
   for (let i = 0; i < cmd.length; i++) {
     const c = cmd[i];
@@ -1684,7 +1762,7 @@ function shellSegments(cmd) {
       for (i++; i < cmd.length && cmd[i] !== '"'; i++) {
         if (cmd[i] === "\\" && '"\\$`'.includes(cmd[i + 1] ?? "")) i++;
         else if (cmd[i] === "$" && cmd[i + 1] === "(") {
-          const e = closeParen(i + 1);
+          const e = closeParen(cmd, i + 1);
           nested.push(cmd.slice(i + 2, e));
           i = e;
           continue;
@@ -1702,6 +1780,23 @@ function shellSegments(cmd) {
       const sep = cmd[i + 1] === "|" ? "||" : "|";
       end(sep);
       if (sep === "||") i++;
+    } else if (c === "<" && cmd[i + 1] === "<" && cmd[i + 2] !== "<") {
+      if (cur !== null && !cur.quoted && /^\d+$/.test(cur.text)) cur = null;
+      else pushWord();
+      const h = readHeredocDelimiter(cmd, i + 2);
+      if (h.delim) {
+        heredocs.push(h);
+        waiting.push(h);
+      }
+      i = h.end - 1;
+    } else if (c === "\n" && waiting.length) {
+      for (const h of waiting) {
+        i = heredocBody(cmd, i + 1, h).next;
+        // An unquoted delimiter lets the shell expand substitutions inside the body.
+        if (!h.quoted) substitutionsIn(h.body, nested);
+      }
+      waiting = [];
+      end(";");
     } else if (c === "\n" || c === ";" || c === "(" || c === ")" || c === "`") end(";");
     else if (c === "&" && cmd[i + 1] !== ">") {
       const sep = cmd[i + 1] === "&" ? "&&" : "&";
@@ -1788,10 +1883,12 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t) {
   let pipeStart = 0;
   for (const seg of parsed.segments) {
     for (const r of seg.redirs) redirects.push({ op: r.op, target: r.target, bases });
-    segments.push({ words: seg.words, pipeStart, bases });
+    const found = commandsOf(seg.words, fold);
+    const bodies = seg.heredocs.map((h) => h.body);
+    segments.push({ words: seg.words, pipeStart, bases, tight, name: found[0]?.name, bodies });
     if (seg.sep !== "|") pipeStart = segments.length;
-    for (const c of commandsOf(seg.words, fold)) {
-      commands.push({ ...c, bases, tight });
+    for (const [n, c] of found.entries()) {
+      commands.push({ ...c, bases, tight, bodies: n === 0 ? bodies : [] });
       if (c.name !== "cd" && c.name !== "pushd") continue;
       const dir = splitArgs(c.args).operands[0];
       if (!dir || dir.text === "-") continue;
@@ -1807,7 +1904,9 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t) {
 /** Command strings that other commands run: `$(...)`, `sh -c`, `eval`, `watch`, `su -c`, git aliases. */
 function innerStrings({ commands, nested }) {
   const out = [...nested];
-  for (const { name, args } of commands) {
+  for (const { name, args, bodies } of commands) {
+    // A heredoc fed to a shell is a script (one fed to an interpreter is checked as code by oneLinerRule).
+    if (SHELL_NAME.test(name)) out.push(...bodies);
     if (name === "eval" || name === "watch") out.push(args.filter((a) => name === "eval" || !a.text.startsWith("-")).map((a) => a.text).join(" "));
     else if (name === "git")
       args.forEach((a, i) => {
@@ -1836,12 +1935,8 @@ const MSG = {
   nested: "Shell strings are nested too deeply to check; run the inner command directly.",
 };
 
-/** git clean/checkout/restore/rm/mv aimed at protected paths (also behind `sudo -u x git ...`). */
-function gitRule(env, words, bases) {
-  const { contract, relsOf, expand } = env;
-  const at = words.findIndex((w) => !w.quoted && env.fold(baseName(w.text)) === "git");
-  if (at < 0) return undefined;
-  const args = words.slice(at + 1);
+// Skips git's global options: where the subcommand is, and the `-C` directories.
+function gitOptions(args) {
   let i = 0;
   const dirs = [];
   for (; i < args.length; i++) {
@@ -1851,6 +1946,16 @@ function gitRule(env, words, bases) {
       i++;
     } else if (!t.startsWith("-")) break;
   }
+  return { i, dirs };
+}
+
+/** git clean/checkout/restore/rm/mv aimed at protected paths (also behind `sudo -u x git ...`). */
+function gitRule(env, words, bases) {
+  const { contract, relsOf, expand } = env;
+  const at = words.findIndex((w) => !w.quoted && env.fold(baseName(w.text)) === "git");
+  if (at < 0) return undefined;
+  const args = words.slice(at + 1);
+  const { i, dirs } = gitOptions(args);
   const sub = args[i] && env.fold(args[i].text);
   if (!["clean", "checkout", "restore", "rm", "mv"].includes(sub ?? "")) return undefined;
   const gb = [...bases, ...dirs.map((d) => path.resolve(env.root, expand(d)))];
@@ -1879,7 +1984,7 @@ function removeRule(env, c) {
  * (a protected file, or a protected folder written as `folder/` or as a quoted literal). Read-only
  * one-liners that mention one are blocked too: a read cannot be told from a write.
  */
-function oneLinerRule(env, words, bases) {
+function oneLinerRule(env, words, bases, bodies) {
   const at = words.findIndex((w) => !w.quoted && INTERPRETERS.test(env.fold(baseName(w.text))));
   if (at < 0) return undefined;
   const args = words.slice(at + 1);
@@ -1895,73 +2000,102 @@ function oneLinerRule(env, words, bases) {
       }
       if (/^--?(?:r|require|import|loader|experimental-loader)$/.test(t)) i++;
     }
-  for (const w of code ?? [])
-    for (const m of w.text.matchAll(/[^\s"'`<>|;&()]+/g)) {
+  // A heredoc fed to the interpreter (`node <<EOF`) is code as well.
+  for (const text of [...(code ?? []).map((w) => w.text), ...bodies])
+    for (const m of text.matchAll(/[^\s"'`<>|;&()]+/g)) {
       const t = m[0];
-      const pathLike = t.endsWith("/") || ["'", '"', "`"].some((q) => w.text.includes(q + t + q));
-      for (const r of env.relsOf([t], bases))
-        if (isProtected(env.contract, r) || (pathLike && (isProtectedOrDir(env.contract, r) || holdsProtected(env.contract, r))))
-          return MSG.oneLiner;
+      for (const r of env.relsOf([t], bases)) {
+        if (isProtected(env.contract, r)) return MSG.oneLiner;
+        if (!isProtectedOrDir(env.contract, r) && !holdsProtected(env.contract, r)) continue;
+        if (t.endsWith("/") || ["'", '"', "`"].some((q) => text.includes(q + t + q))) return MSG.oneLiner;
+      }
     }
   return undefined;
 }
 
+const addAll = (list, items) => {
+  for (const x of items) list.push(x);
+};
+
 function directRule(ctx, cmd, parsed) {
-  const { contract, root, f, expand } = ctx;
+  const { contract, root, f, expand, budget } = ctx;
   if (parsed.tooComplex) return MSG.complex;
   // Root-relative paths of the words, against each base; paths outside the project are ignored.
-  const relsOf = (words, bases, keepRoot = false) =>
-    words.flatMap((w) =>
+  // Every lookup spends from the shared budget; once it is gone nothing is resolved and the call is blocked.
+  const relsOf = (words, bases, keepRoot = false) => {
+    budget.left -= words.length * bases.length;
+    if (budget.over || budget.left < 0) {
+      budget.over = true;
+      return [];
+    }
+    return words.flatMap((w) =>
       bases.flatMap((b) => {
         const r = toPosix(path.relative(root, path.resolve(b, expand(typeof w === "string" ? w : w.text))));
         return (keepRoot || r) && !r.startsWith("..") && !path.isAbsolute(r) ? [r] : [];
       }),
     );
+  };
   const env = { contract, root, expand, fold: f, relsOf };
   const claudeMd = f("CLAUDE.md");
+  const isInPlace = (name, flags) =>
+    (name === "sed" && flags.some((x) => /^-[A-Za-z]*i|^--in-place/.test(x))) ||
+    (name === "perl" && flags.some((x) => /^-[A-Za-z]*i/.test(x)));
 
   const writeRels = [];
   for (const r of parsed.redirects) {
     const rels = relsOf([r.target], r.bases);
     if (r.op === ">" && rels.includes(claudeMd)) return MSG.claude;
-    writeRels.push(...rels);
+    addAll(writeRels, rels);
   }
 
   for (const [idx, s] of parsed.segments.entries()) {
-    const msg = gitRule(env, s.words, s.bases) ?? oneLinerRule(env, s.words, s.bases);
+    const msg = gitRule(env, s.words, s.bases) ?? oneLinerRule(env, s.words, s.bases, s.bodies);
     if (msg) return msg;
     // A write command or a command named by a variable behind prefixes the parser does not know
     // (`timeout 5 rm x`, `sudo -u root rm x`, `$X x`, `xargs rm` fed by a pipe): every word counts as a target.
+    // Read-only tools are skipped (`grep rm architecture.json`); their redirects were checked above.
     const word = (w) => f(baseName(w.text));
-    const writer = s.words.find((w) => !w.quoted && (WRITERS.has(word(w)) || word(w) === "dd"));
+    if (READ_ONLY.has(s.name ?? "")) continue;
+    if (s.name === "git" && READ_ONLY_GIT.has(f(s.words.slice(1)[gitOptions(s.words.slice(1)).i]?.text ?? ""))) continue;
+    const at = s.words.findIndex((w, k) => {
+      if (w.quoted) return false;
+      const n = word(w);
+      return WRITERS.has(n) || n === "dd" || ((n === "sed" || n === "perl") && isInPlace(n, s.words.slice(k + 1).map((x) => x.text)));
+    });
+    const writer = at < 0 ? undefined : s.words[at];
     if (writer || s.words[0]?.text.startsWith("$")) {
-      const fed = s.words.some((w) => !w.quoted && word(w) === "xargs") ? parsed.segments.slice(s.pipeStart, idx).flatMap((x) => x.words) : [];
-      // Any word may be a target, but only the words after the write command are checked as packages.
-      const rels = relsOf([...fed, ...s.words], s.bases);
-      if (rels.includes(claudeMd) && writer && ["rm", "mv", "cp", "truncate"].includes(word(writer))) return MSG.claude;
+      const wname = writer ? word(writer) : "";
+      const after = s.words.slice(at < 0 ? 1 : at + 1);
+      const fed = s.words.some((w) => !w.quoted && word(w) === "xargs") && idx > s.pipeStart ? parsed.segments[idx - 1].words : [];
+      // Any word may be a target (a dd `of=` is unwrapped); only the words after the write command are checked as packages.
+      const targets = [...fed, ...s.words].map((w) => (w.text.startsWith("of=") ? w.text.slice(3) : w));
+      const rels = relsOf(targets, s.bases);
+      const appends = after.some((w) => /^-[A-Za-z]*a|^--append/.test(w.text));
+      if (rels.includes(claudeMd) && (["rm", "mv", "cp", "truncate", "sed", "perl"].includes(wname) || (wname === "tee" && !appends)))
+        return MSG.claude;
       if (rels.some((r) => isProtectedOrDir(contract, r))) return MSG.protected;
-      writeRels.push(...relsOf(s.words.slice(writer ? s.words.indexOf(writer) + 1 : 1).filter((w) => !w.text.startsWith("-")), s.bases));
+      const folder = removeRule(env, { name: wname, args: after, bases: s.bases, tight: s.tight });
+      if (folder) return folder;
+      addAll(writeRels, relsOf(after.filter((w) => !w.text.startsWith("-")), s.bases));
     }
   }
+  if (budget.over) return MSG.complex;
 
   for (const c of parsed.commands) {
     const { flags: fl, operands } = splitArgs(c.args);
-    const isWriter =
-      WRITERS.has(c.name) ||
-      (c.name === "sed" && fl.some((x) => /^-[A-Za-z]*i|^--in-place/.test(x))) ||
-      (c.name === "perl" && fl.some((x) => /^-[A-Za-z]*i/.test(x)));
-    if (isWriter) {
+    if (WRITERS.has(c.name) || isInPlace(c.name, fl)) {
       const rels = relsOf(operands, c.bases);
       const appends = fl.some((x) => /^-[A-Za-z]*a|^--append/.test(x));
       if (rels.includes(claudeMd) && (["rm", "mv", "cp", "truncate", "sed", "perl"].includes(c.name) || (c.name === "tee" && !appends)))
         return MSG.claude;
-      writeRels.push(...rels);
+      addAll(writeRels, rels);
     }
     if (c.name === "dd")
-      for (const a of c.args) if (a.text.startsWith("of=")) writeRels.push(...relsOf([a.text.slice(3)], c.bases));
+      for (const a of c.args) if (a.text.startsWith("of=")) addAll(writeRels, relsOf([a.text.slice(3)], c.bases));
     const msg = removeRule(env, c);
     if (msg) return msg;
   }
+  if (budget.over) return MSG.complex;
   if (/--no-verify\b/.test(cmd) || /\bgit\s+commit\b[^|;&]*\s-n\b/.test(cmd))
     return "Skipping git hooks is forbidden (--no-verify).";
   if (/core\.hooksPath/.test(cmd) && !/\.githooks/.test(cmd)) return "Changing the git hooks path is forbidden.";
@@ -1987,6 +2121,7 @@ function directRule(ctx, cmd, parsed) {
     if (hit) return `"${hit.dep}" cannot be installed. ${deferredHint(hit.deferred)}`;
   }
 
+  if (budget.over) return MSG.complex;
   if (writeRels.some((r) => isProtectedOrDir(contract, r))) return MSG.protected;
   for (const r of writeRels) if (packageOf(contract, r)) {
     const msg = pathRule(contract, r);
@@ -2019,7 +2154,7 @@ export function decide({ tool, input, contract, root, home = "~", claudeMdText, 
   const ci = CASE_INSENSITIVE.has(platform);
   const f = ci ? lower : (s) => s;
   const expand = (t) => f(t.replace(/^~(?=\/)/, home));
-  const ctx = { contract: ci ? foldContract(contract) : contract, root: f(root), f, expand };
+  const ctx = { contract: ci ? foldContract(contract) : contract, root: f(root), f, expand, budget: { left: WORK_BUDGET, over: false } };
   let message;
   if (["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(tool))
     message = fileRule(ctx, tool, ti, claudeMdText);

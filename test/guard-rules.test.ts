@@ -508,7 +508,6 @@ describe("guard decision: audit follow-ups (#29)", () => {
     for (const cmd of [
       "echo 'rm -rf docs' | sh",
       'bash <<< "npm install"',
-      "node <<EOF\nrequire('fs').rmSync('scripts/guard-rules.mjs')\nEOF",
       "echo docs | xargs rm -rf",
       "find docs -delete",
       "git reset --hard HEAD~5",
@@ -640,5 +639,149 @@ describe("guard decision: re-audit follow-ups (#29)", () => {
       const { commands } = parse(`${"cd a && ".repeat(30)}ls`);
       expect(commands.at(-1)?.bases.length).toBeLessThanOrEqual(61);
     });
+  });
+});
+
+describe("guard decision: third audit follow-ups (#29)", () => {
+  const cds = "cd a && ".repeat(32);
+  const many = (n: number, w = "a") => Array.from({ length: n }, () => w).join(" ");
+
+  describe("work budget", () => {
+    const timed = (cmd: string) => {
+      const t0 = performance.now();
+      const r = bash(cmd);
+      return { r, ms: performance.now() - t0 };
+    };
+
+    it("decides a long xargs pipeline in linear time", () => {
+      const { r, ms } = timed(
+        `echo a | ${Array.from({ length: 3000 }, () => "xargs rm a").join(" | ")}; rm architecture.json`,
+      );
+      expect(ms).toBeLessThan(500);
+      expect(r.allow).toBe(false);
+    });
+
+    it.each([
+      ["timeout + rm with many args", `${cds}timeout 5 rm ${many(12000)}`],
+      ["rm with many args", `${cds}rm ${many(12000)}`],
+      ["long node -e", `${cds}node -e "${many(12000, "x.y")}"`],
+      ["git checkout with many paths", `${cds}git checkout HEAD~1 -- ${many(12000)}`],
+      ["many redirects", `${cds}echo ${many(8000, ">f")}`],
+    ])("blocks %s as too complex, fast", (_name, cmd) => {
+      const t0 = performance.now();
+      const r = bash(cmd);
+      expect(performance.now() - t0).toBeLessThan(500);
+      expect(blocked(r)).toContain("too complex");
+    });
+
+    it("blocks a command over 50k characters", () => {
+      expect(blocked(bash(`echo ${"x".repeat(60_000)}`))).toContain("too complex");
+    });
+
+    it("keeps ordinary long commands allowed", () => {
+      expect(bash(`ls ${many(500)}`)).toEqual({ allow: true });
+      expect(bash(`cd packages/domain && rm ${many(200, "x.txt")}`)).toEqual({ allow: true });
+    });
+  });
+
+  describe("no regression vs main: in-place edits and tee behind prefixes", () => {
+    it.each([
+      "timeout 5 sed -i s/a/b/ architecture.json",
+      "timeout 5 sed -i.bak s/a/b/ architecture.json",
+      "timeout 5 perl -pi -e s/a/b/ architecture.json",
+      "timeout 5 sed -i s/a/b/ CLAUDE.md",
+      "timeout 5 tee CLAUDE.md",
+      "echo x | timeout 5 tee CLAUDE.md",
+    ])("blocks %s", (cmd) => {
+      expect(blocked(bash(cmd)), cmd).toBeDefined();
+    });
+    it("allows tee -a and reads behind a prefix", () => {
+      expect(bash("echo x | timeout 5 tee -a CLAUDE.md")).toEqual({ allow: true });
+      expect(bash("timeout 5 sed s/a/b/ architecture.json")).toEqual({ allow: true });
+    });
+  });
+
+  describe("heredocs", () => {
+    const BODY =
+      "fix(guard): block rm of docs/adr\n\n- cp and mv into scripts/ are blocked\n- don't run `rm architecture.json`\n";
+    it("does not parse a heredoc body as commands", () => {
+      expect(bash(`git commit -m "$(cat <<'EOF'\n${BODY}EOF\n)"`)).toEqual({ allow: true });
+      expect(bash(`gh pr create --title t --body "$(cat <<'EOF'\n${BODY}EOF\n)"`)).toEqual({
+        allow: true,
+      });
+      expect(bash(`cat > docs/notes.md <<'EOF'\n${BODY}EOF`)).toEqual({ allow: true });
+      expect(bash(`cat <<-EOF\n\t${BODY.split("\n")[0]}\n\tEOF\nls`)).toEqual({ allow: true });
+    });
+    it("still checks the redirect target and what follows the body", () => {
+      expect(blocked(bash(`cat > architecture.json <<'EOF'\nx\nEOF`))).toContain("protected path");
+      expect(blocked(bash(`cat > docs/adr/0009-x.md <<EOF\nx\nEOF`))).toContain("protected path");
+      expect(blocked(bash(`cat <<'EOF'\nx\nEOF\nrm architecture.json`))).toContain(
+        "protected path",
+      );
+      expect(blocked(bash(`cat <<EOF | tee architecture.json\nx\nEOF`))).toBeDefined();
+    });
+    it("runs a body fed to a shell or interpreter, and unquoted-delimiter substitutions", () => {
+      expect(blocked(bash(`bash <<'EOF'\nrm architecture.json\nEOF`))).toContain("protected path");
+      expect(blocked(bash(`sh <<EOF\nnpm install\nEOF`))).toContain("This project uses pnpm");
+      expect(
+        blocked(bash(`node <<EOF\nrequire('fs').rmSync('scripts/guard-rules.mjs')\nEOF`)),
+      ).toContain("one-liner");
+      expect(
+        blocked(bash(`python3 - <<'EOF'\nimport os; os.remove("architecture.json")\nEOF`)),
+      ).toBeDefined();
+      expect(blocked(bash(`cat <<EOF\n$(rm architecture.json)\nEOF`))).toBeDefined();
+      expect(bash(`cat <<'EOF'\n$(rm architecture.json)\nEOF`)).toEqual({ allow: true });
+      expect(bash(`node <<EOF\nconsole.log(1)\nEOF`)).toEqual({ allow: true });
+    });
+  });
+
+  describe("read-only tools skip the write-word fallback", () => {
+    it.each([
+      "grep rm architecture.json",
+      "grep -rn touch scripts/",
+      "rg -n mkdir scripts",
+      "git log --grep install -- scripts",
+      "git grep tee -- scripts",
+      "git show HEAD:architecture.json",
+      "man rm",
+      "which rm",
+      "cat architecture.json",
+      "head -n 3 docs/adr/0001-x.md",
+    ])("allows %s", (cmd) => {
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+    });
+    it("still checks their redirects", () => {
+      expect(blocked(bash("grep rm x > architecture.json"))).toContain("protected path");
+      expect(blocked(bash("cat a >| scripts/x.mjs"))).toContain("protected path");
+    });
+  });
+
+  it("checks folders and dd of= behind unknown prefixes", () => {
+    for (const cmd of [
+      "timeout 5 rm -rf docs",
+      "timeout 5 mv docs /tmp",
+      "timeout 5 rm -rf .",
+      "timeout 5 dd of=architecture.json",
+      "nice -n 5 dd if=/dev/zero of=docs/adr/0001-x.md",
+    ])
+      expect(blocked(bash(cmd)), cmd).toBeDefined();
+    expect(bash("timeout 5 mv foo.txt docs")).toEqual({ allow: true });
+    expect(bash("timeout 5 dd if=a of=/tmp/out")).toEqual({ allow: true });
+  });
+
+  it("documents more known limits: allowed, CI arch-check is the backstop", () => {
+    for (const cmd of [
+      "rsync -a --delete empty/ docs/",
+      "chmod 000 architecture.json",
+      `rm${"$"}{IFS}-rf${"$"}{IFS}docs`,
+      "echo 'rm -rf docs' | bash",
+      'bash <<< "npm install"',
+      'bash -c -- "rm architecture.json"',
+      "git checkout HEAD -- 'docs/ad*'",
+      "git reset --hard HEAD~3",
+      "echo docs | xargs rm -rf",
+      "find docs -delete",
+    ])
+      expect(bash(cmd), cmd).toEqual({ allow: true });
   });
 });
