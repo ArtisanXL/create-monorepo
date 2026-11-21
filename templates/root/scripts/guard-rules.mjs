@@ -96,11 +96,40 @@ const READ_ONLY = new Set(["grep", "egrep", "fgrep", "rg", "ag", "ack", "man", "
 const READ_ONLY_GIT = new Set(["log", "grep", "show", "diff", "status", "blame", "ls-files", "describe", "rev-parse"]);
 // Environment variables whose value is a command that some tool runs (`PAGER=rm man ls`).
 const COMMAND_ENV = /^(?:PAGER|MANPAGER|GIT_PAGER|LESSOPEN|LESSCLOSE|GIT_EXTERNAL_DIFF|GIT_SSH_COMMAND|GIT_EDITOR|GIT_ASKPASS|SSH_ASKPASS|EDITOR|VISUAL|PROMPT_COMMAND|BROWSER)$/;
-// git config keys whose value is a command line.
-const GIT_COMMAND_KEY = /^(?:.*\.pager|diff\.external|core\.(?:fsmonitor|sshcommand|editor|askpass)|.*\.helper|.*\.textconv|sequence\.editor|.*\.cmd)$/i;
+
 const baseName = (w) => w.replace(/^.*[\\/]/, "");
 
 const MAX_LEX_LEVEL = 6;
+const ANSI_SIMPLE = { n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?" };
+
+// The `$'...'` string whose body starts at i: escapes are skipped (so `\'` does not end it) and decoded.
+// Returns the text and the index of the closing quote (or the string length).
+function ansiC(s, i) {
+  let text = "";
+  for (; i < s.length && s[i] !== "'"; i++) {
+    if (s[i] !== "\\") {
+      text += s[i];
+      continue;
+    }
+    const n = s[++i];
+    if (n === undefined) break;
+    if (Object.hasOwn(ANSI_SIMPLE, n)) text += ANSI_SIMPLE[n];
+    else if (n === "x" || n === "u" || n === "U") {
+      const max = n === "x" ? 2 : n === "u" ? 4 : 8;
+      const m = new RegExp(`^[0-9a-fA-F]{1,${max}}`).exec(s.slice(i + 1, i + 1 + max));
+      const code = m ? Number.parseInt(m[0], 16) : Number.NaN;
+      if (m && code <= 0x10ffff) text += String.fromCodePoint(code);
+      else text += `\\${n}${m ? m[0] : ""}`;
+      i += m ? m[0].length : 0;
+    } else if (/[0-7]/.test(n)) {
+      const m = /^[0-7]{1,3}/.exec(s.slice(i, i + 3));
+      text += String.fromCharCode(Number.parseInt(m[0], 8) & 255);
+      i += m[0].length - 1;
+    } else if (n === "c") text += String.fromCharCode((s.charCodeAt(++i) || 0) & 31);
+    else text += `\\${n}`;
+  }
+  return { text, end: i };
+}
 
 // `<<[-]WORD` starting just after the `<<`: the delimiter and where the word ends.
 function readHeredocDelimiter(s, i) {
@@ -245,8 +274,13 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
     if (c === "\\") {
       if (cmd[i + 1] === "\n") i++;
       else if (i + 1 < cmd.length) grow().text += cmd[++i];
-    } else if (c === "$" && (cmd[i + 1] === "'" || cmd[i + 1] === '"')) {
-      // $'...' and $"..." quote like '...' and "...": drop the $.
+    } else if (c === "$" && cmd[i + 1] === "'") {
+      const r = ansiC(cmd, i + 2);
+      grow().quoted = true;
+      cur.text += r.text;
+      i = r.end;
+    } else if (c === "$" && cmd[i + 1] === '"') {
+      // $"..." quotes like "...": drop the $.
     } else if (c === "$" && ((cmd[i + 1] === "(" && cmd[i + 2] === "(") || cmd[i + 1] === "[")) {
       i = expansion(i);
       grow().text += "0";
@@ -396,6 +430,26 @@ function gitOptions(args) {
   return { i, dirs };
 }
 
+// Files a segment writes: its `>` / `>>` redirect targets and the operands of tee.
+function writtenTargets(seg, fold) {
+  const out = seg.redirs.filter((r) => r.op === ">" || r.op === ">>").map((r) => path.normalize(r.target));
+  const at = seg.words.findIndex((w) => !w.quoted && fold(baseName(w.text)) === "tee");
+  if (at >= 0) for (const w of seg.words.slice(at + 1)) if (!w.text.startsWith("-")) out.push(path.normalize(w.text));
+  return out;
+}
+
+// Whether a segment executes one of the files: `bash f`, `. f`, `node f`, or `./f` itself.
+function runs(seg, targets, fold) {
+  const is = (w) => targets.includes(path.normalize(w.text));
+  if (seg.words[0] && is(seg.words[0])) return true;
+  return seg.words.some(
+    (w, k) =>
+      !w.quoted &&
+      (SHELL_NAME.test(fold(baseName(w.text))) || w.text === "." || w.text === "source" || INTERPRETERS.test(fold(baseName(w.text)))) &&
+      seg.words.slice(k + 1).some(is),
+  );
+}
+
 /** `git commit -F -` and `gh ... --body-file -` read their input as data. */
 function readsStdinAsData(seg) {
   if (seg.name !== "git" && seg.name !== "gh") return false;
@@ -449,7 +503,7 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t) {
     for (const r of seg.redirs) redirects.push({ op: r.op, target: r.target, bases });
     const found = commandsOf(seg.words, fold);
     const bodies = seg.heredocs.map((h) => h.body);
-    segments.push({ words: seg.words, pipeStart, bases, tight, name: found[0]?.name, sep: seg.sep, bodies });
+    segments.push({ words: seg.words, redirs: seg.redirs, pipeStart, bases, tight, name: found[0]?.name, sep: seg.sep, bodies });
     if (seg.sep !== "|") pipeStart = segments.length;
     for (const c of found) {
       commands.push({ ...c, bases, tight });
@@ -473,10 +527,18 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t) {
     const sink =
       (knownSafe(seg, fold) || seg.name === "tee" || readsStdinAsData(seg)) &&
       pipe.every((x) => knownSafe(x, fold) || x.name === "tee");
-    if (sink) continue;
+    if (sink) {
+      // A sink that writes a file which a later command in the same line runs: the body is that script.
+      const targets = writtenTargets(seg, fold);
+      const runner = targets.length ? segments.slice(idx + 1).find((x) => runs(x, targets, fold)) : undefined;
+      if (!runner) continue;
+      seg.scriptBodies = seg.bodies;
+      if (runner.words.some((w) => !w.quoted && INTERPRETERS.test(fold(baseName(w.text))))) seg.codeBodies = seg.bodies;
+      continue;
+    }
     seg.scriptBodies = seg.bodies;
-    const runs = [seg, ...pipe].some((x) => x.words.some((w) => !w.quoted && INTERPRETERS.test(fold(baseName(w.text)))));
-    if (runs) seg.codeBodies = seg.bodies;
+    const interp = [seg, ...pipe].some((x) => x.words.some((w) => !w.quoted && INTERPRETERS.test(fold(baseName(w.text)))));
+    if (interp) seg.codeBodies = seg.bodies;
   }
   return { commands, redirects, segments, nested: parsed.nested, tooComplex: false };
 }
@@ -490,7 +552,10 @@ function innerStrings({ commands, nested, segments }) {
     const others = seg.words.filter((w) => !ASSIGNMENT.test(w.text) && !w.text.startsWith("-")).slice(1).map((w) => w.text).join(" ");
     seg.words.forEach((w, k) => {
       const env = ASSIGNMENT.test(w.text) ? /^([A-Za-z_]\w*)=(.*)$/s.exec(w.text) : null;
-      if (env && COMMAND_ENV.test(env[1])) out.push(env[2].replace(/^\|/, "").replace(/%s/g, others));
+      if (env && (COMMAND_ENV.test(env[1]) || /^GIT_CONFIG_VALUE_\d+$/.test(env[1])))
+        out.push(env[2].replace(/^[|!]/, "").replace(/%s/g, others));
+      // A value with whitespace may be a command line that a later `eval $X` / `$X` / `bash -c '$X'` runs.
+      else if (env && /\s/.test(env[2])) out.push(env[2]);
       const opt = /^--(?:pre|pager)(?:=(.*))?$/s.exec(w.text) ?? (seg.name === "man" ? /^-P(.*)$/s.exec(w.text) : null);
       if (opt) out.push(`${opt[1] || seg.words[k + 1]?.text || ""} ${others}`);
     });
@@ -499,11 +564,9 @@ function innerStrings({ commands, nested, segments }) {
     if (name === "eval" || name === "watch") out.push(args.filter((a) => name === "eval" || !a.text.startsWith("-")).map((a) => a.text).join(" "));
     else if (name === "git")
       args.forEach((a, i) => {
+        // Any `-c key=value` may name a program git runs (gpg.program, diff.x.command, filter.x.clean, ...).
         const kv = a.text === "-c" ? /^([^=]+)=(.*)$/s.exec(args[i + 1]?.text ?? "") : null;
-        if (!kv) return;
-        if (/^alias\./i.test(kv[1])) {
-          if (kv[2].startsWith("!")) out.push(kv[2].slice(1));
-        } else if (GIT_COMMAND_KEY.test(kv[1])) out.push(kv[2].replace(/^!/, ""));
+        if (kv) out.push(kv[2].replace(/^!/, ""));
       });
     else if (SHELL_NAME.test(name) || COMMAND_STRING_RUNNERS.has(name))
       for (let i = 0; i < args.length; i++) {
@@ -611,7 +674,7 @@ function fallbackRule(env, parsed, idx, writeRels) {
   if (knownSafe(s, f)) return undefined;
   const word = (w) => f(baseName(w.text));
   const at = s.words.findIndex((w, k) => {
-    if (w.quoted) return false;
+    if (w.quoted && /\s/.test(w.text)) return false;
     const n = word(w);
     return WRITERS.has(n) || n === "dd" || ((n === "sed" || n === "perl") && inPlace(n, s.words.slice(k + 1).map((x) => x.text)));
   });

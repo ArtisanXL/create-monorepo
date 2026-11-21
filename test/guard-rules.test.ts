@@ -887,3 +887,46 @@ describe("guard decision: fourth audit follow-ups (#29)", () => {
     expect(bash("cat <<EOF\nno end")).toEqual({ allow: true });
   });
 });
+
+describe("guard decision: fifth audit follow-ups (#29)", () => {
+  it.each([
+    "echo $'it\\'s' ; rm architecture.json",
+    "echo $'\\'' ; rm architecture.json ; echo $'\\''",
+    "$'\\x72m' architecture.json",
+    "$'\\162m' architecture.json",
+    "$'\\u0072m' architecture.json",
+    "$'r\\x6d' architecture.json",
+    "timeout 5 $'\\x72m' architecture.json",
+    "cat > /tmp/x.sh <<'EOF'\nrm architecture.json\nEOF\nbash /tmp/x.sh",
+    "cat > /tmp/x.sh <<'EOF'\nrm architecture.json\nEOF\nsh /tmp/x.sh",
+    "tee /tmp/x.sh <<'EOF'\nrm architecture.json\nEOF\n. /tmp/x.sh",
+    "cat <<'EOF' > /tmp/x.sh && bash /tmp/x.sh\nrm architecture.json\nEOF",
+    "cat > /tmp/x.sh <<'EOF'\nrm architecture.json\nEOF\nchmod +x /tmp/x.sh; /tmp/x.sh",
+    "cat > /tmp/x.js <<'EOF'\nrequire('fs').rmSync('architecture.json')\nEOF\nnode /tmp/x.js",
+    "git -c gpg.program='rm architecture.json' log --show-signature",
+    "git -c diff.x.command='rm architecture.json' diff",
+    "git -c filter.x.clean='rm architecture.json' add .",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0='rm architecture.json' git log",
+    "X='rm architecture.json'; eval $X",
+    "X='rm architecture.json'; $X",
+    "X='rm architecture.json' bash -c '$X'",
+  ])("blocks %s", (cmd) => {
+    expect(blocked(bash(cmd)), JSON.stringify(cmd)).toBeDefined();
+  });
+
+  it("allows the harmless counterparts", () => {
+    for (const cmd of [
+      "echo $'it\\'s' ; echo done",
+      "echo $'a\\tb' > /tmp/out",
+      "cat > /tmp/run.sh <<'EOF'\npnpm test\nEOF\nbash /tmp/run.sh",
+      "cat > /tmp/notes.txt <<'EOF'\nrm architecture.json\nEOF\ncat /tmp/notes.txt",
+      "cat > /tmp/x.sh <<'EOF'\nrm architecture.json\nEOF\nls /tmp/x.sh",
+      'git -c user.name="A B" commit -m x',
+      "git -c core.pager=cat log",
+      'MSG="update the docs" git commit -m "$MSG"',
+      "NODE_ENV=test pnpm test",
+      "X='ls docs'; $X",
+    ])
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+  });
+});
