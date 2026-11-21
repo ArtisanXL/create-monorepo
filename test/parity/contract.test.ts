@@ -13,7 +13,7 @@ import {
   runBash,
 } from "./harness.ts";
 
-// guard.mjs and arch-check.mjs diverge from the bash originals on purpose (shared arch-contract module).
+// CODEOWNERS, guard.mjs and arch-check.mjs diverge from the bash originals on purpose (shared arch-contract module).
 const CONTRACT_FILES = [
   "architecture.json",
   "CLAUDE.md",
@@ -21,7 +21,6 @@ const CONTRACT_FILES = [
   ".claude/hooks/stop-check.mjs",
   ".githooks/pre-commit",
   ".github/workflows/ci.yml",
-  ".github/CODEOWNERS",
   "docs/adr/TEMPLATE.md",
   "docs/adr/0001-package-boundaries.md",
   "docs/adr/0002-deferred-packages.md",
