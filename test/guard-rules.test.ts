@@ -237,3 +237,186 @@ describe("guard decision: Bash", () => {
     });
   });
 });
+
+describe("guard decision: bypass hardening (#29)", () => {
+  const PROTECTED = "protected path";
+
+  it("blocks rm/mv of a parent folder of protected paths", () => {
+    for (const cmd of [
+      "rm -rf docs",
+      "rm -r scripts/",
+      "rm -rf ./docs",
+      "mv docs x",
+      "mv scripts /tmp/s",
+      "rm -rf .",
+      "git rm -r docs",
+    ])
+      expect(blocked(bash(cmd)), cmd).toBeDefined();
+    expect(blocked(bash("rm -rf docs"))).toContain("protected paths");
+  });
+
+  it("allows harmless rm/mv, including moving into a parent folder", () => {
+    for (const cmd of [
+      "rm -rf node_modules",
+      "rm -rf docs/old",
+      "rm -rf dist build",
+      "mv foo.txt docs",
+      "mv a.txt .",
+      "rm -rf packages/domain/dist",
+    ])
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+  });
+
+  it("blocks git -C forms and git checkout <rev> <path>", () => {
+    for (const cmd of [
+      "git -C . restore architecture.json",
+      "git -C . checkout HEAD -- architecture.json",
+      "git -c core.x=1 -C . restore scripts/guard-rules.mjs",
+      "git -C docs/adr checkout .",
+      "git -C docs restore adr/0001-x.md",
+      "git checkout HEAD~1 scripts/guard-rules.mjs",
+      "git checkout main docs",
+    ])
+      expect(blocked(bash(cmd)), cmd).toContain("via git");
+    expect(bash("git -C . status")).toEqual({ allow: true });
+    expect(bash("git -C packages/domain checkout main")).toEqual({ allow: true });
+    expect(bash("git checkout main")).toEqual({ allow: true });
+  });
+
+  it("checks the command inside bash -c / sh -c / eval", () => {
+    for (const cmd of [
+      'bash -c "npm install"',
+      "sh -c 'npm install left-pad'",
+      'bash -lc "yarn add zod"',
+      'zsh -c "cd apps/api && npm ci"',
+      'bash -c "bash -c \\"npm install\\""',
+      'eval "npm install"',
+    ])
+      expect(blocked(bash(cmd)), cmd).toContain("This project uses pnpm");
+    expect(blocked(bash('bash -c "rm architecture.json"'))).toContain(PROTECTED);
+    expect(blocked(bash("sh -c 'echo x > docs/adr/0001-x.md'"))).toContain(PROTECTED);
+    expect(blocked(bash('bash -c "pnpm add better-auth"'))).toContain("better-auth");
+    expect(bash('bash -c "pnpm install"')).toEqual({ allow: true });
+    expect(bash("sh -c 'ls docs'")).toEqual({ allow: true });
+  });
+
+  it("blocks interpreter one-liners and dd of= that name a protected path", () => {
+    for (const cmd of [
+      `node -e "fs.unlinkSync('scripts/guard-rules.mjs')"`,
+      `node -e "require('fs').rmSync('docs',{recursive:true})"`,
+      `python3 -c "import os; os.remove('architecture.json')"`,
+      `perl -e 'unlink "biome.json"'`,
+      "dd of=architecture.json",
+      "dd if=/dev/zero of=docs/adr/0001-x.md",
+    ])
+      expect(blocked(bash(cmd)), cmd).toBeDefined();
+    expect(blocked(bash("dd if=/dev/zero of=packages/widgets/x"))).toContain(
+      "not a package declared",
+    );
+  });
+
+  it("allows one-liners that do not name a protected path", () => {
+    expect(bash('node -e "console.log(1)"')).toEqual({ allow: true });
+    expect(bash(`python3 -c "print('hi')"`)).toEqual({ allow: true });
+    expect(bash("dd if=a of=/tmp/out")).toEqual({ allow: true });
+    // Deliberate false positive: even a read-only one-liner that names a protected file is blocked;
+    // telling a read from a write inside an interpreter string is not possible. Use cat or Read.
+    expect(blocked(bash(`node -e "require('./architecture.json')"`))).toBeDefined();
+    // Known limit: a path assembled at run time is not seen. CI arch-check is the backstop.
+    expect(bash(`node -e "fs.unlinkSync('scr'+'ipts/guard-rules.mjs')"`)).toEqual({ allow: true });
+  });
+
+  it("resolves relative targets after cd", () => {
+    for (const cmd of [
+      "cd scripts && echo > guard-rules.mjs",
+      "cd scripts; rm guard-rules.mjs",
+      "cd docs && rm -rf adr",
+      "cd docs/adr && touch 0002-x.md",
+      "cd ../elsewhere; cd scripts && tee guard-rules.mjs",
+      'bash -c "cd scripts && echo > guard-rules.mjs"',
+    ])
+      expect(blocked(bash(cmd)), cmd).toContain(PROTECTED);
+    expect(bash("cd packages/domain && echo > src/a.ts")).toEqual({ allow: true });
+    expect(bash("cd docs && echo > guide.md")).toEqual({ allow: true });
+    expect(bash("cd scripts && cat arch-contract.mjs")).toEqual({ allow: true });
+  });
+
+  it("keeps harmless commands allowed", () => {
+    for (const cmd of [
+      "cat architecture.json",
+      "ls docs",
+      "ls scripts",
+      "git status",
+      "pnpm verify",
+    ])
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+  });
+
+  describe("decoy scaffold block", () => {
+    const MSG = "The scaffold block in CLAUDE.md is protected; edit only outside the block.";
+    const decoy = "<!-- scaffold:begin decoy -->\n<!-- scaffold:end -->\n";
+    it("blocks a Write that keeps the real block but adds a second begin marker", () => {
+      expect(
+        blocked(guard("Write", { file_path: "CLAUDE.md", content: `${decoy}${CLAUDE_MD}` })),
+      ).toBe(MSG);
+      expect(
+        blocked(guard("Write", { file_path: "CLAUDE.md", content: `${CLAUDE_MD}\n${decoy}` })),
+      ).toBe(MSG);
+    });
+    it("blocks an Edit or MultiEdit that introduces a begin marker", () => {
+      const e = { file_path: "CLAUDE.md", old_string: "# Mine", new_string: decoy };
+      expect(blocked(guard("Edit", e))).toBe(MSG);
+      expect(blocked(guard("MultiEdit", { file_path: "CLAUDE.md", edits: [e] }))).toBe(MSG);
+    });
+    it("still allows a Write that keeps exactly the one block", () => {
+      expect(guard("Write", { file_path: "CLAUDE.md", content: `new\n${CLAUDE_MD}` })).toEqual({
+        allow: true,
+      });
+    });
+  });
+
+  describe("case-insensitive platforms", () => {
+    const run = (platform: string | undefined, tool: string, input: Record<string, unknown>) =>
+      decide({ tool, input, contract, root, home: "/home/u", claudeMdText: CLAUDE_MD, platform });
+    it.each(["darwin", "win32"])("blocks case variants on %s", (platform) => {
+      expect(
+        blocked(run(platform, "Write", { file_path: "Architecture.json", content: "x" })),
+      ).toContain("protected");
+      expect(
+        blocked(run(platform, "Write", { file_path: "DOCS/ADR/x.md", content: "x" })),
+      ).toContain("protected");
+      expect(
+        blocked(
+          run(platform, "Write", { file_path: abs("Scripts/Guard-Rules.mjs"), content: "x" }),
+        ),
+      ).toContain("protected");
+      expect(
+        blocked(run(platform, "Write", { file_path: "claude.md", content: "# Mine\n" })),
+      ).toContain("scaffold block");
+      expect(blocked(run(platform, "Bash", { command: "rm Architecture.json" }))).toContain(
+        PROTECTED,
+      );
+      expect(blocked(run(platform, "Bash", { command: "echo x > claude.md" }))).toContain(
+        "CLAUDE.md must not",
+      );
+      expect(blocked(run(platform, "Bash", { command: "rm -rf Docs" }))).toBeDefined();
+      expect(
+        blocked(run(platform, "Write", { file_path: "Packages/Widgets/a.ts", content: "x" })),
+      ).toContain("not a package declared");
+      expect(
+        run(platform, "Write", { file_path: "Docs/ADR/Proposed/0004-x.md", content: "x" }),
+      ).toEqual({ allow: true });
+    });
+    it("stays case-sensitive on linux and when no platform is given", () => {
+      for (const platform of ["linux", undefined]) {
+        expect(run(platform, "Write", { file_path: "Architecture.json", content: "x" })).toEqual({
+          allow: true,
+        });
+        expect(run(platform, "Write", { file_path: "claude.md", content: "x" })).toEqual({
+          allow: true,
+        });
+        expect(run(platform, "Bash", { command: "rm Architecture.json" })).toEqual({ allow: true });
+      }
+    });
+  });
+});

@@ -1,4 +1,4 @@
-=== .claude/hooks/guard.mjs (1487 bytes) ===
+=== .claude/hooks/guard.mjs (1519 bytes) ===
 #!/usr/bin/env node
 // PreToolUse: blocks writes to protected files, undeclared packages, deferred dependencies and
 // hook bypass attempts (exit 2 → the tool call is cancelled and the message goes to the agent).
@@ -25,6 +25,7 @@ try {
     contract: loadContract(root),
     root,
     home: process.env.HOME ?? "~",
+    platform: process.platform,
     claudeMdText: existsSync(claudeMd) ? readFileSync(claudeMd, "utf8") : undefined,
   });
   if (!result.allow) deny(result.message);
@@ -1522,7 +1523,7 @@ export function check(snapshot) {
   return errors;
 }
 
-=== scripts/guard-rules.mjs (6697 bytes) ===
+=== scripts/guard-rules.mjs (10691 bytes) ===
 // The guard hook's decision, free of I/O: no stdin, env, filesystem or exit. The first matching
 // rule wins, so each message stays the same as it always was. Imported by .claude/hooks/guard.mjs.
 import path from "node:path";
@@ -1536,6 +1537,21 @@ import {
 } from "./arch-contract.mjs";
 
 const toPosix = (p) => p.split(path.sep).join("/");
+
+// darwin and win32 filesystems are case-insensitive by default: fold the contract and every path
+// to lower case there. The platform is injected (see decide) so this module stays pure.
+const CASE_INSENSITIVE = new Set(["darwin", "win32"]);
+const lower = (s) => s.toLowerCase();
+const foldContract = (c) => ({
+  ...c,
+  protectedPaths: c.protectedPaths.map(lower),
+  exceptions: c.exceptions.map(lower),
+  packages: Object.fromEntries(Object.entries(c.packages).map(([k, v]) => [lower(k), v])),
+  deferred: c.deferred.map((d) => (d.path ? { ...d, path: lower(d.path) } : d)),
+});
+
+/** A folder that contains protected paths (`docs` for `docs/adr/`); deleting or moving it destroys them. */
+const holdsProtected = (contract, rel) => rel !== "" && contract.protectedPaths.some((p) => p.startsWith(`${rel}/`));
 
 function pathRule(contract, r) {
   if (r.startsWith("..") || path.isAbsolute(r)) return undefined;
@@ -1554,8 +1570,15 @@ function claudeMdRule(contract, tool, ti, text) {
   if (!span) return undefined;
   const { start: b, end } = span;
   const msg = "The scaffold block in CLAUDE.md is protected; edit only outside the block.";
-  if (tool === "Write") return String(ti.content ?? "").includes(text.slice(b, end)) ? undefined : msg;
+  // A second begin marker would make a decoy block the real first-marker span, so adding one is blocked.
+  const begins = (s) => s.split(contract.claudeBlock.begin).length - 1;
+  if (tool === "Write") {
+    const content = String(ti.content ?? "");
+    if (!content.includes(text.slice(b, end))) return msg;
+    return begins(content) > Math.max(1, begins(text)) ? msg : undefined;
+  }
   const edits = tool === "MultiEdit" ? (ti.edits ?? []) : [ti];
+  if (edits.some((ed) => String(ed.new_string ?? "").includes(contract.claudeBlock.begin))) return msg;
   // Checked on the file's own text and on its LF form, so an LF old_string cannot slip past a CRLF file.
   const lf = text.replace(/\r\n/g, "\n");
   const lfSpan = claudeBlockSpan(lf, contract.claudeBlock);
@@ -1573,36 +1596,67 @@ function claudeMdRule(contract, tool, ti, text) {
   return undefined;
 }
 
-function fileRule(contract, root, tool, ti, claudeMdText) {
+function fileRule({ contract, root, f }, tool, ti, claudeMdText) {
   const fp = ti.file_path ?? ti.notebook_path;
   if (!fp) return undefined;
-  const r = toPosix(path.relative(root, path.resolve(root, fp)));
-  return pathRule(contract, r) ?? (r === "CLAUDE.md" ? claudeMdRule(contract, tool, ti, claudeMdText) : undefined);
+  const r = toPosix(path.relative(root, path.resolve(root, f(fp))));
+  return pathRule(contract, r) ?? (r === f("CLAUDE.md") ? claudeMdRule(contract, tool, ti, claudeMdText) : undefined);
 }
 
-function bashRule(contract, root, home, cmd) {
-  // Path-like tokens resolved against the project root; paths outside the project are ignored.
-  const toRels = (tokens) =>
+const SHELL_STRING =
+  /\b(?:(?:(?:ba|z|da|k)?sh\s+(?:-\S+\s+)*?-[A-Za-z]*c)|eval)\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')/g;
+const INTERPRETER = /\b(?:node|nodejs|bun|deno|python[\d.]*|perl|ruby|php)\b[^|;&\n]*?\s-(?:e|c|p|pe|E|r|-eval|-print)\b/;
+
+function directRule({ contract, root, home, f, flags }, cmd) {
+  // Path-like tokens resolved against the project root (or a directory a `cd` / `git -C` moved to);
+  // paths outside the project are ignored.
+  const toRels = (tokens, base = ".", keepRoot = false) =>
     tokens
-      .map((t) => t.replace(/^~(?=\/)/, home))
-      .map((t) => toPosix(path.relative(root, path.resolve(root, t))))
-      .filter((r) => r && !r.startsWith("..") && !path.isAbsolute(r));
+      .map((t) => f(t.replace(/^~(?=\/)/, home)))
+      .map((t) => toPosix(path.relative(root, path.resolve(root, base, t))))
+      .filter((r) => (keepRoot || r) && !r.startsWith("..") && !path.isAbsolute(r));
   const touchesProtectedPath = (r) => isProtectedOrDir(contract, r);
-  const relTokens = toRels([...cmd.matchAll(/[^\s"'<>|;&()]+/g)].map((m) => m[0]));
+  const tokens = [...cmd.matchAll(/[^\s"'<>|;&()]+/g)].map((m) => m[0]);
+  // Relative targets after `cd dir && ...` or `git -C dir ...` are also tried against that directory.
+  const dirs = [
+    ...[...cmd.matchAll(/\bcd\s+["']?([^\s"';&|)]+)/g)].map((m) => m[1]),
+    ...[...cmd.matchAll(/\bgit\s+(?:\S+\s+)*?-C\s+["']?([^\s"';&|)]+)/g)].map((m) => m[1]),
+  ].map((d) => f(d.replace(/^~(?=\/)/, home)));
+  const bases = [".", ...dirs];
+  const relsOf = (list, keepRoot) => bases.flatMap((b) => toRels(list, b, keepRoot));
+  const relTokens = relsOf(tokens);
   const touchesProtected = relTokens.some(touchesProtectedPath);
+  const holdsAny = relTokens.some((r) => holdsProtected(contract, r));
 
   if (
-    relTokens.includes("CLAUDE.md") &&
+    relTokens.includes(f("CLAUDE.md")) &&
     (/\b(sed\s+-i|perl\s+-p?i|rm|mv|cp|truncate)\b/.test(cmd) ||
-      /(^|[^>])>\s*["']?\S*CLAUDE\.md/.test(cmd) ||
-      /\btee\s+(?!-a)\S*CLAUDE\.md/.test(cmd))
+      new RegExp("(^|[^>])>\\s*[\"']?\\S*CLAUDE\\.md", flags).test(cmd) ||
+      new RegExp("\\btee\\s+(?!-a)\\S*CLAUDE\\.md", flags).test(cmd))
   )
     return "CLAUDE.md must not be modified via Bash; use the Edit tool, outside the scaffold block only.";
   if (/--no-verify\b/.test(cmd) || /\bgit\s+commit\b[^|;&]*\s-n\b/.test(cmd))
     return "Skipping git hooks is forbidden (--no-verify).";
   if (/core\.hooksPath/.test(cmd) && !/\.githooks/.test(cmd)) return "Changing the git hooks path is forbidden.";
-  if (/\bgit\s+(?:clean|checkout|restore|rm)\b/.test(cmd) && touchesProtected)
+  if (
+    /\bgit\s+(?:(?:-[cC]|--git-dir|--work-tree|--namespace)\s+\S+\s+|-\S+\s+)*(?:clean|checkout|restore|rm)\b/.test(cmd) &&
+    (touchesProtected || holdsAny)
+  )
     return "Command touches a protected path via git; only humans may change it.";
+
+  // rm / mv of a folder that holds protected paths (`rm -rf docs`, `mv scripts x`) destroys them.
+  // Globs (`rm -rf d*`) and `find -delete` are not resolved; CI arch-check is the backstop.
+  for (const m of cmd.matchAll(/(?:^|[;&|(\s])(rm|mv)\s+([^;&|\n)]*)/g)) {
+    const args = m[2].split(/\s+/).map((a) => a.replace(/^["']|["']$/g, "")).filter((a) => a && !a.startsWith("-"));
+    const sources = m[1] === "rm" ? args : args.slice(0, -1);
+    if (relsOf(sources, true).some((r) => (r === "" ? m[1] === "rm" : holdsProtected(contract, r))))
+      return "Command would delete or move a folder that contains protected paths; only humans may change them.";
+  }
+
+  // Interpreter one-liners hide the write inside a string; blocked when they name a protected path.
+  // This also blocks read-only one-liners that mention one (`node -e "require('./architecture.json')"`).
+  if (INTERPRETER.test(cmd) && (touchesProtected || holdsAny))
+    return "Command touches a protected path through an interpreter one-liner; only humans may change it.";
 
   // pm-guard:begin
   const chosenPm = contract.packageManager;
@@ -1628,10 +1682,11 @@ function bashRule(contract, root, home, cmd) {
 
   const redirects = cmd.replace(/\d*>&\d/g, "").replace(/\d*>\s*\/dev\/null/g, "");
   const writes = /\b(mkdir|touch|cp|mv|rm|tee|truncate|ln|install)\b|\bsed\s+-i|\bperl\s+-p?i/.test(redirects);
-  // A redirect writes only to its target; reading a protected file into a redirect is fine.
-  const redirectRels = toRels(
-    [...redirects.matchAll(/\d*>>?\s*["']?([^\s"'<>|;&()]+)/g)].map((m) => m[1]),
-  );
+  // A redirect (or dd's of=) writes only to its target; reading a protected file into a redirect is fine.
+  const redirectRels = relsOf([
+    ...[...redirects.matchAll(/\d*>>?\s*["']?([^\s"'<>|;&()]+)/g)].map((m) => m[1]),
+    ...[...cmd.matchAll(/\bdd\b[^|;&\n]*?\bof=["']?([^\s"']+)/g)].map((m) => m[1]),
+  ]);
   const protectedMsg = "Command touches a protected path; only humans may change it.";
   const firstPathRule = (rels) => {
     for (const r of rels) if (packageOf(contract, r)) {
@@ -1640,29 +1695,38 @@ function bashRule(contract, root, home, cmd) {
     }
     return undefined;
   };
-  if (!writes && redirectRels.length) {
-    if (redirectRels.some(touchesProtectedPath)) return protectedMsg;
-    const msg = firstPathRule(redirectRels);
-    if (msg) return msg;
-  }
-  if (writes) {
-    if (touchesProtected) return protectedMsg;
-    return firstPathRule(relTokens);
+  if (redirectRels.some(touchesProtectedPath)) return protectedMsg;
+  if (!writes) return firstPathRule(redirectRels);
+  if (touchesProtected) return protectedMsg;
+  return firstPathRule(relTokens);
+}
+
+function bashRule(ctx, cmd, depth = 0) {
+  const own = directRule(ctx, cmd);
+  if (own !== undefined || depth >= 3) return own;
+  // The same rules apply to the command string inside `bash -c "..."`, `sh -c '...'` and `eval "..."`.
+  for (const m of cmd.matchAll(SHELL_STRING)) {
+    const inner = m[1] === undefined ? m[2] : m[1].replace(/\\(["\\$`])/g, "$1");
+    const msg = bashRule(ctx, inner, depth + 1);
+    if (msg !== undefined) return msg;
   }
   return undefined;
 }
 
 /**
  * @param {{ tool: string, input?: any, contract: ReturnType<typeof import("./arch-contract.mjs").contractFrom>,
- *   root: string, home?: string, claudeMdText?: string }} args
+ *   root: string, home?: string, claudeMdText?: string, platform?: string | undefined }} args
  * @returns {{ allow: true } | { allow: false, message: string }}
  */
-export function decide({ tool, input, contract, root, home = "~", claudeMdText }) {
+export function decide({ tool, input, contract, root, home = "~", claudeMdText, platform }) {
   const ti = input ?? {};
+  const ci = CASE_INSENSITIVE.has(platform);
+  const f = ci ? lower : (s) => s;
+  const ctx = { contract: ci ? foldContract(contract) : contract, root: f(root), home: f(home), f, flags: ci ? "i" : "" };
   let message;
   if (["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(tool))
-    message = fileRule(contract, root, tool, ti, claudeMdText);
-  else if (tool === "Bash") message = bashRule(contract, root, home, String(ti.command ?? ""));
+    message = fileRule(ctx, tool, ti, claudeMdText);
+  else if (tool === "Bash") message = bashRule(ctx, String(ti.command ?? ""));
   return message === undefined ? { allow: true } : { allow: false, message };
 }
 
