@@ -16,7 +16,7 @@ beforeAll(async () => {
 afterAll(() => cleanup());
 
 /** Runs the generated guard hook as Claude Code would: JSON on stdin, exit 2 blocks. */
-function guard(toolName: string, toolInput: Record<string, unknown>) {
+function guard(toolName: string, toolInput: Record<string, unknown>, rawStdin?: string) {
   return new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
     const child = spawn("node", [".claude/hooks/guard.mjs"], {
       cwd: dir,
@@ -28,7 +28,9 @@ function guard(toolName: string, toolInput: Record<string, unknown>) {
     });
     child.on("error", reject);
     child.on("close", (code) => resolve({ code, stderr }));
-    child.stdin.end(JSON.stringify({ tool_name: toolName, tool_input: toolInput, cwd: dir }));
+    child.stdin.end(
+      rawStdin ?? JSON.stringify({ tool_name: toolName, tool_input: toolInput, cwd: dir }),
+    );
   });
 }
 const write = (file_path: string) => guard("Write", { file_path, content: "x" });
@@ -65,6 +67,38 @@ describe("generated guard hook", () => {
     expect(blocked.stderr).toBe(
       "⛔ architecture.json is protected; only humans may change it. If a change is needed, write an ADR draft under docs/adr/proposed/ and ask the user.\nRules: CLAUDE.md and architecture.json.\n",
     );
+  });
+
+  it("fails closed: malformed stdin blocks with exit 2", async () => {
+    const r = await guard("Write", {}, "not json");
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("The guard hook failed");
+  });
+
+  it("fails closed: a malformed architecture.json blocks with exit 2", async () => {
+    const path = join(dir, "architecture.json");
+    const original = await readFile(path, "utf8");
+    await writeFile(path, "{ broken");
+    try {
+      const r = await write("packages/domain/src/money.ts");
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("The guard hook failed");
+    } finally {
+      await writeFile(path, original);
+    }
+  });
+
+  it("fails closed: a missing rules module blocks with exit 2", async () => {
+    const path = join(dir, "scripts/guard-rules.mjs");
+    const original = await readFile(path, "utf8");
+    await rm(path);
+    try {
+      const r = await write("packages/domain/src/money.ts");
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("The guard hook failed");
+    } finally {
+      await writeFile(path, original);
+    }
   });
 
   it("records the chosen package manager in architecture.json", async () => {

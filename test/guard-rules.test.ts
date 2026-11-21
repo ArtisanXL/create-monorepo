@@ -99,6 +99,13 @@ describe("guard decision: CLAUDE.md block", () => {
       expect(edit("# Mine", crlf)).toEqual({ allow: true });
       expect(edit("after", crlf)).toEqual({ allow: true });
     });
+
+    it("treats an LF multi-line old_string like the same edit on an LF file", () => {
+      expect(blocked(edit("# Project rules\nbody", crlf))).toBe(MSG);
+      expect(blocked(edit("# Mine\n\n<!-- scaffold:begin", crlf))).toBe(MSG);
+      expect(blocked(edit("<!-- scaffold:end -->\n\nafter", crlf))).toBe(MSG);
+      expect(edit("\n\nafter\n", crlf)).toEqual({ allow: true });
+    });
   });
 });
 

@@ -31,11 +31,19 @@ function claudeMdRule(contract, tool, ti, text) {
   const msg = "The scaffold block in CLAUDE.md is protected; edit only outside the block.";
   if (tool === "Write") return String(ti.content ?? "").includes(text.slice(b, end)) ? undefined : msg;
   const edits = tool === "MultiEdit" ? (ti.edits ?? []) : [ti];
+  // Checked on the file's own text and on its LF form, so an LF old_string cannot slip past a CRLF file.
+  const lf = text.replace(/\r\n/g, "\n");
+  const lfSpan = claudeBlockSpan(lf, contract.claudeBlock);
+  const touches = (haystack, old, from, to) => {
+    for (let i = haystack.indexOf(old); i >= 0; i = haystack.indexOf(old, i + 1))
+      if (i < to && i + old.length > from) return true;
+    return false;
+  };
   for (const ed of edits) {
     const old = String(ed.old_string ?? "");
     if (!old) continue;
-    for (let i = text.indexOf(old); i >= 0; i = text.indexOf(old, i + 1))
-      if (i < end && i + old.length > b) return msg;
+    if (touches(text, old, b, end)) return msg;
+    if (lfSpan && touches(lf, old.replace(/\r\n/g, "\n"), lfSpan.start, lfSpan.end)) return msg;
   }
   return undefined;
 }
