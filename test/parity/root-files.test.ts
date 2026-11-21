@@ -73,9 +73,8 @@ const WORKSPACE_FILES = [
 const WORKTREE_FILES = [
   "paseo.json",
   ".worktreeinclude",
-  "scripts/worktree-lib.mjs",
-  "scripts/worktree-lib.test.mjs",
-  "scripts/worktree.mjs",
+  // scripts/worktree{-lib,-lib.test,}.mjs intentionally differ from bash since #21/#20 (literal
+  // db-name matching, shared drop-safety); the golden test covers them. Removed with the bash harness (#12).
   "docs/adr/0004-worktree-isolation.md",
 ];
 
