@@ -3,18 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPnpmAdapter } from "../src/pm/pnpm.ts";
-import { type Deps, scaffold } from "../src/scaffold.ts";
-import { scaffoldOptions } from "./support/fixture.ts";
+import { scaffold } from "../src/scaffold.ts";
+import { fakeDeps, scaffoldOptions } from "./support/fixture.ts";
 
 // Update the golden files after an intentional template/output change with: pnpm test -u
 // (see test/golden/README.md). File modes are deliberately not captured (no-op on Windows).
 const GOLDEN_CASES = [{ name: "pnpm", adapter: () => createPnpmAdapter(async () => "9.9.9") }];
-
-const deterministicDeps = (pm: Deps["pm"]): Deps => ({
-  resolveVersion: async () => "1.2.3",
-  run: async (cmd, args) => ({ code: cmd === "git" && args[0] === "rev-parse" ? 128 : 0 }),
-  pm,
-});
 
 async function listFiles(root: string, rel = ""): Promise<string[]> {
   const out: string[] = [];
@@ -31,7 +25,7 @@ async function serialize(root: string): Promise<string> {
   const parts: string[] = [];
   for (const path of await listFiles(root)) {
     const content = await readFile(join(root, path), "utf8");
-    parts.push(`=== ${path} ===\n${content}${content.endsWith("\n") ? "" : "\n"}`);
+    parts.push(`=== ${path} (${Buffer.byteLength(content)} bytes) ===\n${content}\n`);
   }
   return parts.join("");
 }
@@ -44,7 +38,7 @@ afterEach(() => rm(dir, { recursive: true, force: true }));
 
 describe.each(GOLDEN_CASES)("golden output: $name", ({ name, adapter }) => {
   it("matches the committed golden file byte for byte", async () => {
-    await scaffold(scaffoldOptions(dir), deterministicDeps(adapter()));
+    await scaffold(scaffoldOptions(dir), fakeDeps(adapter()));
     await expect(await serialize(dir)).toMatchFileSnapshot(`golden/${name}.golden.txt`);
   });
 });

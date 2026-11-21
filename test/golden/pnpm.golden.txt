@@ -1,4 +1,4 @@
-=== .claude/hooks/guard.mjs ===
+=== .claude/hooks/guard.mjs (6577 bytes) ===
 #!/usr/bin/env node
 // PreToolUse: blocks writes to protected files, undeclared packages, deferred dependencies and
 // hook bypass attempts (exit 2 → the tool call is cancelled and the message goes to the agent).
@@ -140,7 +140,8 @@ if (tool === "Bash") {
 }
 
 process.exit(0);
-=== .claude/hooks/stop-check.mjs ===
+
+=== .claude/hooks/stop-check.mjs (1255 bytes) ===
 #!/usr/bin/env node
 // Stop: architecture + lint checks must pass before the agent finishes (exit 2 → agent continues).
 import { spawnSync } from "node:child_process";
@@ -165,7 +166,8 @@ if (failed.length) {
   process.exit(2);
 }
 process.exit(0);
-=== .claude/settings.json ===
+
+=== .claude/settings.json (453 bytes) ===
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "hooks": {
@@ -182,7 +184,8 @@ process.exit(0);
     ]
   }
 }
-=== .editorconfig ===
+
+=== .editorconfig (147 bytes) ===
 root = true
 
 [*]
@@ -192,16 +195,19 @@ end_of_line = lf
 charset = utf-8
 insert_final_newline = true
 trim_trailing_whitespace = true
-=== .env.example ===
+
+=== .env.example (82 bytes) ===
 NODE_ENV=development
 PORT=3000
 DATABASE_URL=postgres://app:app@localhost:5432/app
-=== .githooks/pre-commit ===
+
+=== .githooks/pre-commit (43 bytes) ===
 #!/bin/sh
 set -e
 pnpm -s arch
 pnpm -s lint
-=== .github/CODEOWNERS ===
+
+=== .github/CODEOWNERS (327 bytes) ===
 # Architecture contract files require human review. Replace OWNER with a GitHub user/team
 # and uncomment the lines below.
 # /architecture.json        OWNER
@@ -210,7 +216,8 @@ pnpm -s lint
 # /scripts/arch-check.mjs   OWNER
 # /.claude/                 OWNER
 # /.github/                 OWNER
-=== .github/workflows/ci.yml ===
+
+=== .github/workflows/ci.yml (383 bytes) ===
 name: CI
 on:
   push:
@@ -230,7 +237,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
       - run: pnpm build
-=== .gitignore ===
+
+=== .gitignore (74 bytes) ===
 node_modules
 dist
 .turbo
@@ -239,11 +247,14 @@ coverage
 .env.*
 !.env.example
 *.tsbuildinfo
-=== .nvmrc ===
+
+=== .nvmrc (3 bytes) ===
 24
-=== .worktreeinclude ===
+
+=== .worktreeinclude (5 bytes) ===
 .env
-=== CLAUDE.md ===
+
+=== CLAUDE.md (2345 bytes) ===
 <!-- scaffold:begin — managed by @artisanxl/create-monorepo -->
 # Project rules
 
@@ -281,7 +292,8 @@ Dependency direction and package roles: `architecture.json` and `docs/adr/0001-p
 6. Relative imports include the `.ts` extension (`./foo.ts`).
 7. No empty placeholder files/folders (`.gitkeep`, `export {}`). Write code when it is needed.
 <!-- scaffold:end -->
-=== apps/api/package.json ===
+
+=== apps/api/package.json (652 bytes) ===
 {
   "name": "@acme/api",
   "version": "0.0.0",
@@ -305,7 +317,8 @@ Dependency direction and package roles: `architecture.json` and `docs/adr/0001-p
   },
   "devDependencies": { "tsdown": "catalog:", "tsx": "catalog:" }
 }
-=== apps/api/src/app.test.ts ===
+
+=== apps/api/src/app.test.ts (1627 bytes) ===
 import type { Db } from "@acme/db";
 import { describe, expect, it } from "vitest";
 import { createApp } from "./app.ts";
@@ -355,7 +368,8 @@ describe("api", () => {
     }
   });
 });
-=== apps/api/src/app.ts ===
+
+=== apps/api/src/app.ts (673 bytes) ===
 import { FormatPriceRequest } from "@acme/contracts";
 import { checkHealth, formatPrice } from "@acme/core";
 import type { Db } from "@acme/db";
@@ -377,7 +391,8 @@ export function createApp({ db }: AppDeps) {
 }
 
 export type AppType = ReturnType<typeof createApp>;
-=== apps/api/src/env.ts ===
+
+=== apps/api/src/env.ts (350 bytes) ===
 import { z } from "zod";
 
 const Env = z.object({
@@ -388,10 +403,12 @@ const Env = z.object({
 
 export type Env = z.infer<typeof Env>;
 export const loadEnv = (source: NodeJS.ProcessEnv = process.env): Env => Env.parse(source);
-=== apps/api/src/index.ts ===
+
+=== apps/api/src/index.ts (109 bytes) ===
 // The web app uses this type only via `import type` (hc<AppType>).
 export type { AppType } from "./app.ts";
-=== apps/api/src/server.ts ===
+
+=== apps/api/src/server.ts (564 bytes) ===
 import { createDb } from "@acme/db";
 import { serve } from "@hono/node-server";
 import { createApp } from "./app.ts";
@@ -411,12 +428,14 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     void db.$client.end({ timeout: 5 }).finally(() => process.exit(0));
   });
 }
-=== apps/api/tsconfig.json ===
+
+=== apps/api/tsconfig.json (81 bytes) ===
 {
   "extends": "../../tsconfig.base.json",
   "include": ["src", "*.config.ts"]
 }
-=== apps/api/tsdown.config.ts ===
+
+=== apps/api/tsdown.config.ts (268 bytes) ===
 import { defineConfig } from "tsdown";
 
 // Workspace packages are consumed as source, so they are bundled into the output.
@@ -427,7 +446,8 @@ export default defineConfig({
   outDir: "dist",
   noExternal: [/^@acme\//],
 });
-=== apps/web/index.html ===
+
+=== apps/web/index.html (290 bytes) ===
 <!doctype html>
 <html lang="en">
   <head>
@@ -440,7 +460,8 @@ export default defineConfig({
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-=== apps/web/package.json ===
+
+=== apps/web/package.json (619 bytes) ===
 {
   "name": "@acme/web",
   "version": "0.0.0",
@@ -468,13 +489,15 @@ export default defineConfig({
     "vite": "catalog:"
   }
 }
-=== apps/web/src/lib/api.ts ===
+
+=== apps/web/src/lib/api.ts (208 bytes) ===
 import type { AppType } from "@acme/api";
 import { hc } from "hono/client";
 
 /** Single entry point to the API. Endpoints and types are inferred from the Hono app. */
 export const api = hc<AppType>("/").api;
-=== apps/web/src/main.tsx ===
+
+=== apps/web/src/main.tsx (811 bytes) ===
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
@@ -505,7 +528,8 @@ createRoot(root).render(
     </QueryClientProvider>
   </StrictMode>,
 );
-=== apps/web/tsconfig.json ===
+
+=== apps/web/tsconfig.json (358 bytes) ===
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
@@ -518,7 +542,8 @@ createRoot(root).render(
   },
   "include": ["src", "vite.config.ts"]
 }
-=== apps/web/vite.config.ts ===
+
+=== apps/web/vite.config.ts (292 bytes) ===
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
@@ -527,7 +552,8 @@ export default defineConfig({
   // API_URL is set per worktree by paseo.json; defaults to the local API.
   server: { proxy: { "/api": process.env.API_URL ?? "http://localhost:3000" } },
 });
-=== apps/worker/package.json ===
+
+=== apps/worker/package.json (544 bytes) ===
 {
   "name": "@acme/worker",
   "version": "0.0.0",
@@ -548,7 +574,8 @@ export default defineConfig({
   },
   "devDependencies": { "tsdown": "catalog:", "tsx": "catalog:" }
 }
-=== apps/worker/src/env.ts ===
+
+=== apps/worker/src/env.ts (350 bytes) ===
 import { z } from "zod";
 
 const Env = z.object({
@@ -559,9 +586,11 @@ const Env = z.object({
 
 export type Env = z.infer<typeof Env>;
 export const loadEnv = (source: NodeJS.ProcessEnv = process.env): Env => Env.parse(source);
-=== apps/worker/src/index.ts ===
+
+=== apps/worker/src/index.ts (40 bytes) ===
 export { jobs } from "./jobs/index.ts";
-=== apps/worker/src/jobs/healthcheck.ts ===
+
+=== apps/worker/src/jobs/healthcheck.ts (284 bytes) ===
 import { checkHealth } from "@acme/core";
 import type { Db } from "@acme/db";
 
@@ -573,12 +602,14 @@ export const healthcheck = {
     console.log("healthcheck", result);
   },
 };
-=== apps/worker/src/jobs/index.ts ===
+
+=== apps/worker/src/jobs/index.ts (164 bytes) ===
 import { healthcheck } from "./healthcheck.ts";
 
 /** Each job: queue name + optional cron + handler. Handlers only call core. */
 export const jobs = [healthcheck];
-=== apps/worker/src/worker.ts ===
+
+=== apps/worker/src/worker.ts (788 bytes) ===
 import { createDb } from "@acme/db";
 import { PgBoss } from "pg-boss";
 import { loadEnv } from "./env.ts";
@@ -605,12 +636,14 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
       .finally(() => process.exit(0));
   });
 }
-=== apps/worker/tsconfig.json ===
+
+=== apps/worker/tsconfig.json (81 bytes) ===
 {
   "extends": "../../tsconfig.base.json",
   "include": ["src", "*.config.ts"]
 }
-=== apps/worker/tsdown.config.ts ===
+
+=== apps/worker/tsdown.config.ts (268 bytes) ===
 import { defineConfig } from "tsdown";
 
 // Workspace packages are consumed as source, so they are bundled into the output.
@@ -621,7 +654,8 @@ export default defineConfig({
   outDir: "dist",
   noExternal: [/^@acme\//],
 });
-=== architecture.json ===
+
+=== architecture.json (4245 bytes) ===
 {
   "$comment": "Single source of truth. Humans only (agent hook + CODEOWNERS). Every change requires an accepted ADR.",
   "scope": "@acme",
@@ -742,7 +776,8 @@ export default defineConfig({
     "sha256": "255959ee355a38863c6d158dcb9b21b14fa32914cd4b5ac387989fcfb41ba6ad"
   }
 }
-=== biome.json ===
+
+=== biome.json (484 bytes) ===
 {
   "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
@@ -757,7 +792,8 @@ export default defineConfig({
     }
   }
 }
-=== compose.yaml ===
+
+=== compose.yaml (336 bytes) ===
 services:
   postgres:
     image: postgres:18-alpine
@@ -773,7 +809,8 @@ services:
       retries: 10
 volumes:
   pgdata: {}
-=== docs/adr/0001-package-boundaries.md ===
+
+=== docs/adr/0001-package-boundaries.md (1146 bytes) ===
 # 0001. Package boundaries
 
 - Status: accepted
@@ -798,7 +835,8 @@ worker ──▶ core, db, domain
 `scripts/arch-check.mjs` (`pnpm arch`): folder list, package names, package.json dependencies,
 source imports, deferred dependencies, `@ts-ignore`/`@ts-nocheck`, empty placeholder files and the
 CLAUDE.md scaffold block. Runs in the pre-commit hook, CI and the Claude Code Stop hook.
-=== docs/adr/0002-deferred-packages.md ===
+
+=== docs/adr/0002-deferred-packages.md (717 bytes) ===
 # 0002. Packages deferred until needed
 
 - Status: accepted
@@ -815,7 +853,8 @@ until their trigger condition is met and an ADR is accepted. Empty placeholder f
 2. They write a draft under `docs/adr/proposed/NNNN-title.md` following `TEMPLATE.md` (the only ADR path agents may write).
 3. A human reviews the draft; if accepted, moves it to `docs/adr/` and updates `architecture.json`.
 4. Only then is the package/dependency added.
-=== docs/adr/0003-job-queue-pg-boss.md ===
+
+=== docs/adr/0003-job-queue-pg-boss.md (313 bytes) ===
 # 0003. pg-boss for background jobs
 
 - Status: accepted
@@ -824,7 +863,8 @@ until their trigger condition is met and an ADR is accepted. Empty placeholder f
 Use `pg-boss` on Postgres as the job queue: no extra infrastructure (Redis), and enqueueing can
 happen in the same transaction as the business write. Redis-based queues (`bullmq` etc.) are
 deferred until a measured throughput limit (see 0002).
-=== docs/adr/0004-worktree-isolation.md ===
+
+=== docs/adr/0004-worktree-isolation.md (1286 bytes) ===
 # 0004. Per-worktree isolation (Paseo)
 
 - Status: accepted
@@ -848,7 +888,8 @@ Sharing one database or fixed ports between them causes collisions.
 
 ## Consequences
 Worktrees removed outside Paseo leave databases behind; `pnpm worktree:gc --yes` drops them.
-=== docs/adr/TEMPLATE.md ===
+
+=== docs/adr/TEMPLATE.md (165 bytes) ===
 # NNNN. Title
 
 - Status: proposed | accepted | superseded by NNNN
@@ -860,10 +901,12 @@ Worktrees removed outside Paseo leave databases behind; `pnpm worktree:gc --yes`
 ## architecture.json change
 ```json
 ```
-=== docs/adr/proposed/README.md ===
+
+=== docs/adr/proposed/README.md (139 bytes) ===
 ADR **drafts** written by agents and developers go here. Nothing in this folder is accepted, and
 `architecture.json` may not reference it.
-=== package.json ===
+
+=== package.json (1055 bytes) ===
 {
   "name": "@acme/root",
   "private": true,
@@ -896,7 +939,8 @@ ADR **drafts** written by agents and developers go here. Nothing in this folder 
     "vitest": "catalog:"
   }
 }
-=== packages/contracts/package.json ===
+
+=== packages/contracts/package.json (241 bytes) ===
 {
   "name": "@acme/contracts",
   "version": "0.0.0",
@@ -907,7 +951,8 @@ ADR **drafts** written by agents and developers go here. Nothing in this folder 
   "dependencies": { "zod": "catalog:" },
   "devDependencies": {}
 }
-=== packages/contracts/src/index.ts ===
+
+=== packages/contracts/src/index.ts (912 bytes) ===
 import { z } from "zod";
 
 export const HealthResponse = z.object({
@@ -935,12 +980,14 @@ export type FormatPriceRequest = z.infer<typeof FormatPriceRequest>;
 
 export const FormatPriceResponse = z.object({ formatted: z.string() });
 export type FormatPriceResponse = z.infer<typeof FormatPriceResponse>;
-=== packages/contracts/tsconfig.json ===
+
+=== packages/contracts/tsconfig.json (81 bytes) ===
 {
   "extends": "../../tsconfig.base.json",
   "include": ["src", "*.config.ts"]
 }
-=== packages/core/package.json ===
+
+=== packages/core/package.json (309 bytes) ===
 {
   "name": "@acme/core",
   "version": "0.0.0",
@@ -951,17 +998,20 @@ export type FormatPriceResponse = z.infer<typeof FormatPriceResponse>;
   "dependencies": { "@acme/contracts": "workspace:*", "@acme/db": "workspace:*", "@acme/domain": "workspace:*" },
   "devDependencies": {}
 }
-=== packages/core/src/index.ts ===
+
+=== packages/core/src/index.ts (108 bytes) ===
 export { formatPrice } from "./queries/format-price.ts";
 export { checkHealth } from "./queries/health.ts";
-=== packages/core/src/queries/format-price.ts ===
+
+=== packages/core/src/queries/format-price.ts (298 bytes) ===
 import type { FormatPriceRequest, FormatPriceResponse } from "@acme/contracts";
 import { format, money } from "@acme/domain";
 
 export function formatPrice(input: FormatPriceRequest): FormatPriceResponse {
   return { formatted: format(money(BigInt(input.amount), input.currency), input.locale) };
 }
-=== packages/core/src/queries/health.ts ===
+
+=== packages/core/src/queries/health.ts (299 bytes) ===
 import type { HealthResponse } from "@acme/contracts";
 import { type Db, ping } from "@acme/db";
 
@@ -973,12 +1023,14 @@ export async function checkHealth(db: Db): Promise<HealthResponse> {
     return { status: "degraded", db: "down" };
   }
 }
-=== packages/core/tsconfig.json ===
+
+=== packages/core/tsconfig.json (81 bytes) ===
 {
   "extends": "../../tsconfig.base.json",
   "include": ["src", "*.config.ts"]
 }
-=== packages/db/drizzle.config.ts ===
+
+=== packages/db/drizzle.config.ts (281 bytes) ===
 import { defineConfig } from "drizzle-kit";
 
 const url = process.env.DATABASE_URL;
@@ -990,7 +1042,8 @@ export default defineConfig({
   out: "./migrations",
   dbCredentials: { url },
 });
-=== packages/db/package.json ===
+
+=== packages/db/package.json (363 bytes) ===
 {
   "name": "@acme/db",
   "version": "0.0.0",
@@ -1001,7 +1054,8 @@ export default defineConfig({
   "dependencies": { "drizzle-orm": "catalog:", "postgres": "catalog:" },
   "devDependencies": { "drizzle-kit": "catalog:" }
 }
-=== packages/db/src/index.ts ===
+
+=== packages/db/src/index.ts (447 bytes) ===
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -1019,16 +1073,19 @@ export async function ping(db: Db): Promise<void> {
 }
 
 export { schema };
-=== packages/db/src/schema/index.ts ===
+
+=== packages/db/src/schema/index.ts (144 bytes) ===
 // Tables live in this folder, one file per table, re-exported here.
 // Example: export * from "./products.ts";
 export const schemaVersion = 1;
-=== packages/db/tsconfig.json ===
+
+=== packages/db/tsconfig.json (81 bytes) ===
 {
   "extends": "../../tsconfig.base.json",
   "include": ["src", "*.config.ts"]
 }
-=== packages/domain/package.json ===
+
+=== packages/domain/package.json (219 bytes) ===
 {
   "name": "@acme/domain",
   "version": "0.0.0",
@@ -1039,9 +1096,11 @@ export const schemaVersion = 1;
   "dependencies": {},
   "devDependencies": {}
 }
-=== packages/domain/src/index.ts ===
+
+=== packages/domain/src/index.ts (34 bytes) ===
 export * from "./money/money.ts";
-=== packages/domain/src/money/money.test.ts ===
+
+=== packages/domain/src/money/money.test.ts (1033 bytes) ===
 import { describe, expect, it } from "vitest";
 import { add, CurrencyMismatchError, format, money, toDecimalString } from "./money.ts";
 
@@ -1069,7 +1128,8 @@ describe("money", () => {
     expect(format(money(123456n, "USD"), "en-US")).toBe("$1,234.56");
   });
 });
-=== packages/domain/src/money/money.ts ===
+
+=== packages/domain/src/money/money.ts (1814 bytes) ===
 /** Money: amount in minor units (cents) as bigint + ISO 4217 currency. Never use number. */
 export interface Money {
   readonly amount: bigint;
@@ -1122,12 +1182,14 @@ export function format(m: Money, locale: string): string {
     toDecimalString(m) as `${number}`,
   );
 }
-=== packages/domain/tsconfig.json ===
+
+=== packages/domain/tsconfig.json (81 bytes) ===
 {
   "extends": "../../tsconfig.base.json",
   "include": ["src", "*.config.ts"]
 }
-=== paseo.json ===
+
+=== paseo.json (916 bytes) ===
 {
   "worktree": {
     "setup": [
@@ -1157,7 +1219,8 @@ export function format(m: Money, locale: string): string {
     "worktree:info": { "command": "pnpm worktree:info" }
   }
 }
-=== pnpm-workspace.yaml ===
+
+=== pnpm-workspace.yaml (766 bytes) ===
 packages:
   - "apps/*"
   - "packages/*"
@@ -1191,7 +1254,8 @@ catalog:
 # Packages allowed to run install scripts
 allowBuilds:
   esbuild: true
-=== scripts/arch-check.mjs ===
+
+=== scripts/arch-check.mjs (8078 bytes) ===
 #!/usr/bin/env node
 // Enforces the contract in architecture.json. Dependency-free; does not need the TS compiler API.
 import { createHash } from "node:crypto";
@@ -1358,7 +1422,8 @@ if (errors.length) {
   process.exit(1);
 }
 console.log(`✓ Architecture check passed (${Object.keys(packages).length} packages)`);
-=== scripts/worktree-lib.mjs ===
+
+=== scripts/worktree-lib.mjs (2580 bytes) ===
 // Pure helpers for scripts/worktree.mjs (unit-tested in worktree-lib.test.mjs).
 import { createHash, randomBytes } from "node:crypto";
 import { basename } from "node:path";
@@ -1430,7 +1495,8 @@ export function ensureSecrets(text, names) {
   }
   return result;
 }
-=== scripts/worktree-lib.test.mjs ===
+
+=== scripts/worktree-lib.test.mjs (1919 bytes) ===
 import { parseEnv } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
@@ -1482,7 +1548,8 @@ describe("worktree-lib", () => {
     expect(env.D).toMatch(/^[0-9a-f]{64}$/);
   });
 });
-=== scripts/worktree.mjs ===
+
+=== scripts/worktree.mjs (7471 bytes) ===
 #!/usr/bin/env node
 /**
  * Per-worktree isolation on a shared local Postgres (see docs/adr/0004-worktree-isolation.md).
@@ -1699,7 +1766,8 @@ switch (command) {
     console.error("usage: worktree <setup|teardown|info|gc [--yes]>");
     process.exit(2);
 }
-=== tsconfig.base.json ===
+
+=== tsconfig.base.json (544 bytes) ===
 {
   "compilerOptions": {
     "target": "ES2024",
@@ -1721,7 +1789,8 @@ switch (command) {
     "types": ["node"]
   }
 }
-=== turbo.json ===
+
+=== turbo.json (237 bytes) ===
 {
   "$schema": "https://turborepo.com/schema.json",
   "tasks": {
@@ -1730,7 +1799,8 @@ switch (command) {
     "dev": { "cache": false, "persistent": true }
   }
 }
-=== vitest.config.ts ===
+
+=== vitest.config.ts (174 bytes) ===
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
@@ -1739,3 +1809,4 @@ export default defineConfig({
     passWithNoTests: true,
   },
 });
+
