@@ -1,18 +1,24 @@
 #!/usr/bin/env node
 // PreToolUse: blocks writes to protected files, undeclared packages, deferred dependencies and
 // hook bypass attempts (exit 2 → the tool call is cancelled and the message goes to the agent).
-// Claude Code only cancels a call on exit 2; exit 1, a signal (e.g. a segfault, 139) or hitting the
-// hook timeout all let the call run. So this file is a supervisor: it runs the real decision
-// (guard-worker.mjs → scripts/guard-rules.mjs) in a child Node process with a wall-clock limit and a
-// heap cap, and maps every outcome except a clean exit 0 / exit 2 to a block.
-// The settings.json `timeout` (seconds; command hooks default to 60 s, see
-// https://code.claude.com/docs/en/hooks) must stay above LIMIT_MS so Claude Code's own timeout never fires first.
-// Cost: one extra Node start per call (~40 ms), accepted so a native crash cannot fail open.
+// Claude Code only cancels a PreToolUse call on exit 2: by default a timed-out hook does not block
+// and any other exit code (1, a signal such as a segfault's 139) is a non-blocking error.
+// Two layers keep this failing closed (https://code.claude.com/docs/en/hooks):
+//  1. settings.json sets `"onFailure": "block"` (Claude Code v2.1.295+), so timeouts and other
+//     exit codes block, plus an explicit `timeout` (seconds; command hooks default to 600) above LIMIT_MS.
+//  2. This file is a supervisor for older versions and for a clear message: it runs the real decision
+//     (guard-worker.mjs → scripts/guard-rules.mjs) in a child Node process with a wall-clock limit and a
+//     heap cap, and maps every outcome except a clean exit 0 / exit 2 to a block.
+// Cost of layer 2: one extra Node start per call (~40 ms), accepted so a native crash cannot fail open.
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const LIMIT_MS = 10_000;
+const DEFAULT_LIMIT_MS = 10_000;
+// GUARD_TIMEOUT_MS may only lower the limit (stricter), never raise it.
+const requested = Number(process.env.GUARD_TIMEOUT_MS);
+const LIMIT_MS =
+  Number.isInteger(requested) && requested > 0 && requested < DEFAULT_LIMIT_MS ? requested : DEFAULT_LIMIT_MS;
 const MAX_HEAP_MB = 512;
 
 const deny = (message) => {

@@ -124,11 +124,14 @@ describe("generated guard hook", () => {
     it("a decide() that throws blocks", () =>
       blocks('export const decide = () => { throw new Error("boom"); };', "boom"));
 
-    it(
-      "a decide() that never returns blocks at the wall-clock limit",
-      () => blocks("export const decide = () => { for (;;); };", "timed out"),
-      30_000,
-    );
+    it("a decide() that never returns blocks at the wall-clock limit", async () => {
+      process.env.GUARD_TIMEOUT_MS = "500";
+      try {
+        await blocks("export const decide = () => { for (;;); };", "timed out after 500 ms");
+      } finally {
+        delete process.env.GUARD_TIMEOUT_MS;
+      }
+    });
 
     it(
       "an out-of-memory decide() blocks",
