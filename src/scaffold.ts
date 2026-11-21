@@ -79,6 +79,10 @@ const FORMAT_FLAGS = [
   "--no-errors-on-unmatched",
 ] as const;
 
+/** The catalog is built (and versions resolved) when an adapter file or the catalog file is missing. */
+const needsCatalog = (pm: PlanAdapter, existing: ReadonlySet<string>): boolean =>
+  [...pm.files, pm.catalogFile].some((f) => !existing.has(f));
+
 /** Everything the plan step needs; all I/O and network calls have already happened. */
 export interface Gathered {
   options: Pick<Options, "scope" | "dbPrefix" | "nodeMajor" | "install">;
@@ -142,7 +146,7 @@ export async function gather(
     : undefined;
 
   let versions: Record<string, string> | undefined;
-  if ([...pm.files, pm.catalogFile].some((f) => !existing.has(f))) {
+  if (needsCatalog(pm, existing)) {
     // `@types/node` follows the Node major, not the registry.
     const names = catalogPackagesOf(templates).filter((p) => p !== "@types/node");
     const resolved = await Promise.all(names.map((p) => deps.resolveVersion(p)));
@@ -209,15 +213,19 @@ export function plan(g: Gathered): Plan {
     if (missing.includes(t.dest)) contents.set(t.dest, fillTemplate(t.text, values));
   }
   if (claudeMdMissing) contents.set("CLAUDE.md", claudeMd);
-  if (pm.files.some((f) => missing.includes(f))) {
-    if (!g.versions)
-      throw new Error("plan: adapter files are missing but no versions were gathered");
+  if (needsCatalog(pm, existing)) {
+    if (!g.versions) throw new Error("plan: the catalog is needed but no versions were gathered");
     const catalog: Record<string, string> = {};
     for (const [p, v] of Object.entries(g.versions)) catalog[p] = toRange(p, v);
     catalog["@types/node"] = `^${nodeMajor}`;
     const sorted = Object.fromEntries(Object.entries(catalog).sort(([a], [b]) => (a < b ? -1 : 1)));
     const rendered = pm.renderFiles(sorted);
-    for (const f of pm.files) if (missing.includes(f)) contents.set(f, rendered[f] as string);
+    for (const f of pm.files) {
+      if (!missing.includes(f)) continue;
+      const text = rendered[f];
+      if (text === undefined) throw new Error(`plan: adapter ${pm.name} did not render ${f}`);
+      contents.set(f, text);
+    }
   }
 
   const commands: PlannedCommand[] = options.install

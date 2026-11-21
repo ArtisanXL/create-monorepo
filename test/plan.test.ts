@@ -144,3 +144,38 @@ describe("gather: registry failure", () => {
     await expect(gather(options(), failing, memory())).rejects.toThrow(/registry down/);
   });
 });
+
+describe("plan: catalog living in a template", () => {
+  const catalogs: Record<string, string>[] = [];
+  const templateCatalogPm = (files: string[]): Deps["pm"] => ({
+    ...createPnpmAdapter(async () => "9.9.9"),
+    files,
+    catalogFile: "package.json",
+    renderFiles: (catalog) => {
+      catalogs.push({ ...catalog });
+      return Object.fromEntries(files.map((f) => [f, "x"]));
+    },
+  });
+
+  it("builds the catalog when only the catalog file is missing", async () => {
+    catalogs.length = 0;
+    const p = await planFor(options(), deps({ pm: templateCatalogPm([]) }), { "bunfig.toml": "" });
+    expect(p.written).toContain("package.json");
+    expect(catalogs).toHaveLength(1);
+    expect(catalogs[0]).toMatchObject({ turbo: "^1.2.3", "@types/node": "^24" });
+  });
+
+  it("does not resolve versions or build a catalog when everything is present", async () => {
+    catalogs.length = 0;
+    const all = Object.fromEntries((await planFor()).written.map((f) => [f, ""]));
+    delete all["CLAUDE.md"];
+    const p = await planFor(options(), deps({ pm: templateCatalogPm([]) }), all);
+    expect(catalogs).toEqual([]);
+    expect(p.written).toEqual(["CLAUDE.md"]);
+  });
+
+  it("fails loudly when an adapter does not render a declared file", async () => {
+    const pm = { ...templateCatalogPm(["bunfig.toml"]), renderFiles: () => ({}) };
+    await expect(planFor(options(), deps({ pm }))).rejects.toThrow(/did not render bunfig.toml/);
+  });
+});

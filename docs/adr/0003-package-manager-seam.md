@@ -34,3 +34,9 @@ about 15 templates and the scaffold core.
   undefined or leftover tokens and stray `pnpm` text in templates.
 - arch-check reads bun's JSON catalog with the existing key regex. Root devDependencies may then
   be reported twice.
+
+## Known follow-ups for bun
+
+- The optional `patchTemplate` transform, for a catalog that lives in a template.
+- The repo's own CI e2e job: setup and verify steps per package manager.
+- The pnpm-shaped `--silent --filter` flags in `worktree.mjs`.
