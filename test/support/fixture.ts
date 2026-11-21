@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createPnpmAdapter } from "../../src/pm/pnpm.ts";
+import { createAdapter, type PmName } from "../../src/pm/index.ts";
 import { type Deps, type Options, scaffold } from "../../src/scaffold.ts";
 
 export const scaffoldOptions = (target: string, over: Partial<Options> = {}): Options => ({
@@ -13,16 +13,16 @@ export const scaffoldOptions = (target: string, over: Partial<Options> = {}): Op
   ...over,
 });
 
-export const fakeDeps = (pm: Deps["pm"] = createPnpmAdapter(async () => "9.9.9")): Deps => ({
+export const fakeDeps = (pm: Deps["pm"] = createAdapter("pnpm", async () => "9.9.9")): Deps => ({
   resolveVersion: async () => "1.2.3",
   run: async () => ({ code: 0 }),
   pm,
 });
 
 /** Scaffolds into a fresh temp dir; returns the dir and a cleanup function. */
-export async function scaffoldFixture(over: Partial<Options> = {}) {
+export async function scaffoldFixture(over: Partial<Options> = {}, pm: PmName = "pnpm") {
   const dir = await mkdtemp(join(tmpdir(), "fixture-"));
-  await scaffold(scaffoldOptions(dir, over), fakeDeps());
+  await scaffold(scaffoldOptions(dir, over), fakeDeps(createAdapter(pm, async () => "9.9.9")));
   return { dir, cleanup: () => rm(dir, { recursive: true, force: true }) };
 }
 
