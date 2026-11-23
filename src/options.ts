@@ -14,7 +14,6 @@ import {
   type PackageName,
   RUNTIMES,
   type Runtime,
-  runtimeSupportError,
   type Selection,
   sameClosure,
   selectionOf,
@@ -281,8 +280,6 @@ export async function resolveOptions(
     throw new OptionsError(`Unsupported --pm '${pm}'. Supported: ${PM_NAMES.join(", ")}`);
 
   const runtime = await resolveRuntime(values, targetPath, interactive, prompter, fsProbe);
-  const unsupported = runtimeSupportError(closureOf(selection), runtime);
-  if (unsupported) throw new OptionsError(unsupported);
 
   let install = !values["no-install"];
   if (install && interactive)

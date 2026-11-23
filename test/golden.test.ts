@@ -43,6 +43,7 @@ const GOLDEN_CASES: {
   runtime?: Runtime;
 }[] = [
   { label: undefined, selection: undefined },
+  { label: "cloudflare", selection: undefined, runtime: "cloudflare" },
   { label: "apps-api", selection: { apps: ["api"], packages: [] } },
   { label: "apps-web", selection: { apps: ["web"], packages: [] } },
   {

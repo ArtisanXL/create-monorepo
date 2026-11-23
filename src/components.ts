@@ -174,24 +174,3 @@ export const isGenerated = (
   (OWNED_BY_ANY[dest]?.some((c) => closure.has(c)) ?? true) &&
   (!NEEDS_AN_APP.has(dest) || APP_NAMES.some((a) => closure.has(a))) &&
   (runtimeOwned[dest] ?? runtime) === runtime;
-
-/**
- * Apps that run on Cloudflare. `web` is an assets-only Worker alone and forwards `/api/*` to `api`
- * over a service binding when connected; `worker` consumes Cloudflare Queues.
- */
-const CLOUDFLARE_APPS: readonly AppName[] = ["api", "web", "worker"];
-
-/** Apps in `closure` that cannot run on Cloudflare yet. */
-const unsupportedOnCloudflare = (closure: Closure): AppName[] =>
-  APP_NAMES.filter((n) => closure.has(n) && !CLOUDFLARE_APPS.includes(n));
-
-/**
- * Why `runtime` cannot generate `closure` yet, or undefined when the combination is supported.
- * Later tickets widen this until the App tickets are all in, and the last one removes it.
- */
-export function runtimeSupportError(closure: Closure, runtime: Runtime): string | undefined {
-  if (runtime === "node") return undefined;
-  const unsupported = unsupportedOnCloudflare(closure);
-  if (unsupported.length === 0) return undefined;
-  return `--runtime ${runtime} is not yet supported with ${unsupported.join(", ")}: those Apps are not available on ${runtime} yet. Use --apps api and/or web, or none, or --runtime node.`;
-}
