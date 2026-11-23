@@ -2541,7 +2541,10 @@ describe("guard decision: wrangler (every Runtime)", () => {
   });
 
   it("blocks a deploy behind any flag-with-value of an exec-like runner", () => {
-    for (const cmd of ["pnpm exec --filter x wrangler deploy", "pnpm --filter x exec --filter y wrangler deploy"]) {
+    for (const cmd of [
+      "pnpm exec --filter x wrangler deploy",
+      "pnpm --filter x exec --filter y wrangler deploy",
+    ]) {
       expect(blocked(bash(cmd)), cmd).toContain("wrangler");
     }
   });

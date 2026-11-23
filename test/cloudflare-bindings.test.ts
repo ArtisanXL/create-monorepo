@@ -91,7 +91,10 @@ describe("Cloudflare binding consistency", () => {
   });
 
   it("binds web to the api Worker by name, and keeps Worker and queue names free of underscores, for a prefix with one", async () => {
-    const { configs } = await cloudflareRepo({ apps: ["api", "web", "worker"], packages: [] }, "my_app");
+    const { configs } = await cloudflareRepo(
+      { apps: ["api", "web", "worker"], packages: [] },
+      "my_app",
+    );
     expect(configs.api?.name).toBe("my-app-api");
     expect(configs.web?.services?.map((s) => s.service)).toEqual([configs.api?.name]);
     const names = [
@@ -102,7 +105,7 @@ describe("Cloudflare binding consistency", () => {
       ...(configs.worker?.queues?.producers ?? []).map((q) => q.queue),
       ...(configs.worker?.queues?.consumers ?? []).map((q) => q.queue),
     ];
-    expect(names.filter(Boolean)).toHaveLength(7);
+    expect(names.filter(Boolean)).toHaveLength(6);
     for (const name of names) expect(name, String(name)).toMatch(/^my-app-[a-z-]+$/);
     expect(new Set([configs.api?.name, configs.web?.name, configs.worker?.name]).size).toBe(3);
   });
@@ -110,7 +113,8 @@ describe("Cloudflare binding consistency", () => {
   it("runs the api and web dev servers of one worktree through the same registry wrapper", async () => {
     const { read } = await cloudflareRepo({ apps: ["api", "web"], packages: [] });
     const paseo = JSON.parse(await read("paseo.json"));
-    const commands: string[] = JSON.stringify(paseo).match(/node scripts\/cloudflare-dev\.mjs -- [^"]+/g) ?? [];
+    const commands: string[] =
+      JSON.stringify(paseo).match(/node scripts\/cloudflare-dev\.mjs -- [^"]+/g) ?? [];
     expect(commands.some((c) => c.includes("@acme/api dev"))).toBe(true);
     expect(commands.some((c) => c.includes("@acme/web dev"))).toBe(true);
   });

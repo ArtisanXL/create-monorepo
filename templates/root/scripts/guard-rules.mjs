@@ -745,8 +745,8 @@ const LAUNCHERS = ["npx", "pnpx", "bunx"];
 
 /**
  * The wrangler arguments of a simple command: one list per way it can run wrangler, empty when it does not.
- * Under a package runner or launcher (`pnpm exec --filter x wrangler`, `npx -p wrangler wrangler`, `pnpm wrangler`,
- * `bun run wrangler`) flags may take values, so rather than guess which token is the tool, every `wrangler` token
+ * Under a package runner or launcher (`exec --filter x wrangler`, `npx -p wrangler wrangler`, `<pm> wrangler`,
+ * `<pm> run wrangler`) flags may take values, so rather than guess which token is the tool, every `wrangler` token
  * is tried and the command is judged by the worst one (it errs toward blocking).
  */
 function wranglerArgLists(c) {
