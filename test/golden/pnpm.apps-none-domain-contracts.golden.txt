@@ -1013,7 +1013,7 @@ export function check(snapshot) {
   return errors;
 }
 
-=== scripts/guard-rules.mjs (53463 bytes) ===
+=== scripts/guard-rules.mjs (53219 bytes) ===
 // The guard hook's decision, free of I/O: no stdin, env, filesystem or exit. The first matching
 // rule wins, so each message stays the same as it always was. Imported by .claude/hooks/guard.mjs.
 import path from "node:path";
@@ -1025,7 +1025,7 @@ import {
   isProtectedOrDir,
   packageOf,
 } from "./arch-contract.mjs";
-import { ASSIGNMENT, INTERPRETERS, KEYWORDS, SHELL_NAME, SUBST, baseName, gitOptions, knownSafe, literalDir, pwdWord, splitArgs, staticOutput, targetsOf } from "./shell-lex.mjs";
+import { ASSIGNMENT, INTERPRETERS, KEYWORDS, SHELL_NAME, SUBST, baseName, gitOptions, knownSafe, pwdWord, splitArgs, staticOutput, targetsOf } from "./shell-lex.mjs";
 
 const toPosix = (p) => p.split(path.sep).join("/");
 
@@ -1234,8 +1234,8 @@ const CURRENT = /^(?:HEAD|@)@?(?:\{0\})?$/;
 const SHORT_HEX = /^(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{4,6}$/i;
 const isRevision = (t) =>
   !t.startsWith(":") && !CURRENT.test(t) && !/^@\{-\d+\}$/.test(t) && (SHORT_HEX.test(t) || /^[0-9a-f]{7,40}$|^ORIG_HEAD|^FETCH_HEAD|^refs\/|[~^]|@\{/i.test(t));
-// Whole-tree pathspecs that do not depend on the directory: `:/`, `*`, `:(top)`. `.` and `./` are decided on the resolved path.
-const WHOLE_TREE = /^(?::\/\.?|\*|:\(top\)[.*]?)$/;
+// Whole-tree pathspecs: `.`, `:/`, `*`, `:(top)`.
+const WHOLE_TREE = /^(?:\.\/?|:\/\.?|\*|:\(top\)[.*]?)$/;
 // The revisions `--source=X` / `-s X` name on a git restore line.
 const restoreSources = (tail) =>
   tail.flatMap((a, k) => {
@@ -1307,7 +1307,7 @@ function pathspec(t) {
   return { path: m[3] === "" ? "." : m[3], top: words.includes("top") || m[2] === "/", magic: true, icase: words.includes("icase") };
 }
 
-function gitRule(env, words, bases, tight, parsed) {
+function gitRule(env, words, bases, parsed) {
   const { contract, relsOf, expand } = env;
   const at = words.findIndex((w) => !w.quoted && env.fold(baseName(w.text)) === "git");
   if (at < 0) return undefined;
@@ -1343,16 +1343,14 @@ function gitRule(env, words, bases, tight, parsed) {
     return rewinds(env, parsed) && r.flags.some((x) => /^-[A-Za-z]*a|^--all$/.test(x)) ? MSG.rewind : undefined;
   }
   if (!["clean", "checkout", "restore", "rm", "mv"].includes(sub ?? "")) return undefined;
-  // Where the command really runs: where the line's `cd` chain got it, then each `-C` in turn (`-C src -C ..` is the root).
-  const dirNames = dirs.map((d) => env.pwd(d));
-  const tb = dirs.length ? (dirNames.every(literalDir) ? tight.map((t) => dirNames.reduce((at, d) => path.resolve(at, expand(d)), t)) : [env.root]) : tight;
-  const gb = [...bases, ...dirs.map((d) => path.resolve(env.root, expand(d))), ...tb];
+  // Every folder the command may run in. The guard cannot see shell state (aliases, options, traps, sourced files, `cd` in a
+  // function), so a whole-tree restore is never decided on where a `cd` or `-C` seems to lead: `.` is the project root.
+  const gb = [...bases, ...dirs.map((d) => path.resolve(env.root, expand(env.pwd(d))))];
   const g = splitArgs(args.slice(i + 1));
   if (relsOf(g.operands, gb).some((r) => isProtectedOrDir(contract, r) || holdsProtected(contract, r))) return MSG.git;
   // A whole-tree revert from a revision rewrites protected files too: `checkout <rev> -- .`, `restore --source=<rev> .`.
   // Decided on the resolved path, so `src/..` and `./` are the project root too.
-  // Only a bare `.` / `./` is decided on where the command really runs; `..` and `src/..` count against every folder it may be in.
-  const isRoot = (text, top) => relsOf([text], top ? [env.root] : /^\.\/?$/.test(text) ? tb : gb, true).includes("");
+  const isRoot = (text, top) => relsOf([text], top ? [env.root] : gb, true).includes("");
   const dots = g.operands.filter((o) => WHOLE_TREE.test(o.text) || (!o.text.startsWith(":") && isRoot(o.text, false)));
   // A whole-tree restore reads the index, which an earlier `git reset <rev>` on the line may have rewound.
   const force = sub === "checkout" && g.flags.some((x) => /^-[A-Za-z]*f|^--force$/.test(x)) && g.operands.every((o) => HEAD_ONLY.test(o.text));
@@ -1502,10 +1500,11 @@ function findPipeRule(env, parsed, idx) {
 
 /** Variables the line sets from printf: `X=$(printf ...)`, `X=`printf ...``, `printf -v X ...`. */
 function printfNames(cmd, shadowed) {
-  // With printf / echo / pwd redefined on the line, every command-built variable is unknown.
-  if (shadowed) return [...cmd.matchAll(/(?:^|[\s;&|(])([A-Za-z_]\w*)\+?=["']?(?:\$\(|`)/g)].map((m) => m[1]);
-  if (!/printf|echo/.test(cmd)) return [];
   const out = [];
+  // On such a line only the variables set from printf / echo / pwd are unknown: `X=$(mktemp -d)` is not affected.
+  if (shadowed)
+    for (const m of cmd.matchAll(/(?:^|[\s;&|(])([A-Za-z_]\w*)\+?=["']?(?:\$\(|`)\s*(?:(?:command|builtin)\s+|(?:[^\s/(`]*\/)+)?(?:printf|echo|pwd)\b/g)) out.push(m[1]);
+  if (!/printf|echo/.test(cmd)) return out;
   // printf, also behind `command` / `builtin` / a path, and an echo with a backslash (zsh decodes it without -e).
   for (const m of cmd.matchAll(/(?:^|[\s;&|(])([A-Za-z_]\w*)\+?=["']?(?:\$\(|`)\s*(?:(?:command|builtin)\s+|(?:[^\s/(`]*\/)+)?(?:printf\b|echo\b[^)`]*\\)|\bprintf\s+-v\s*([A-Za-z_]\w*)/g)) out.push(m[1] ?? m[2]);
   return out;
@@ -1791,7 +1790,7 @@ function directRule(ctx, cmd, parsed) {
 
   for (const [idx, s] of parsed.segments.entries()) {
     const msg =
-      gitRule(env, s.words, s.bases, s.tight, parsed) ??
+      gitRule(env, s.words, s.bases, parsed) ??
       findPipeRule(env, parsed, idx) ??
       oneLinerRule(env, s.words, s.bases) ??
       (mentionsProtected(env, s.codeBodies, s.bases) ? MSG.oneLiner : undefined) ??
@@ -1901,7 +1900,7 @@ export function decide({ tool, input, contract, root, home = "~", claudeMdText, 
   return message === undefined ? { allow: true } : { allow: false, message };
 }
 
-=== scripts/shell-lex.mjs (42363 bytes) ===
+=== scripts/shell-lex.mjs (43690 bytes) ===
 // The shell lexer and command segmenter behind the guard: splits a command line into simple commands,
 // redirects, heredocs and nested command strings, and works out where each runs. It knows nothing about
 // the architecture contract. Imported by guard-rules.mjs.
@@ -2317,25 +2316,26 @@ const shellSegments = (cmd) => {
 
 /**
  * Whether a `cd` / `pushd` may narrow where the commands after it run: it, and every segment before it, are joined by `&&` alone
- * (checked by the caller), it has exactly one operand, a literal folder (`text`), and for pushd not a stack index (`+1`, `-1`).
+ * (checked by the caller), it has exactly one operand, a literal folder (`text`) and not a stack index (`+1`, `-1`).
  */
 function narrows(c, text) {
   const operands = splitArgs(c.args).operands;
-  return operands.length === 1 && text !== undefined && literalDir(text) && !(c.name === "pushd" && /^[+-]/.test(text));
+  return operands.length === 1 && text !== undefined && literalDir(text) && !/^[+-]/.test(text);
 }
 
 /**
- * Lines on which no `cd` narrows anything: something may change the directory in a way the guard cannot follow. `popd`, a
- * CDPATH assignment, `ln -s`, `eval`, `source`, `.` as a command, and any function definition.
+ * Lines on which no `cd` narrows anything: something may change the directory in a way the guard cannot follow. a
+ * CDPATH assignment, `ln -s`, `eval`, `source`, `.` or `trap` as a command, a variable as a command, and any function definition.
  */
 function narrowingOff(segments, cmd, fold) {
-  if (/(?:^|[\s;&|(])(?:function\s+\S|[\w.:-]+\s*\(\s*\))|--work-tree|--git-dir|GIT_WORK_TREE|GIT_DIR/.test(cmd)) return true;
+  if (/(?:^|[\s;&|(])(?:function\s+\S|[\w.:-]+\s*\(\s*\))|--work-tree|--git-dir|GIT_WORK_TREE|GIT_DIR/.test(unquoted(cmd))) return true;
   return segments.some((seg) => {
-    const head = seg.words.find((w) => !KEYWORDS.has(w.text) && !ASSIGNMENT.test(w.text));
-    if (head && ["eval", "source", "."].includes(head.text)) return true;
+    const head = headOf(seg);
+    // A command that is a variable (`$x 'cd ..'`) may be anything; eval, source, `.` and trap run code the guard cannot read.
+    if (head && (head.text.startsWith("$") || ["eval", "source", ".", "trap"].includes(head.text))) return true;
     return seg.words.some((w, k) => {
       const name = fold(baseName(w.text));
-      return /^CDPATH=/.test(w.text) || w.text === "CDPATH" || name === "popd" || (name === "ln" && seg.words.slice(k + 1).some((x) => /^-[A-Za-z]*s|^--symbolic/.test(x.text)));
+      return /^CDPATH=/.test(w.text) || w.text === "CDPATH" || (name === "ln" && seg.words.slice(k + 1).some((x) => /^-[A-Za-z]*s|^--symbolic/.test(x.text)));
     });
   });
 }
@@ -2529,8 +2529,30 @@ function printfValue(fmt, args) {
 
 // printf / echo / pwd as the shell's own command: bare, or from the standard folders.
 const trusted = (text, name) => text === name || text === `/usr/bin/${name}` || text === `/bin/${name}`;
-// A function or alias named like a builtin the guard evaluates, or `enable`, on the line.
-export const SHADOWS = /\balias\b|functions\[|\benable\b|(?:printf|echo|pwd|command|builtin)\s*\(\s*\)|\bfunction\s+(?:printf|echo|pwd|command|builtin)\b/;
+// The command with quoted strings emptied: a `name()` or `--work-tree` inside a commit message is not code.
+const unquoted = (cmd) => cmd.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''");
+
+// A definition of a function named like a builtin the guard evaluates (outside quotes).
+const SHADOW_DEF = /(?:^|[\s;&|(])\\?(?:function\s+(?:printf|echo|pwd|command|builtin)\b|(?:printf|echo|pwd|command|builtin)\s*\(\s*\))/;
+
+/** The first word of a segment that names the command (after assignments, keywords and `builtin` / `command`). */
+function headOf(seg) {
+  let k = seg.words.findIndex((w) => !KEYWORDS.has(w.text) && !ASSIGNMENT.test(w.text));
+  while (k >= 0 && (seg.words[k].text === "builtin" || seg.words[k].text === "command") && seg.words[k + 1]) k++;
+  return k < 0 ? undefined : seg.words[k];
+}
+
+/**
+ * Whether the line may redefine or load something that changes what printf, echo and pwd do: an alias, `enable`, `eval`,
+ * `source` / `.`, a zsh `functions` entry, or a function with one of those names.
+ */
+export function shadows(segments, cmd) {
+  if (SHADOW_DEF.test(unquoted(cmd))) return true;
+  return segments.some((seg) => {
+    const head = headOf(seg);
+    return (head && ["alias", "unalias", "enable", "eval", "source", "."].includes(head.text)) || seg.words.some((w) => /^functions\b/.test(w.text));
+  });
+}
 
 /**
  * What `printf` or `echo` prints when its format and arguments are all literal (no `$`, no substitution, no glob) and every
@@ -2777,7 +2799,7 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer =
   let allAnd = true;
   const pwdSet = parsed.segments.some((seg) => seg.words.some((w) => /^PWD\+?=/.test(w.text)));
   const pwd = (t) => (pwdSet ? t : pwdWord(t));
-  const shadowed = SHADOWS.test(cmd);
+  const shadowed = shadows(parsed.segments, cmd);
   // Substitutions outside double quotes, each with the directories it runs in.
   const loose = [];
   let cds = 0;
@@ -2799,6 +2821,8 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer =
     if (seg.sep !== "|") pipeStart = segments.length;
     for (const c of found) {
       commands.push({ ...c, bases, tight });
+      // `popd` goes back to a folder the guard does not track: whatever came before is forgotten.
+      if (c.name === "popd") tight = baseTight;
       if (c.name !== "cd" && c.name !== "pushd") continue;
       const dir = splitArgs(c.args).operands[0];
       const text = dir && pwd(dir.text);

@@ -413,25 +413,26 @@ const shellSegments = (cmd) => {
 
 /**
  * Whether a `cd` / `pushd` may narrow where the commands after it run: it, and every segment before it, are joined by `&&` alone
- * (checked by the caller), it has exactly one operand, a literal folder (`text`), and for pushd not a stack index (`+1`, `-1`).
+ * (checked by the caller), it has exactly one operand, a literal folder (`text`) and not a stack index (`+1`, `-1`).
  */
 function narrows(c, text) {
   const operands = splitArgs(c.args).operands;
-  return operands.length === 1 && text !== undefined && literalDir(text) && !(c.name === "pushd" && /^[+-]/.test(text));
+  return operands.length === 1 && text !== undefined && literalDir(text) && !/^[+-]/.test(text);
 }
 
 /**
- * Lines on which no `cd` narrows anything: something may change the directory in a way the guard cannot follow. `popd`, a
- * CDPATH assignment, `ln -s`, `eval`, `source`, `.` as a command, and any function definition.
+ * Lines on which no `cd` narrows anything: something may change the directory in a way the guard cannot follow. a
+ * CDPATH assignment, `ln -s`, `eval`, `source`, `.` or `trap` as a command, a variable as a command, and any function definition.
  */
 function narrowingOff(segments, cmd, fold) {
-  if (/(?:^|[\s;&|(])(?:function\s+\S|[\w.:-]+\s*\(\s*\))|--work-tree|--git-dir|GIT_WORK_TREE|GIT_DIR/.test(cmd)) return true;
+  if (/(?:^|[\s;&|(])(?:function\s+\S|[\w.:-]+\s*\(\s*\))|--work-tree|--git-dir|GIT_WORK_TREE|GIT_DIR/.test(unquoted(cmd))) return true;
   return segments.some((seg) => {
-    const head = seg.words.find((w) => !KEYWORDS.has(w.text) && !ASSIGNMENT.test(w.text));
-    if (head && ["eval", "source", "."].includes(head.text)) return true;
+    const head = headOf(seg);
+    // A command that is a variable (`$x 'cd ..'`) may be anything; eval, source, `.` and trap run code the guard cannot read.
+    if (head && (head.text.startsWith("$") || ["eval", "source", ".", "trap"].includes(head.text))) return true;
     return seg.words.some((w, k) => {
       const name = fold(baseName(w.text));
-      return /^CDPATH=/.test(w.text) || w.text === "CDPATH" || name === "popd" || (name === "ln" && seg.words.slice(k + 1).some((x) => /^-[A-Za-z]*s|^--symbolic/.test(x.text)));
+      return /^CDPATH=/.test(w.text) || w.text === "CDPATH" || (name === "ln" && seg.words.slice(k + 1).some((x) => /^-[A-Za-z]*s|^--symbolic/.test(x.text)));
     });
   });
 }
@@ -625,8 +626,30 @@ function printfValue(fmt, args) {
 
 // printf / echo / pwd as the shell's own command: bare, or from the standard folders.
 const trusted = (text, name) => text === name || text === `/usr/bin/${name}` || text === `/bin/${name}`;
-// A function or alias named like a builtin the guard evaluates, or `enable`, on the line.
-export const SHADOWS = /\balias\b|functions\[|\benable\b|(?:printf|echo|pwd|command|builtin)\s*\(\s*\)|\bfunction\s+(?:printf|echo|pwd|command|builtin)\b/;
+// The command with quoted strings emptied: a `name()` or `--work-tree` inside a commit message is not code.
+const unquoted = (cmd) => cmd.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''");
+
+// A definition of a function named like a builtin the guard evaluates (outside quotes).
+const SHADOW_DEF = /(?:^|[\s;&|(])\\?(?:function\s+(?:printf|echo|pwd|command|builtin)\b|(?:printf|echo|pwd|command|builtin)\s*\(\s*\))/;
+
+/** The first word of a segment that names the command (after assignments, keywords and `builtin` / `command`). */
+function headOf(seg) {
+  let k = seg.words.findIndex((w) => !KEYWORDS.has(w.text) && !ASSIGNMENT.test(w.text));
+  while (k >= 0 && (seg.words[k].text === "builtin" || seg.words[k].text === "command") && seg.words[k + 1]) k++;
+  return k < 0 ? undefined : seg.words[k];
+}
+
+/**
+ * Whether the line may redefine or load something that changes what printf, echo and pwd do: an alias, `enable`, `eval`,
+ * `source` / `.`, a zsh `functions` entry, or a function with one of those names.
+ */
+export function shadows(segments, cmd) {
+  if (SHADOW_DEF.test(unquoted(cmd))) return true;
+  return segments.some((seg) => {
+    const head = headOf(seg);
+    return (head && ["alias", "unalias", "enable", "eval", "source", "."].includes(head.text)) || seg.words.some((w) => /^functions\b/.test(w.text));
+  });
+}
 
 /**
  * What `printf` or `echo` prints when its format and arguments are all literal (no `$`, no substitution, no glob) and every
@@ -873,7 +896,7 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer =
   let allAnd = true;
   const pwdSet = parsed.segments.some((seg) => seg.words.some((w) => /^PWD\+?=/.test(w.text)));
   const pwd = (t) => (pwdSet ? t : pwdWord(t));
-  const shadowed = SHADOWS.test(cmd);
+  const shadowed = shadows(parsed.segments, cmd);
   // Substitutions outside double quotes, each with the directories it runs in.
   const loose = [];
   let cds = 0;
@@ -895,6 +918,8 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer =
     if (seg.sep !== "|") pipeStart = segments.length;
     for (const c of found) {
       commands.push({ ...c, bases, tight });
+      // `popd` goes back to a folder the guard does not track: whatever came before is forgotten.
+      if (c.name === "popd") tight = baseTight;
       if (c.name !== "cd" && c.name !== "pushd") continue;
       const dir = splitArgs(c.args).operands[0];
       const text = dir && pwd(dir.text);

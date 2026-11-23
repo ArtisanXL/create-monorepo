@@ -1786,27 +1786,33 @@ describe("guard decision: hardening follow-ups (#41)", () => {
           "(cd src); rm -rf .",
           'cd "$PWD" && rm -rf .',
           "cd src && cd - && rm -rf .",
-        ],
-        [
+          // decide() cannot see shell state (aliases, options, traps, sourced files, a cd in a function), so a whole-tree
+          // restore is never decided on where a cd or -C seems to lead. The relaxation asked for in #41 was declined for that reason.
           "cd src && git checkout main -- .",
           "cd src && git restore -s main .",
           "cd src && cd lib && git checkout main -- .",
-          "cd src && cd .. && cd lib && git checkout main -- .",
           "git -C src checkout main -- .",
           "git -C src -C lib checkout main -- .",
           "cd src && git -C lib checkout main -- .",
-          'cd "$(pwd)/src" && git checkout main -- .',
           "(cd src && git checkout main -- .)",
+          "cd .. && git -C proj checkout main -- .",
+        ],
+        [],
+        [
           "cd src && rm -rf .",
+          "cd src && cd .. && cd lib && rm -rf .",
+          'cd "$(pwd)/src" && rm -rf .',
+          "(cd src && rm -rf .)",
+          "pushd /tmp/x && rm -rf * && popd",
         ],
       );
       it("known limit: a symlink made by an earlier call is not seen", () => {
         // `ln -s . s` ran in a call of its own; decide() sees one call and cannot tell that `s` is the project root.
-        expect(bash("cd s && git checkout main -- .")).toEqual({ allow: true });
+        expect(bash("cd s && rm -rf .")).toEqual({ allow: true });
         // A symlink made on the same line by code the guard does not read (`python3 -c "os.symlink('.', 's')"`) is the same.
-        expect(
-          bash(`python3 -c "import os; os.symlink('.', 's')" && cd s && git checkout main -- .`),
-        ).toEqual({ allow: true });
+        expect(bash(`python3 -c "import os; os.symlink('.', 's')" && cd s && rm -rf .`)).toEqual({
+          allow: true,
+        });
       });
     });
 
@@ -2313,11 +2319,7 @@ describe("guard decision: hardening follow-ups (#41)", () => {
           "cd src && git --work-tree=.. checkout main -- .",
           "cd src && GIT_WORK_TREE=.. git checkout main -- .",
         ],
-        [
-          "echo a && cd src && git checkout main -- .",
-          "cd src && cd lib && git checkout main -- .",
-          "pushd src && git checkout main -- .",
-        ],
+        ["echo a && cd src && rm -rf .", "cd src && cd lib && rm -rf .", "pushd src && rm -rf ."],
       );
     });
 
@@ -2358,6 +2360,62 @@ describe("guard decision: hardening follow-ups (#41)", () => {
       // `f` can print anything; only printf, echo, pwd and git rev-parse are evaluated, and a substitution of any other
       // command is left as an unknown word.
       expect(bash('f(){ echo docs; }; rm -rf "$(f)"')).toEqual({ allow: true });
+    });
+  });
+
+  describe("third review (D1, P1-P3)", () => {
+    describe("D1. a cd that is not followed by a shell the guard can see does not narrow rm -rf .", () => {
+      cases(
+        [
+          "cd src && builtin eval 'cd ..' && rm -rf .",
+          "cd src && command eval 'cd ..' && rm -rf .",
+          "x=eval && cd src && $x 'cd ..' && rm -rf .",
+          "cd src && trap 'cd ..' DEBUG && rm -rf .",
+          "pushd src && cd +1 && rm -rf .",
+          "pushd src && pushd +1 && rm -rf .",
+          "cd src && builtin source ./x && rm -rf .",
+          "cd src && command . ./x && rm -rf .",
+          "pushd src && popd && rm -rf .",
+          "cd src && eval cd .. && rm -rf .",
+        ],
+        ["cd src && rm -rf .", "pushd /tmp/x && rm -rf * && popd"],
+      );
+      it("known limit: the git relaxations of #41 were declined", () => {
+        // decide() cannot see shell state (aliases such as oh-my-zsh's `-`, options, traps, sourced files), so
+        // `cd src && git checkout main -- .` stays blocked like `git checkout main -- .`. Bare HEAD is still allowed.
+        for (const c of [
+          "cd src && git checkout main -- .",
+          "git -C src checkout main -- .",
+          "cd .. && git -C proj checkout main -- .",
+        ])
+          expect(blocked(bash(c)), c).toBeDefined();
+        expect(bash("cd src && git checkout HEAD -- .")).toEqual({ allow: true });
+      });
+    });
+
+    describe("P1. shadowing is decided from the commands of the line", () => {
+      cases(
+        [
+          "functions+=([printf]='echo docs'); X=$(printf safe); rm -rf $X",
+          "functions[printf]='echo docs'; X=$(printf safe); rm -rf $X",
+          ". ./f.sh; X=$(printf safe); rm -rf $X",
+          'source ./f.sh && rm -rf "$(printf safe)"',
+          "eval 'printf() { echo docs; }'; X=$(printf safe); rm -rf $X",
+          "alias printf='echo docs'; X=$(printf safe); rm -rf $X",
+        ],
+        [
+          'corepack enable && TMP=$(mktemp -d) && rm -rf "$TMP"',
+          'git commit -m "add alias support" && TMP=$(mktemp -d); rm -rf $TMP',
+          'cd apps/web && rm -rf * && git commit -m "call init()"',
+          'git commit -m "call echo()" && X=$(mktemp -d); rm -rf $X',
+        ],
+      );
+    });
+
+    it("P3. known limit: a cd after a ; does not narrow", () => {
+      // `nvm use` may fail and `;` runs the next command anyway, so `cd apps/web && rm -rf *` is read as a delete in the root.
+      expect(blocked(bash("nvm use; cd apps/web && rm -rf *"))).toBeDefined();
+      expect(bash("nvm use && cd apps/web && rm -rf *")).toEqual({ allow: true });
     });
   });
 });

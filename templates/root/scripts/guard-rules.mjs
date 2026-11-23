@@ -9,7 +9,7 @@ import {
   isProtectedOrDir,
   packageOf,
 } from "./arch-contract.mjs";
-import { ASSIGNMENT, INTERPRETERS, KEYWORDS, SHELL_NAME, SUBST, baseName, gitOptions, knownSafe, literalDir, pwdWord, splitArgs, staticOutput, targetsOf } from "./shell-lex.mjs";
+import { ASSIGNMENT, INTERPRETERS, KEYWORDS, SHELL_NAME, SUBST, baseName, gitOptions, knownSafe, pwdWord, splitArgs, staticOutput, targetsOf } from "./shell-lex.mjs";
 
 const toPosix = (p) => p.split(path.sep).join("/");
 
@@ -218,8 +218,8 @@ const CURRENT = /^(?:HEAD|@)@?(?:\{0\})?$/;
 const SHORT_HEX = /^(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{4,6}$/i;
 const isRevision = (t) =>
   !t.startsWith(":") && !CURRENT.test(t) && !/^@\{-\d+\}$/.test(t) && (SHORT_HEX.test(t) || /^[0-9a-f]{7,40}$|^ORIG_HEAD|^FETCH_HEAD|^refs\/|[~^]|@\{/i.test(t));
-// Whole-tree pathspecs that do not depend on the directory: `:/`, `*`, `:(top)`. `.` and `./` are decided on the resolved path.
-const WHOLE_TREE = /^(?::\/\.?|\*|:\(top\)[.*]?)$/;
+// Whole-tree pathspecs: `.`, `:/`, `*`, `:(top)`.
+const WHOLE_TREE = /^(?:\.\/?|:\/\.?|\*|:\(top\)[.*]?)$/;
 // The revisions `--source=X` / `-s X` name on a git restore line.
 const restoreSources = (tail) =>
   tail.flatMap((a, k) => {
@@ -291,7 +291,7 @@ function pathspec(t) {
   return { path: m[3] === "" ? "." : m[3], top: words.includes("top") || m[2] === "/", magic: true, icase: words.includes("icase") };
 }
 
-function gitRule(env, words, bases, tight, parsed) {
+function gitRule(env, words, bases, parsed) {
   const { contract, relsOf, expand } = env;
   const at = words.findIndex((w) => !w.quoted && env.fold(baseName(w.text)) === "git");
   if (at < 0) return undefined;
@@ -327,16 +327,14 @@ function gitRule(env, words, bases, tight, parsed) {
     return rewinds(env, parsed) && r.flags.some((x) => /^-[A-Za-z]*a|^--all$/.test(x)) ? MSG.rewind : undefined;
   }
   if (!["clean", "checkout", "restore", "rm", "mv"].includes(sub ?? "")) return undefined;
-  // Where the command really runs: where the line's `cd` chain got it, then each `-C` in turn (`-C src -C ..` is the root).
-  const dirNames = dirs.map((d) => env.pwd(d));
-  const tb = dirs.length ? (dirNames.every(literalDir) ? tight.map((t) => dirNames.reduce((at, d) => path.resolve(at, expand(d)), t)) : [env.root]) : tight;
-  const gb = [...bases, ...dirs.map((d) => path.resolve(env.root, expand(d))), ...tb];
+  // Every folder the command may run in. The guard cannot see shell state (aliases, options, traps, sourced files, `cd` in a
+  // function), so a whole-tree restore is never decided on where a `cd` or `-C` seems to lead: `.` is the project root.
+  const gb = [...bases, ...dirs.map((d) => path.resolve(env.root, expand(env.pwd(d))))];
   const g = splitArgs(args.slice(i + 1));
   if (relsOf(g.operands, gb).some((r) => isProtectedOrDir(contract, r) || holdsProtected(contract, r))) return MSG.git;
   // A whole-tree revert from a revision rewrites protected files too: `checkout <rev> -- .`, `restore --source=<rev> .`.
   // Decided on the resolved path, so `src/..` and `./` are the project root too.
-  // Only a bare `.` / `./` is decided on where the command really runs; `..` and `src/..` count against every folder it may be in.
-  const isRoot = (text, top) => relsOf([text], top ? [env.root] : /^\.\/?$/.test(text) ? tb : gb, true).includes("");
+  const isRoot = (text, top) => relsOf([text], top ? [env.root] : gb, true).includes("");
   const dots = g.operands.filter((o) => WHOLE_TREE.test(o.text) || (!o.text.startsWith(":") && isRoot(o.text, false)));
   // A whole-tree restore reads the index, which an earlier `git reset <rev>` on the line may have rewound.
   const force = sub === "checkout" && g.flags.some((x) => /^-[A-Za-z]*f|^--force$/.test(x)) && g.operands.every((o) => HEAD_ONLY.test(o.text));
@@ -486,10 +484,11 @@ function findPipeRule(env, parsed, idx) {
 
 /** Variables the line sets from printf: `X=$(printf ...)`, `X=`printf ...``, `printf -v X ...`. */
 function printfNames(cmd, shadowed) {
-  // With printf / echo / pwd redefined on the line, every command-built variable is unknown.
-  if (shadowed) return [...cmd.matchAll(/(?:^|[\s;&|(])([A-Za-z_]\w*)\+?=["']?(?:\$\(|`)/g)].map((m) => m[1]);
-  if (!/printf|echo/.test(cmd)) return [];
   const out = [];
+  // On such a line only the variables set from printf / echo / pwd are unknown: `X=$(mktemp -d)` is not affected.
+  if (shadowed)
+    for (const m of cmd.matchAll(/(?:^|[\s;&|(])([A-Za-z_]\w*)\+?=["']?(?:\$\(|`)\s*(?:(?:command|builtin)\s+|(?:[^\s/(`]*\/)+)?(?:printf|echo|pwd)\b/g)) out.push(m[1]);
+  if (!/printf|echo/.test(cmd)) return out;
   // printf, also behind `command` / `builtin` / a path, and an echo with a backslash (zsh decodes it without -e).
   for (const m of cmd.matchAll(/(?:^|[\s;&|(])([A-Za-z_]\w*)\+?=["']?(?:\$\(|`)\s*(?:(?:command|builtin)\s+|(?:[^\s/(`]*\/)+)?(?:printf\b|echo\b[^)`]*\\)|\bprintf\s+-v\s*([A-Za-z_]\w*)/g)) out.push(m[1] ?? m[2]);
   return out;
@@ -775,7 +774,7 @@ function directRule(ctx, cmd, parsed) {
 
   for (const [idx, s] of parsed.segments.entries()) {
     const msg =
-      gitRule(env, s.words, s.bases, s.tight, parsed) ??
+      gitRule(env, s.words, s.bases, parsed) ??
       findPipeRule(env, parsed, idx) ??
       oneLinerRule(env, s.words, s.bases) ??
       (mentionsProtected(env, s.codeBodies, s.bases) ? MSG.oneLiner : undefined) ??
