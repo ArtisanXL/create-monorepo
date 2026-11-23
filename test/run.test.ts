@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -126,5 +126,28 @@ describe("run", () => {
     const h = harness();
     expect(await run(h.io)).toBe(0);
     expect(h.out().endsWith(`${NEXT_STEPS}\n`)).toBe(true);
+  });
+
+  it("leaves database and absent-app steps out of the next steps", async () => {
+    const h = harness({ argv: [dir, "--no-install", "-y", "--apps", "web"] });
+    expect(await run(h.io)).toBe(0);
+    expect(h.out()).toContain("pnpm dev                       # web :5173");
+    expect(h.out()).not.toContain("docker compose");
+    const lib = harness({
+      argv: [dir, "--no-install", "-y", "--apps", "none", "--packages", "domain"],
+    });
+    expect(await run(lib.io)).toBe(0);
+    expect(lib.out()).not.toContain("pnpm dev");
+  });
+
+  it("reports a conflicting --apps on a re-run as an input error", async () => {
+    const h = harness({ argv: [dir, "--no-install", "-y", "--apps", "web"] });
+    expect(await run(h.io)).toBe(0);
+    const again = harness({
+      argv: [dir, "--no-install", "-y", "--apps", "api"],
+      fsProbe: { ...probe, readText: async () => readFile(join(dir, "architecture.json"), "utf8") },
+    });
+    expect(await run(again.io)).toBe(1);
+    expect(again.err()).toContain("conflict with the existing architecture.json");
   });
 });

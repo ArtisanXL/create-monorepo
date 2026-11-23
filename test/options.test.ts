@@ -462,3 +462,13 @@ describe("resolveOptions: selection (Decisions 1, 3, 6, 9, 10)", () => {
     expect(asked).toEqual(["Apps", "Database prefix"]);
   });
 });
+
+describe("nodeFsProbe.readText", () => {
+  it("returns the text, or undefined for a missing file", async () => {
+    const { nodeFsProbe } = await import("../src/wizard.ts");
+    expect(
+      await nodeFsProbe.readText(new URL("../package.json", import.meta.url).pathname),
+    ).toContain("create-monorepo");
+    expect(await nodeFsProbe.readText("/nonexistent/architecture.json")).toBeUndefined();
+  });
+});

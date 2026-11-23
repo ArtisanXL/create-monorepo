@@ -14,7 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { closureOf, isGenerated } from "../src/components.ts";
+import { closureOf, FULL_SELECTION, isGenerated } from "../src/components.ts";
 import { listTemplateFiles } from "../src/templates.ts";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -83,10 +83,7 @@ try {
   };
 
   // The default Selection: files only (the repo's own CI runs the full verify on it).
-  checkFiles(
-    generate("default", ["--no-install"]),
-    closureOf({ apps: ["api", "web", "worker"], packages: ["domain", "contracts", "db", "core"] }),
-  );
+  checkFiles(generate("default", ["--no-install"]), FULL_SELECTION);
 
   // The Selections without a database: a real install and `verify` (scaffold runs both).
   for (const [name, args, selection] of [
