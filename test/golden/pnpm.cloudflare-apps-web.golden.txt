@@ -214,7 +214,7 @@ coverage
 === .nvmrc (3 bytes) ===
 24
 
-=== CLAUDE.md (1746 bytes) ===
+=== CLAUDE.md (2005 bytes) ===
 <!-- scaffold:begin — managed by @artisanxl/create-monorepo -->
 # Project rules
 
@@ -227,6 +227,7 @@ Chat with the user in the user's language. Everything else — code, comments, d
 - `pnpm verify`: architecture, lint, typecheck and tests. **Work is done only when this passes.**
 - `pnpm dev`: the generated apps.
 - `pnpm arch`: architecture check only.
+- `pnpm --filter @acme/<app> deploy:dry-run`: validate an App's Worker bundle. **Never deploy.** Deploying, creating queues and Hyperdrive configs, and putting secrets are done by humans; the guard blocks them (`docs/adr/0005-runtime-cloudflare-workers.md`).
 - Never hard-code ports; services get `$PASEO_PORT`.
 - `pnpm add <pkg> --filter @acme/<target>`: add a dependency; the version is written to the catalog.
 
@@ -346,7 +347,7 @@ export default defineConfig({
   "packages": {
     "apps/web": {
       "adr": "docs/adr/0001-package-boundaries.md",
-      "role": "React SPA. No API client.",
+      "role": "React SPA served by a Cloudflare Worker. No API client.",
       "may_depend_on": []
     }
   },
@@ -355,13 +356,13 @@ export default defineConfig({
       "name": "api",
       "path": "apps/api",
       "trigger": "When the first HTTP endpoint is needed.",
-      "deps": ["hono", "@hono/node-server", "@hono/zod-validator"]
+      "deps": ["hono", "@hono/zod-validator"]
     },
     {
       "name": "worker",
       "path": "apps/worker",
       "trigger": "When the first background job is needed.",
-      "deps": ["pg-boss"]
+      "deps": []
     },
     {
       "name": "core",
@@ -450,7 +451,7 @@ export default defineConfig({
     "$comment": "The scaffold block in CLAUDE.md is protected; everything outside it is free. If a human changes the block, update sha256 (pnpm arch --claude-hash).",
     "begin": "<!-- scaffold:begin",
     "end": "<!-- scaffold:end -->",
-    "sha256": "928d43cca7670dd82d5827752620418ae6c9d4a349e740d00073c157c23c7459"
+    "sha256": "a20fd94cd8a08efb263cb72670956028c7cf65cb2266f830d3af84176d6c3153"
   }
 }
 
@@ -503,6 +504,32 @@ until their trigger condition is met and an ADR is accepted. Empty placeholder f
 2. They write a draft under `docs/adr/proposed/NNNN-title.md` following `TEMPLATE.md` (the only ADR path agents may write).
 3. A human reviews the draft; if accepted, moves it to `docs/adr/` and updates `architecture.json`.
 4. Only then is the package/dependency added.
+
+=== docs/adr/0005-runtime-cloudflare-workers.md (1237 bytes) ===
+# 0005. Runtime: Cloudflare Workers
+
+- Status: accepted
+
+## Context
+This repo targets Cloudflare Workers. A Worker handles requests or events and reads its config
+from bindings; it holds no long-running process.
+
+## Decision
+- Every App is its own Cloudflare Worker with a `wrangler.jsonc`. The repo has one Runtime; it is
+  recorded as `"runtime": "cloudflare"` in `architecture.json`.
+- Every `wrangler.jsonc` sets the `nodejs_compat` flag (postgres.js needs it) and a
+  `compatibility_date` that the generator pins per release.
+- **UI:** `web` serves its static assets in SPA mode.
+- **Env:** `loadEnv(source)` reads the binding `env` on Cloudflare, not `process.env`.
+- **Tests:** one root Vitest config on Node. Workers types come from `wrangler types`; the file
+  is generated before typecheck and gitignored.
+
+## Deploying
+- **Agents never deploy.** The guard hook blocks mutating wrangler commands (`wrangler deploy`
+  without `--dry-run`, `wrangler secret put`, creating queues or Hyperdrive configs, and so on)
+  and the `deploy` script.
+- CI and agents run only `wrangler deploy --dry-run` (the `deploy:dry-run` script of each App).
+- Deploying, creating Hyperdrive configs and queues, and putting secrets are done by humans.
 
 === docs/adr/TEMPLATE.md (165 bytes) ===
 # NNNN. Title

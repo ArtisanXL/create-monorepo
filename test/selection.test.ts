@@ -266,6 +266,14 @@ describe("review fixes: text that follows the Closure", () => {
   });
 });
 
+/** architecture.json minus what legitimately follows the Runtime: the field and `deferred` deps. */
+const withoutRuntimeParts = (text: string) => {
+  const arch = JSON.parse(text);
+  arch.runtime = undefined;
+  for (const d of arch.deferred) d.deps = undefined;
+  return arch;
+};
+
 describe("Runtime axis (ADR-0005)", () => {
   it("packages-only output differs between node and cloudflare only by the runtime line", async () => {
     const node = await generate(LIBRARY, "node");
@@ -275,8 +283,9 @@ describe("Runtime axis (ADR-0005)", () => {
       const a = await node.read(f);
       const b = await cf.read(f);
       if (f === "architecture.json") {
-        expect(b.replace('  "runtime": "cloudflare",\n', "")).toBe(a);
+        // Only the runtime line and the Runtime-specific `deferred` deps differ.
         expect(b).toContain('  "runtime": "cloudflare",\n');
+        expect(withoutRuntimeParts(b)).toEqual(withoutRuntimeParts(a));
       } else {
         expect(b, f).toBe(a);
       }
@@ -290,9 +299,8 @@ describe("Runtime axis (ADR-0005)", () => {
     expect(await cf.files()).toEqual(await node.files());
     for (const f of await node.files()) {
       const [a, b] = [await node.read(f), await cf.read(f)];
-      expect(f === "architecture.json" ? b.replace('  "runtime": "cloudflare",\n', "") : b, f).toBe(
-        a,
-      );
+      if (f === "architecture.json") expect(withoutRuntimeParts(b)).toEqual(withoutRuntimeParts(a));
+      else expect(b, f).toBe(a);
     }
   });
 
@@ -375,6 +383,31 @@ describe("api as a Cloudflare Worker (ADR-0005)", () => {
     const ci = await (await cf()).read(".github/workflows/ci.yml");
     expect(ci).toContain("deploy:dry-run");
     expect(await (await node()).read(".github/workflows/ci.yml")).not.toContain("dry-run");
+  });
+
+  it("runs api dev on wrangler dev with the worktree's Hyperdrive connection and dev registry", async () => {
+    const repo = await cf();
+    const pkg = await repo.json("apps/api/package.json");
+    expect(pkg.scripts.dev).toBe("wrangler dev");
+    const paseo = await repo.json("paseo.json");
+    // Ports still come from paseo; the two worktree values come from the cloudflare-dev wrapper.
+    expect(paseo.scripts.api.command).toBe(
+      "node scripts/cloudflare-dev.mjs -- pnpm --filter @acme/api dev --ip 127.0.0.1 --port $PASEO_PORT",
+    );
+    const files = await repo.files();
+    for (const f of ["scripts/cloudflare-dev.mjs", "scripts/cloudflare-dev.test.mjs"]) {
+      expect(files).toContain(f);
+    }
+    expect(await repo.read("scripts/cloudflare-dev.mjs")).toContain(`"${HYPERDRIVE_BINDING}"`);
+    expect(await repo.read("apps/api/.dev.vars.example")).toMatch(/^#/);
+    expect(await repo.read(".gitignore")).toMatch(/^\.wrangler$/m);
+    expect(await repo.read(".gitignore")).toMatch(/^\.dev\.vars$/m);
+    const nodeFiles = await (await node()).files();
+    expect(nodeFiles).not.toContain("scripts/cloudflare-dev.mjs");
+    expect(nodeFiles).not.toContain("apps/api/.dev.vars.example");
+    expect((await (await node()).json("paseo.json")).scripts.api.command).toContain(
+      "PORT=$PASEO_PORT",
+    );
   });
 
   it("leaves Node output without wrangler or workerd", async () => {

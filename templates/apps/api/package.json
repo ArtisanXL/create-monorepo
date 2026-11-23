@@ -12,6 +12,7 @@
     "typecheck": "tsc -p ."
 @endif
 @if cloudflare
+    "dev": "wrangler dev",
     "build": "wrangler deploy --dry-run --outdir dist",
     "deploy": "wrangler deploy",
     "deploy:dry-run": "wrangler deploy --dry-run",

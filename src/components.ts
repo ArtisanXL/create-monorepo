@@ -104,6 +104,8 @@ const OWNED_FILES: Readonly<Record<string, ComponentName>> = {
   "scripts/worktree.mjs": "db",
   "scripts/worktree-lib.mjs": "db",
   "scripts/worktree-lib.test.mjs": "db",
+  "scripts/cloudflare-dev.mjs": "api",
+  "scripts/cloudflare-dev.test.mjs": "api",
   "docs/adr/0003-job-queue-pg-boss.md": "worker",
   "docs/adr/0004-worktree-isolation.md": "db",
 };
@@ -128,7 +130,23 @@ export const RUNTIME_OWNED_FILES: Readonly<Record<string, Runtime>> = {
   "apps/api/src/server.ts": "node",
   "apps/api/tsdown.config.ts": "node",
   "apps/web/wrangler.jsonc": "cloudflare",
+  "apps/api/.dev.vars.example": "cloudflare",
+  "scripts/cloudflare-dev.mjs": "cloudflare",
+  "scripts/cloudflare-dev.test.mjs": "cloudflare",
+  "docs/adr/0005-runtime-cloudflare-workers.md": "cloudflare",
 };
+
+/**
+ * The job-queue ADR file by Runtime (ADR-0005): ADR-0003 keeps its number, the name follows the
+ * queue. `architecture.json` points `apps/worker` at the file of the Runtime.
+ */
+export const JOB_QUEUE_ADR: Readonly<Record<Runtime, string>> = {
+  node: "docs/adr/0003-job-queue-pg-boss.md",
+  cloudflare: "docs/adr/0003-job-queue-cloudflare-queues.md",
+};
+
+/** Runtime-owned docs that describe the Apps, so they are not written without any App. */
+const NEEDS_AN_APP: ReadonlySet<string> = new Set(["docs/adr/0005-runtime-cloudflare-workers.md"]);
 
 export const isGenerated = (
   dest: string,
@@ -136,6 +154,7 @@ export const isGenerated = (
   runtimeOwned: Readonly<Record<string, Runtime>> = RUNTIME_OWNED_FILES,
 ): boolean =>
   componentsNeededBy(dest).every((c) => closure.has(c)) &&
+  (!NEEDS_AN_APP.has(dest) || APP_NAMES.some((a) => closure.has(a))) &&
   (runtimeOwned[dest] ?? runtime) === runtime;
 
 /**

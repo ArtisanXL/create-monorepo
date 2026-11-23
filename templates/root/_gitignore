@@ -11,4 +11,5 @@ coverage
 @endif
 @if cloudflare api
 worker-configuration.d.ts
+.dev.vars
 @endif

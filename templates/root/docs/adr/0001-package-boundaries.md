@@ -64,6 +64,9 @@ The monorepo consists only of the packages listed in `architecture.json`.
 - `web` is a standalone React SPA: no API client and no package dependencies.
 @endif
 @endif
+@if cloudflare api|worker
+- On Cloudflare each App is its own Worker. The composition root builds the `db` client per request from the Hyperdrive binding (see 0005).
+@endif
 - Relative imports across packages (`../../packages/...`) are forbidden.
 
 ## Enforcement
