@@ -5,8 +5,13 @@
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
+@if api
     // "node": AppType is inferred from the api source, which needs Node types.
     "types": ["vite/client", "node"]
+@endif
+@if !api
+    "types": ["vite/client"]
+@endif
   },
   "include": ["src", "vite.config.ts"]
 }

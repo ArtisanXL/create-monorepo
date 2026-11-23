@@ -14,17 +14,21 @@
     "format": "biome check --write .",
     "arch": "node scripts/arch-check.mjs",
     "verify": "__RUN__ arch && __RUN__ lint && __RUN__ typecheck && __RUN__ test",
+@if db
     "db:generate": "__FILTER__ __SCOPE__/db generate",
     "db:migrate": "__FILTER__ __SCOPE__/db migrate",
     "worktree:setup": "node scripts/worktree.mjs setup",
     "worktree:teardown": "node scripts/worktree.mjs teardown",
     "worktree:info": "node scripts/worktree.mjs info",
     "worktree:gc": "node scripts/worktree.mjs gc"
+@endif
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:",
     "@types/node": "catalog:",
+@if db
     "postgres": "catalog:",
+@endif
     "turbo": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

@@ -1,3 +1,7 @@
 NODE_ENV=development
+@if api
 PORT=3000
+@endif
+@if db
 DATABASE_URL=postgres://app:app@localhost:5432/app
+@endif

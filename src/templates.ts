@@ -24,12 +24,17 @@ export interface TemplateFile {
   executable: boolean;
 }
 
-/** Template files starting with `_` are dotfiles (npm would drop real ones when packing). */
+/**
+ * Template files starting with `_` are dotfiles (npm would drop real ones when packing). A `.tmpl`
+ * suffix is dropped: it keeps a template that is not valid JSON before its `@if` blocks are
+ * resolved from being read as a real package.json by the tools that walk up from the scripts.
+ */
 export function destinationOf(templatePath: string): string {
   return templatePath
     .split("/")
     .map((seg) => (seg.startsWith("_") ? `.${seg.slice(1)}` : seg))
-    .join("/");
+    .join("/")
+    .replace(/\.tmpl$/, "");
 }
 
 export const isExecutable = (text: string): boolean => text.startsWith("#!");

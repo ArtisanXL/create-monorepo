@@ -1,29 +1,44 @@
 {
   "worktree": {
+@if db
     "setup": [
       "__PM_ENSURE__",
       "__INSTALL_FROZEN__",
       "__RUN__ worktree:setup"
     ],
     "teardown": "__RUN__ worktree:teardown || true",
+@endif
     "servicePorts": { "range": "4100-4999" }
   },
   "scripts": {
+@if api
     "api": {
       "type": "service",
       "command": "PORT=$PASEO_PORT __FILTER__ __SCOPE__/api dev"
     },
+@endif
+@if web
     "web": {
       "type": "service",
+@if api
       "command": "API_URL=http://127.0.0.1:$PASEO_SERVICE_API_PORT __FILTER__ __SCOPE__/web dev --host $HOST --port $PASEO_PORT --strictPort"
+@endif
+@if !api
+      "command": "__FILTER__ __SCOPE__/web dev --host $HOST --port $PASEO_PORT --strictPort"
+@endif
     },
+@endif
+@if worker
     "worker": {
       "type": "service",
       "command": "__FILTER__ __SCOPE__/worker dev"
     },
+@endif
     "test": { "command": "__RUN__ test" },
     "verify": { "command": "__RUN__ verify" },
+@if db
     "db:migrate": { "command": "__RUN__ db:migrate" },
     "worktree:info": { "command": "__RUN__ worktree:info" }
+@endif
   }
 }

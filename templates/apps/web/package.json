@@ -10,15 +10,19 @@
     "typecheck": "tsc -p ."
   },
   "dependencies": {
+@if api
     "__SCOPE__/contracts": "workspace:*",
     "__SCOPE__/domain": "workspace:*",
     "@tanstack/react-query": "catalog:",
     "hono": "catalog:",
+@endif
     "react": "catalog:",
     "react-dom": "catalog:"
   },
   "devDependencies": {
+@if api
     "__SCOPE__/api": "workspace:*",
+@endif
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
     "@vitejs/plugin-react": "catalog:",

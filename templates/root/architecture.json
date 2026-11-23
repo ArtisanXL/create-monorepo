@@ -4,47 +4,123 @@
   "package_manager": "__PM__",
   "test_allow": ["vitest"],
   "packages": {
+@if domain
     "packages/domain": {
       "adr": "docs/adr/0001-package-boundaries.md",
       "role": "Pure business rules and value objects (Money etc.). No I/O.",
       "may_depend_on": [],
       "external_allow": []
     },
+@endif
+@if contracts
     "packages/contracts": {
       "adr": "docs/adr/0001-package-boundaries.md",
       "role": "API input/output Zod schemas. Validation rules live only here.",
       "may_depend_on": [],
       "external_allow": ["zod"]
     },
+@endif
+@if db
     "packages/db": {
       "adr": "docs/adr/0001-package-boundaries.md",
       "role": "Drizzle schema, migrations, DB client.",
       "may_depend_on": ["packages/domain"],
       "external_allow": ["drizzle-orm", "drizzle-kit", "postgres"]
     },
+@endif
+@if core
     "packages/core": {
       "adr": "docs/adr/0001-package-boundaries.md",
       "role": "Use cases (actions/queries). Knows nothing about HTTP or queues.",
       "may_depend_on": ["packages/domain", "packages/contracts", "packages/db"]
     },
+@endif
+@if api
     "apps/api": {
       "adr": "docs/adr/0001-package-boundaries.md",
       "role": "Hono HTTP layer: validation + core calls. No business rules.",
       "may_depend_on": ["packages/core", "packages/contracts", "packages/domain", "packages/db"]
     },
+@endif
+@if worker
     "apps/worker": {
       "adr": "docs/adr/0003-job-queue-pg-boss.md",
       "role": "pg-boss background jobs: core calls only. No business rules.",
       "may_depend_on": ["packages/core", "packages/domain", "packages/db"]
     },
+@endif
+@if web
     "apps/web": {
       "adr": "docs/adr/0001-package-boundaries.md",
+@if api
       "role": "React SPA. Talks to the API only through the hc<AppType> client.",
       "may_depend_on": ["packages/contracts", "packages/domain"],
       "type_only": ["apps/api"]
+@endif
+@if !api
+      "role": "React SPA. No API client.",
+      "may_depend_on": []
+@endif
     }
+@endif
   },
   "deferred": [
+@if !api
+    {
+      "name": "api",
+      "path": "apps/api",
+      "trigger": "When the first HTTP endpoint is needed.",
+      "deps": ["hono", "@hono/node-server", "@hono/zod-validator"]
+    },
+@endif
+@if !web
+    {
+      "name": "web",
+      "path": "apps/web",
+      "trigger": "When a UI is needed.",
+      "deps": ["react", "react-dom", "vite", "@vitejs/plugin-react", "@tanstack/react-query"]
+    },
+@endif
+@if !worker
+    {
+      "name": "worker",
+      "path": "apps/worker",
+      "trigger": "When the first background job is needed.",
+      "deps": ["pg-boss"]
+    },
+@endif
+@if !core
+    {
+      "name": "core",
+      "path": "packages/core",
+      "trigger": "When the first use case is needed.",
+      "deps": []
+    },
+@endif
+@if !db
+    {
+      "name": "db",
+      "path": "packages/db",
+      "trigger": "When persistent storage is needed.",
+      "deps": ["drizzle-orm", "drizzle-kit", "postgres"]
+    },
+@endif
+@if !domain
+    {
+      "name": "domain",
+      "path": "packages/domain",
+      "trigger": "When the first business rule or value object is needed.",
+      "deps": []
+    },
+@endif
+@if !contracts
+    {
+      "name": "contracts",
+      "path": "packages/contracts",
+      "trigger": "When the first request/response schema is needed.",
+      "deps": []
+    },
+@endif
     {
       "name": "auth",
       "path": "packages/auth",
