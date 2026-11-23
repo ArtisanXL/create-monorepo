@@ -67,6 +67,20 @@ jobs:
     name: E2E scaffold + install + verify (${{ matrix.pm }}, ${{ matrix.runtime }})
     runs-on: ubuntu-latest
     needs: test
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     strategy:
       fail-fast: false
       matrix:
@@ -98,3 +112,19 @@ jobs:
         if: matrix.runtime == 'cloudflare'
         working-directory: ${{ runner.temp }}/generated/apps/api
         run: pnpm exec wrangler deploy --dry-run
+      - name: Boot the api Worker locally and call the health route
+        if: matrix.runtime == 'cloudflare'
+        working-directory: ${{ runner.temp }}/generated
+        run: |
+          echo "DATABASE_URL=postgres://app:app@localhost:5432/app" > .env
+          node scripts/cloudflare-dev.mjs -- pnpm --filter ./apps/api dev --ip 127.0.0.1 --port 8787 > "$RUNNER_TEMP/wrangler-dev.log" 2>&1 &
+          for i in $(seq 1 60); do
+            if body=$(curl -fsS http://127.0.0.1:8787/api/health); then
+              echo "$body"
+              echo "$body" | grep -q '"db":"up"'
+              exit $?
+            fi
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/wrangler-dev.log"
+          exit 1

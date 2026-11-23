@@ -104,6 +104,8 @@ const OWNED_FILES: Readonly<Record<string, ComponentName>> = {
   "scripts/worktree.mjs": "db",
   "scripts/worktree-lib.mjs": "db",
   "scripts/worktree-lib.test.mjs": "db",
+  "scripts/cloudflare-dev.mjs": "api",
+  "scripts/cloudflare-dev.test.mjs": "api",
   "docs/adr/0003-job-queue-pg-boss.md": "worker",
   "docs/adr/0004-worktree-isolation.md": "db",
 };
@@ -127,6 +129,9 @@ export const RUNTIME_OWNED_FILES: Readonly<Record<string, Runtime>> = {
   "apps/api/src/cloudflare.ts": "cloudflare",
   "apps/api/src/server.ts": "node",
   "apps/api/tsdown.config.ts": "node",
+  "apps/api/.dev.vars.example": "cloudflare",
+  "scripts/cloudflare-dev.mjs": "cloudflare",
+  "scripts/cloudflare-dev.test.mjs": "cloudflare",
   "docs/adr/0005-runtime-cloudflare-workers.md": "cloudflare",
 };
 

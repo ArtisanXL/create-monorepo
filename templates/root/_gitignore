@@ -8,4 +8,6 @@ coverage
 *.tsbuildinfo
 @if cloudflare api
 worker-configuration.d.ts
+.wrangler
+.dev.vars
 @endif

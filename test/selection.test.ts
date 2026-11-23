@@ -385,6 +385,31 @@ describe("api as a Cloudflare Worker (ADR-0005)", () => {
     expect(await (await node()).read(".github/workflows/ci.yml")).not.toContain("dry-run");
   });
 
+  it("runs api dev on wrangler dev with the worktree's Hyperdrive connection and dev registry", async () => {
+    const repo = await cf();
+    const pkg = await repo.json("apps/api/package.json");
+    expect(pkg.scripts.dev).toBe("wrangler dev");
+    const paseo = await repo.json("paseo.json");
+    // Ports still come from paseo; the two worktree values come from the cloudflare-dev wrapper.
+    expect(paseo.scripts.api.command).toBe(
+      "node scripts/cloudflare-dev.mjs -- pnpm --filter @acme/api dev --ip 127.0.0.1 --port $PASEO_PORT",
+    );
+    const files = await repo.files();
+    for (const f of ["scripts/cloudflare-dev.mjs", "scripts/cloudflare-dev.test.mjs"]) {
+      expect(files).toContain(f);
+    }
+    expect(await repo.read("scripts/cloudflare-dev.mjs")).toContain(`"${HYPERDRIVE_BINDING}"`);
+    expect(await repo.read("apps/api/.dev.vars.example")).toMatch(/^#/);
+    expect(await repo.read(".gitignore")).toMatch(/^\.wrangler$/m);
+    expect(await repo.read(".gitignore")).toMatch(/^\.dev\.vars$/m);
+    const nodeFiles = await (await node()).files();
+    expect(nodeFiles).not.toContain("scripts/cloudflare-dev.mjs");
+    expect(nodeFiles).not.toContain("apps/api/.dev.vars.example");
+    expect((await (await node()).json("paseo.json")).scripts.api.command).toContain(
+      "PORT=$PASEO_PORT",
+    );
+  });
+
   it("leaves Node output without wrangler or workerd", async () => {
     const repo = await node();
     expect(await repo.read("pnpm-workspace.yaml")).not.toMatch(/wrangler|workerd/);
