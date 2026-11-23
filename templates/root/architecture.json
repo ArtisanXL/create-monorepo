@@ -2,6 +2,9 @@
   "$comment": "Single source of truth. Humans only (agent hook + CODEOWNERS). Every change requires an accepted ADR.",
   "scope": "__SCOPE__",
   "package_manager": "__PM__",
+@if cloudflare
+  "runtime": "cloudflare",
+@endif
   "test_allow": ["vitest"],
   "packages": {
 @if domain

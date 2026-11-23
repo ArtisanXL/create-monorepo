@@ -7,6 +7,7 @@ import {
   type Prompter,
   parseCli,
   resolveOptions,
+  USAGE,
 } from "../src/options.ts";
 import { PM_NAMES } from "../src/pm/index.ts";
 
@@ -75,6 +76,8 @@ describe("resolveOptions: prompting", () => {
         "acme",
         "--pm",
         "pnpm",
+        "--runtime",
+        "node",
         "--no-install",
       ],
       {},
@@ -108,9 +111,11 @@ describe("resolveOptions: prompting", () => {
       "@shop",
       "shop_db",
       "pnpm",
+      "node",
       false,
     ]);
-    expect(asked).toHaveLength(6);
+    expect(asked).toHaveLength(7);
+    expect(asked.slice(-3)).toEqual(["Package manager", "Runtime", "Install dependencies?"]);
     expect(options).toMatchObject({
       scope: "@shop",
       dbPrefix: "shop_db",
@@ -127,7 +132,7 @@ describe("resolveOptions: prompting", () => {
       true,
       ["@x", "my_db"],
     );
-    expect(asked).toHaveLength(2);
+    expect(asked).toHaveLength(3); // scope, db prefix, runtime
     expect(options).toMatchObject({ scope: "@x", dbPrefix: "my_db", install: false });
   });
 
@@ -174,7 +179,7 @@ describe("resolveOptions: existing target directory", () => {
 
   it("asks for confirmation when the directory is non-empty and proceeds on yes", async () => {
     const { options, asked } = await resolve(["proj", "--scope", "@a"], {}, true, [true], nonEmpty);
-    expect(asked).toHaveLength(5); // confirm, apps, db prefix, pm, install
+    expect(asked).toHaveLength(6); // confirm, apps, db prefix, pm, runtime, install
     expect(asked[0]).toMatch(/only missing files/i);
     expect(options.scope).toBe("@a");
   });
@@ -342,11 +347,6 @@ describe("resolveOptions: selection (Decisions 1, 3, 6, 9, 10)", () => {
   });
   const ALL = ["api", "web", "worker"];
 
-  it("carries a Runtime, which is node for now", async () => {
-    const { options } = await resolve(["proj"]);
-    expect(options.runtime).toBe("node");
-  });
-
   it("selects everything by default", async () => {
     const { options } = await resolve(["proj"]);
     expect(options.selection).toEqual({
@@ -382,11 +382,18 @@ describe("resolveOptions: selection (Decisions 1, 3, 6, 9, 10)", () => {
     expect(await failure(["proj", "--apps", "web", "--db-prefix", "x"])).toMatchObject({
       message: expect.stringContaining("--db-prefix"),
     });
-    const { asked } = await resolve(["proj", "--apps", "web"], {}, true, [[], "@s", "pnpm", false]);
+    const { asked } = await resolve(["proj", "--apps", "web"], {}, true, [
+      [],
+      "@s",
+      "pnpm",
+      "node",
+      false,
+    ]);
     expect(asked).toEqual([
       "Extra packages (not already required by the apps)",
       "Package scope",
       "Package manager",
+      "Runtime",
       "Install dependencies?",
     ]);
     const ok = await resolve(["proj", "--apps", "none", "--packages", "db", "--db-prefix", "x"]);
@@ -486,13 +493,14 @@ describe("resolveOptions: selection (Decisions 1, 3, 6, 9, 10)", () => {
       ["proj", "--scope", "@s", "--pm", "pnpm", "--no-install"],
       {},
       true,
-      [[], [], ["web"], []],
+      [[], [], ["web"], [], "node"],
     );
     expect(asked).toEqual([
       "Apps",
       "Extra packages (not already required by the apps)",
       "Apps (select at least one app or package)",
       "Extra packages (not already required by the apps)",
+      "Runtime",
     ]);
     expect(options.selection).toEqual({ apps: ["web"], packages: [] });
   });
@@ -510,7 +518,7 @@ describe("resolveOptions: selection (Decisions 1, 3, 6, 9, 10)", () => {
       true,
       [],
     );
-    expect(asked).toEqual(["Apps", "Database prefix"]);
+    expect(asked).toEqual(["Apps", "Database prefix", "Runtime"]);
   });
 });
 
@@ -522,4 +530,131 @@ describe("nodeFsProbe.readText", () => {
     ).toContain("create-monorepo");
     expect(await nodeFsProbe.readText("/nonexistent/architecture.json")).toBeUndefined();
   });
+});
+
+describe("resolveOptions: runtime (ADR-0005)", () => {
+  const withArch = (arch: object): FsProbe => ({
+    ...fsProbe,
+    readText: async (path) =>
+      path.endsWith("architecture.json") ? JSON.stringify(arch) : undefined,
+  });
+  const LIB = { "@a/domain": {}, "@a/contracts": {} };
+  const libArch = (extra: object = {}) => withArch({ packages: LIB, ...extra });
+  const LIB_ARGS = ["proj", "--apps", "none", "--packages", "domain,contracts"];
+
+  it("is node by default, and on -y, CI and non-TTY runs", async () => {
+    expect((await resolve(["proj"])).options.runtime).toBe("node");
+    expect((await resolve(["proj", "-y"], {}, true)).options.runtime).toBe("node");
+    expect((await resolve(["proj"], { CI: "1" }, true)).options.runtime).toBe("node");
+  });
+
+  it("takes --runtime", async () => {
+    const { options } = await resolve([...LIB_ARGS, "--runtime", "cloudflare"]);
+    expect(options.runtime).toBe("cloudflare");
+    expect((await resolve(["proj", "--runtime", "node"])).options.runtime).toBe("node");
+  });
+
+  it("rejects an invalid --runtime listing the valid ones", async () => {
+    const error = await failure(["proj", "--runtime", "deno"]);
+    expect(error).toBeInstanceOf(OptionsError);
+    expect((error as Error).message).toMatch(/deno/);
+    for (const r of ["node", "cloudflare"]) expect((error as Error).message).toContain(r);
+  });
+
+  it("shows --runtime in the usage", () => {
+    expect(USAGE).toContain("--runtime node|cloudflare");
+  });
+
+  it("asks for the Runtime after the package manager, and uses the answer", async () => {
+    const { asked, options } = await resolve(
+      ["proj", "--apps", "none", "--packages", "domain", "--scope", "@a"],
+      {},
+      true,
+      ["pnpm", "cloudflare", false],
+    );
+    expect(asked).toEqual(["Package manager", "Runtime", "Install dependencies?"]);
+    expect(options.runtime).toBe("cloudflare");
+  });
+
+  it("reads the Runtime recorded in architecture.json", async () => {
+    const { options } = await resolve(
+      LIB_ARGS.slice(0, 1),
+      {},
+      false,
+      undefined,
+      libArch({ runtime: "cloudflare" }),
+    );
+    expect(options.runtime).toBe("cloudflare");
+  });
+
+  it("treats a missing runtime field as node", async () => {
+    const { options } = await resolve(["proj"], {}, false, undefined, libArch());
+    expect(options.runtime).toBe("node");
+  });
+
+  it("keeps the recorded Runtime on a re-run without the flag, without asking", async () => {
+    const { options, asked } = await resolve(
+      ["proj", "--scope", "@a"],
+      {},
+      true,
+      ["pnpm", false],
+      libArch({ runtime: "cloudflare" }),
+    );
+    expect(options.runtime).toBe("cloudflare");
+    expect(asked).not.toContain("Runtime");
+  });
+
+  it("accepts a flag that restates the recorded Runtime", async () => {
+    const { options } = await resolve(
+      ["proj", "--runtime", "cloudflare"],
+      {},
+      false,
+      undefined,
+      libArch({ runtime: "cloudflare" }),
+    );
+    expect(options.runtime).toBe("cloudflare");
+    expect(
+      (await resolve(["proj", "--runtime", "node"], {}, false, undefined, libArch())).options
+        .runtime,
+    ).toBe("node");
+  });
+
+  it("rejects a flag that conflicts with the recorded Runtime", async () => {
+    const run = (argv: string[], probe: FsProbe) =>
+      resolve(argv, {}, false, undefined, probe).then(
+        () => undefined,
+        (e: unknown) => e as Error,
+      );
+    const toNode = await run(["proj", "--runtime", "node"], libArch({ runtime: "cloudflare" }));
+    expect(toNode).toBeInstanceOf(OptionsError);
+    expect(toNode?.message).toMatch(/conflict.*architecture\.json.*cloudflare/s);
+    const toCf = await run(["proj", "--runtime", "cloudflare"], libArch());
+    expect(toCf).toBeInstanceOf(OptionsError);
+    expect(toCf?.message).toMatch(/conflict.*node/s);
+  });
+
+  it("rejects an unreadable recorded Runtime", async () => {
+    const error = await failure0(libArch({ runtime: "deno" }));
+    expect(error).toBeInstanceOf(OptionsError);
+    expect(error.message).toMatch(/runtime/);
+  });
+
+  it("rejects cloudflare with any App in the Closure as not yet supported", async () => {
+    for (const apps of ["api", "web", "worker"]) {
+      const error = await failure(["proj", "--apps", apps, "--runtime", "cloudflare"]);
+      expect(error).toBeInstanceOf(OptionsError);
+      expect((error as Error).message).toMatch(/not yet supported/);
+    }
+    const error = await failure(["proj", "--runtime", "cloudflare"]); // default Selection has Apps
+    expect((error as Error).message).toMatch(/not yet supported/);
+  });
+
+  async function failure0(probe: FsProbe): Promise<Error> {
+    return resolve(["proj"], {}, false, undefined, probe).then(
+      () => {
+        throw new Error("expected failure");
+      },
+      (e: unknown) => e as Error,
+    );
+  }
 });

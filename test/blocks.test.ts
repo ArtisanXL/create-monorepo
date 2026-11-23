@@ -63,6 +63,33 @@ describe("resolveBlocks", () => {
   });
 });
 
+describe("Runtime terms", () => {
+  const cf = (apps: ("api" | "web" | "worker")[]) =>
+    contextOf({ apps, packages: [] }, "cloudflare");
+  const node = (apps: ("api" | "web" | "worker")[]) => contextOf({ apps, packages: [] });
+
+  it("keeps @if cloudflare / @if node blocks by the context's Runtime", () => {
+    const text = "@if cloudflare\nCF\n@endif\n@if node\nN\n@endif\n@if !cloudflare\nNOT\n@endif\n";
+    expect(resolveBlocks(text, cf(["web"]))).toBe("CF\n");
+    expect(resolveBlocks(text, node(["web"]))).toBe("N\nNOT\n");
+  });
+
+  it("combines with Component terms, negation and alternatives", () => {
+    const text = "@if cloudflare api\nCF-API\n@endif\n@if !node|web\nX\n@endif\n";
+    expect(resolveBlocks(text, cf(["api"]))).toBe("CF-API\nX\n");
+    expect(resolveBlocks(text, node(["api"]))).toBe("");
+    // !node|web: true when the Runtime is not node and web is absent
+    expect(resolveBlocks(text, cf(["web"]))).toBe("");
+    expect(resolveBlocks(text, cf(["worker"]))).toBe("X\n");
+    expect(resolveBlocks(text, node(["worker"]))).toBe("");
+  });
+
+  it("rejects an unknown Runtime, naming the valid ones", () => {
+    expect(checkBlocks("@if deno\n@endif\n")[0]?.message).toMatch(/unknown.*'deno'.*cloudflare/);
+    expect(() => resolveBlocks("@if !deno|web\n@endif\n", web, "f")).toThrow(/'deno'/);
+  });
+});
+
 describe("checkBlocks / hasDirectiveLines", () => {
   it("reports every problem with its line", () => {
     expect(checkBlocks("@if web\n@endif\n")).toEqual([]);

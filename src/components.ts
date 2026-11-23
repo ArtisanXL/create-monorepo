@@ -52,9 +52,11 @@ export function closureOf(selection: Selection): Closure {
 
 export const FULL_CLOSURE: Closure = closureOf(FULL_SELECTION);
 
-/** The Runtime a generated repo targets (ADR-0005). Only `node` is used until `--runtime` lands. */
-export type Runtime = "node" | "cloudflare";
+/** The Runtime a generated repo targets (ADR-0005). */
+export const RUNTIMES = ["node", "cloudflare"] as const;
+export type Runtime = (typeof RUNTIMES)[number];
 export const DEFAULT_RUNTIME: Runtime = "node";
+export const isRuntime = (s: string): s is Runtime => (RUNTIMES as readonly string[]).includes(s);
 
 /** What block resolution, file inclusion and ownership checks read: the Closure and the Runtime. */
 export interface ResolutionContext {
@@ -106,5 +108,27 @@ export function componentsNeededBy(dest: string): ComponentName[] {
   return needed;
 }
 
-export const isGenerated = (dest: string, { closure }: ResolutionContext): boolean =>
-  componentsNeededBy(dest).every((c) => closure.has(c));
+/**
+ * Template files that exist under one Runtime only (ADR-0005). Empty until the App tickets add
+ * `wrangler.jsonc` and friends; with the Component ownership above, no path has two writers.
+ */
+export const RUNTIME_OWNED_FILES: Readonly<Record<string, Runtime>> = {};
+
+export const isGenerated = (
+  dest: string,
+  { closure, runtime }: ResolutionContext,
+  runtimeOwned: Readonly<Record<string, Runtime>> = RUNTIME_OWNED_FILES,
+): boolean =>
+  componentsNeededBy(dest).every((c) => closure.has(c)) &&
+  (runtimeOwned[dest] ?? runtime) === runtime;
+
+/**
+ * Why `runtime` cannot generate `closure` yet, or undefined when the combination is supported.
+ * Later tickets widen this until the App tickets are all in, and the last one removes it.
+ */
+export function runtimeSupportError(closure: Closure, runtime: Runtime): string | undefined {
+  if (runtime === "node") return undefined;
+  const apps = APP_NAMES.filter((n) => closure.has(n));
+  if (apps.length === 0) return undefined;
+  return `--runtime ${runtime} is not yet supported with ${apps.join(", ")}: Apps are not available on ${runtime} yet. Use --apps none (packages only) or --runtime node.`;
+}
