@@ -1,0 +1,4 @@
+# Only the root package is a pnpm project. The package.json files under templates/ are
+# scaffold templates (some contain @if lines), so pnpm -r (Dependabot runs it) must not scan them.
+packages:
+  - "."
