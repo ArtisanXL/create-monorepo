@@ -121,10 +121,12 @@ describe("resolveOptions: prompting", () => {
   });
 
   it("prompts only for values the flags did not provide", async () => {
-    const { asked, options } = await resolve(["proj", "--apps", "api,web,worker", "--pm", "pnpm", "--no-install"], {}, true, [
-      "@x",
-      "my_db",
-    ]);
+    const { asked, options } = await resolve(
+      ["proj", "--apps", "api,web,worker", "--pm", "pnpm", "--no-install"],
+      {},
+      true,
+      ["@x", "my_db"],
+    );
     expect(asked).toHaveLength(2);
     expect(options).toMatchObject({ scope: "@x", dbPrefix: "my_db", install: false });
   });
@@ -143,20 +145,32 @@ describe("resolveOptions: prompting", () => {
   });
 
   it("re-asks the scope on invalid input", async () => {
-    const { options, asked } = await resolve(["proj", "--apps", "api,web,worker"], {}, true, ["nope", "@ok"]);
+    const { options, asked } = await resolve(["proj", "--apps", "api,web,worker"], {}, true, [
+      "nope",
+      "@ok",
+    ]);
     expect(options.scope).toBe("@ok");
     expect(asked.filter((m) => m === "Package scope")).toHaveLength(2);
   });
 
   it("re-asks the db prefix on invalid input", async () => {
-    const { options, asked } = await resolve(["proj", "--scope", "@a", "--apps", "api,web,worker"], {}, true, ["9Bad", "good"]);
+    const { options, asked } = await resolve(
+      ["proj", "--scope", "@a", "--apps", "api,web,worker"],
+      {},
+      true,
+      ["9Bad", "good"],
+    );
     expect(options.dbPrefix).toBe("good");
     expect(asked.filter((m) => m === "Database prefix")).toHaveLength(2);
   });
 });
 
 describe("resolveOptions: existing target directory", () => {
-  const nonEmpty: FsProbe = { ...fsProbe, exists: async () => true, isNonEmptyDir: async () => true };
+  const nonEmpty: FsProbe = {
+    ...fsProbe,
+    exists: async () => true,
+    isNonEmptyDir: async () => true,
+  };
 
   it("asks for confirmation when the directory is non-empty and proceeds on yes", async () => {
     const { options, asked } = await resolve(["proj", "--scope", "@a"], {}, true, [true], nonEmpty);
@@ -195,7 +209,11 @@ describe("resolveOptions: cancel", () => {
   });
 
   it("cancel at the existing-directory confirmation throws CancelledError", async () => {
-    const nonEmpty: FsProbe = { ...fsProbe, exists: async () => true, isNonEmptyDir: async () => true };
+    const nonEmpty: FsProbe = {
+      ...fsProbe,
+      exists: async () => true,
+      isNonEmptyDir: async () => true,
+    };
     const error = await resolve(["proj"], {}, true, [CANCEL], nonEmpty).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(CancelledError);
   });
@@ -378,24 +396,34 @@ describe("resolveOptions: selection (Decisions 1, 3, 6, 9, 10)", () => {
   });
 
   it("accepts flags that restate the recorded Selection", async () => {
-    const probe = withArch(["packages/domain", "packages/db", "packages/contracts", "packages/core", "apps/api"]);
+    const probe = withArch([
+      "packages/domain",
+      "packages/db",
+      "packages/contracts",
+      "packages/core",
+      "apps/api",
+    ]);
     const { options } = await resolve(["proj", "--apps", "api"], {}, false, undefined, probe);
     expect(options.selection.apps).toEqual(["api"]);
   });
 
   it("errors on flags that conflict with it, pointing at the ADR-0002 process", async () => {
-    const error = await resolve(["proj", "--apps", "api"], {}, false, undefined, withArch(["apps/web"])).catch(
-      (e: unknown) => e,
-    );
+    const error = await resolve(
+      ["proj", "--apps", "api"],
+      {},
+      false,
+      undefined,
+      withArch(["apps/web"]),
+    ).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(OptionsError);
     expect((error as Error).message).toMatch(/conflict with the existing architecture\.json.*ADR/s);
   });
 
   it("errors when architecture.json cannot be read", async () => {
     const probe: FsProbe = { ...fsProbe, readText: async () => "{" };
-    expect(await resolve(["proj"], {}, false, undefined, probe).catch((e: unknown) => e)).toBeInstanceOf(
-      OptionsError,
-    );
+    expect(
+      await resolve(["proj"], {}, false, undefined, probe).catch((e: unknown) => e),
+    ).toBeInstanceOf(OptionsError);
   });
 
   it("asks an app multiselect (all checked), then extra packages outside the Closure", async () => {
@@ -414,14 +442,23 @@ describe("resolveOptions: selection (Decisions 1, 3, 6, 9, 10)", () => {
       prompter,
       fsProbe,
     );
-    expect(calls[0]).toEqual({ message: "Apps", choices: ["api", "web", "worker"], initial: ["api", "web", "worker"] });
+    expect(calls[0]).toEqual({
+      message: "Apps",
+      choices: ["api", "web", "worker"],
+      initial: ["api", "web", "worker"],
+    });
     expect(calls[1]?.choices).toEqual(["domain", "contracts", "db", "core"]);
     expect(calls[1]?.initial).toEqual([]);
     expect(options.selection).toEqual({ apps: ["web"], packages: ["domain"] });
   });
 
   it("skips the package multiselect when the apps already require every package", async () => {
-    const { asked } = await resolve(["proj", "--scope", "@s", "--pm", "pnpm", "--no-install"], {}, true, []);
+    const { asked } = await resolve(
+      ["proj", "--scope", "@s", "--pm", "pnpm", "--no-install"],
+      {},
+      true,
+      [],
+    );
     expect(asked).toEqual(["Apps", "Database prefix"]);
   });
 });

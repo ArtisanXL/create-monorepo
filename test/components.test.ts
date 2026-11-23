@@ -8,12 +8,21 @@ import {
   selectionOf,
 } from "../src/components.ts";
 
-const names = (apps: string[], packages: string[] = []) =>
-  [...closureOf({ apps: apps as never, packages: packages as never })];
+const names = (apps: string[], packages: string[] = []) => [
+  ...closureOf({ apps: apps as never, packages: packages as never }),
+];
 
 describe("Closure", () => {
   it("is everything for the default Selection", () => {
-    expect([...FULL_CLOSURE]).toEqual(["api", "web", "worker", "domain", "contracts", "db", "core"]);
+    expect([...FULL_CLOSURE]).toEqual([
+      "api",
+      "web",
+      "worker",
+      "domain",
+      "contracts",
+      "db",
+      "core",
+    ]);
   });
 
   it("adds the transitive dependencies of the Selection", () => {

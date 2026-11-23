@@ -3,15 +3,15 @@ import { parseArgs } from "node:util";
 import {
   APP_NAMES,
   type AppName,
-  PACKAGE_NAMES,
-  type PackageName,
   closureOf,
   FULL_SELECTION,
   isAppName,
   isComponentName,
   isPackageName,
-  sameClosure,
+  PACKAGE_NAMES,
+  type PackageName,
   type Selection,
+  sameClosure,
   selectionOf,
 } from "./components.ts";
 import { isPmName, PM_NAMES, type PmName } from "./pm/index.ts";
@@ -306,9 +306,7 @@ async function resolveSelection(
   const apps: readonly AppName[] =
     flagApps ??
     (interactive
-      ? (uncancel(
-          await prompter.multiselect("Apps", APP_NAMES, APP_NAMES),
-        ) as AppName[])
+      ? (uncancel(await prompter.multiselect("Apps", APP_NAMES, APP_NAMES)) as AppName[])
       : FULL_SELECTION.apps);
   let packages: readonly PackageName[] = flagPackages ?? [];
   if (flagPackages === undefined && interactive) {

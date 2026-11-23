@@ -65,7 +65,10 @@ function parse(text: string): Parsed {
     const terms = arg
       .split(/\s+/)
       .filter(Boolean)
-      .map((t): Term => (t.startsWith("!") ? { name: t.slice(1), negate: true } : { name: t, negate: false }));
+      .map(
+        (t): Term =>
+          t.startsWith("!") ? { name: t.slice(1), negate: true } : { name: t, negate: false },
+      );
     if (terms.length === 0) errors.push({ line: n, message: "@if needs a component name" });
     for (const t of terms) {
       if (!isComponentName(t.name)) {

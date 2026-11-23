@@ -188,7 +188,9 @@ describe("Decision 6: no db, no database infrastructure", () => {
 describe("Decision 8: ADRs and the CLAUDE.md block follow the Closure", () => {
   it("generates 0003 only with worker and 0004 only with db, leaving the numbering gaps", async () => {
     const adrs = async (s: Selection) =>
-      (await (await generate(s)).files()).filter((f) => /^docs\/adr\/\d{4}/.test(f)).map((f) => f.slice(9, 13));
+      (await (await generate(s)).files())
+        .filter((f) => /^docs\/adr\/\d{4}/.test(f))
+        .map((f) => f.slice(9, 13));
     expect(await adrs(API)).toEqual(["0001", "0002", "0004"]);
     expect(await adrs(WORKER)).toEqual(["0001", "0002", "0003", "0004"]);
     expect(await adrs(WEB)).toEqual(["0001", "0002"]);

@@ -16,7 +16,8 @@ describe("resolveBlocks", () => {
   });
 
   it("supports negation, all-of terms, @else and nesting", () => {
-    const text = "@if !api\nN\n@endif\n@if api web\nAW\n@else\nnot-both\n@endif\n@if web\n@if db\nD\n@endif\n@endif\n";
+    const text =
+      "@if !api\nN\n@endif\n@if api web\nAW\n@else\nnot-both\n@endif\n@if web\n@if db\nD\n@endif\n@endif\n";
     expect(resolveBlocks(text, web)).toBe("N\nnot-both\n");
     expect(resolveBlocks(text, FULL_CLOSURE)).toBe("AW\nD\n");
   });

@@ -41,7 +41,10 @@ const GOLDEN_CASES: { label: string | undefined; selection: Selection | undefine
   { label: undefined, selection: undefined },
   { label: "apps-api", selection: { apps: ["api"], packages: [] } },
   { label: "apps-web", selection: { apps: ["web"], packages: [] } },
-  { label: "apps-none-domain-contracts", selection: { apps: [], packages: ["domain", "contracts"] } },
+  {
+    label: "apps-none-domain-contracts",
+    selection: { apps: [], packages: ["domain", "contracts"] },
+  },
 ];
 
 describe.each(PM_NAMES)("golden output: %s", (name) => {
