@@ -35,6 +35,7 @@ export function contractFrom(json) {
     protectedPaths: /** @type {string[]} */ (json.protected_paths ?? []),
     exceptions: /** @type {string[]} */ (json.agent_writable_exceptions ?? []),
     testAllow: /** @type {string[]} */ (json.test_allow ?? []),
+    runtime: /** @type {string} */ (json.runtime ?? "node"),
     packageManager: /** @type {string | undefined} */ (json.package_manager),
     claudeBlock: /** @type {BlockMarkers | undefined} */ (json.claude_md_block),
   };
