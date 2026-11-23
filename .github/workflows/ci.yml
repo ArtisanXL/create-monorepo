@@ -64,7 +64,7 @@ jobs:
       - run: pnpm smoke:pack
 
   e2e:
-    name: E2E scaffold + install + verify (${{ matrix.pm }}, ${{ matrix.runtime }}${{ matrix.dry-run-app && format(', {0}', matrix.dry-run-app) || '' }})
+    name: E2E scaffold + install + verify (${{ matrix.pm }}, ${{ matrix.runtime }}${{ matrix.dry-run-app && format(', {0}', matrix.dry-run-app) || '' }}${{ matrix.connected && ' + api' || '' }})
     runs-on: ubuntu-latest
     needs: test
     services:
@@ -97,6 +97,12 @@ jobs:
             runtime: cloudflare
             scaffold-args: "--apps web --runtime cloudflare"
             dry-run-app: web
+          # Connected: web forwards /api/* to the api Worker over a service binding.
+          - pm: pnpm
+            runtime: cloudflare
+            scaffold-args: "--apps api,web --runtime cloudflare"
+            dry-run-app: web
+            connected: true
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -132,4 +138,21 @@ jobs:
             sleep 2
           done
           cat "$RUNNER_TEMP/wrangler-dev.log"
+          exit 1
+      - name: Boot api and web Workers locally and call /api/health through web
+        if: matrix.connected
+        working-directory: ${{ runner.temp }}/generated
+        run: |
+          echo "DATABASE_URL=postgres://app:app@localhost:5432/app" > .env
+          node scripts/cloudflare-dev.mjs -- pnpm --filter ./apps/api dev --ip 127.0.0.1 --port 8787 > "$RUNNER_TEMP/api-dev.log" 2>&1 &
+          node scripts/cloudflare-dev.mjs -- pnpm --filter ./apps/web dev --host 127.0.0.1 --port 5173 --strictPort > "$RUNNER_TEMP/web-dev.log" 2>&1 &
+          for i in $(seq 1 60); do
+            if body=$(curl -fsS http://127.0.0.1:5173/api/health); then
+              echo "$body"
+              echo "$body" | grep -q '"db":"up"'
+              exit $?
+            fi
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/api-dev.log" "$RUNNER_TEMP/web-dev.log"
           exit 1

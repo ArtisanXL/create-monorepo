@@ -99,6 +99,7 @@ export const sameClosure = (a: Closure, b: Closure): boolean =>
 /** Template files that only exist with a Component other than the one whose folder holds them. */
 const OWNED_FILES: Readonly<Record<string, ComponentName>> = {
   "apps/web/src/lib/api.ts": "api",
+  "apps/web/src/worker.ts": "api",
   "compose.yaml": "db",
   ".worktreeinclude": "db",
   "scripts/worktree.mjs": "db",
@@ -130,6 +131,7 @@ export const RUNTIME_OWNED_FILES: Readonly<Record<string, Runtime>> = {
   "apps/api/src/server.ts": "node",
   "apps/api/tsdown.config.ts": "node",
   "apps/web/wrangler.jsonc": "cloudflare",
+  "apps/web/src/worker.ts": "cloudflare",
   "apps/api/.dev.vars.example": "cloudflare",
   "scripts/cloudflare-dev.mjs": "cloudflare",
   "scripts/cloudflare-dev.test.mjs": "cloudflare",
@@ -158,16 +160,14 @@ export const isGenerated = (
   (runtimeOwned[dest] ?? runtime) === runtime;
 
 /**
- * Apps that already run on Cloudflare; later tickets add `worker` and the api-connected `web`.
- * Standalone `web` (without `api`) is supported: an assets-only Worker with no bindings.
+ * Apps that already run on Cloudflare; a later ticket adds `worker`. `web` is an assets-only
+ * Worker alone and forwards `/api/*` to `api` over a service binding when connected.
  */
 const CLOUDFLARE_APPS: readonly AppName[] = ["api", "web"];
 
-/** Apps in `closure` that cannot run on Cloudflare yet; `web` only counts alongside `api`. */
+/** Apps in `closure` that cannot run on Cloudflare yet. */
 const unsupportedOnCloudflare = (closure: Closure): AppName[] =>
-  APP_NAMES.filter(
-    (n) => closure.has(n) && (!CLOUDFLARE_APPS.includes(n) || (n === "web" && closure.has("api"))),
-  );
+  APP_NAMES.filter((n) => closure.has(n) && !CLOUDFLARE_APPS.includes(n));
 
 /**
  * Why `runtime` cannot generate `closure` yet, or undefined when the combination is supported.
@@ -177,5 +177,5 @@ export function runtimeSupportError(closure: Closure, runtime: Runtime): string 
   if (runtime === "node") return undefined;
   const unsupported = unsupportedOnCloudflare(closure);
   if (unsupported.length === 0) return undefined;
-  return `--runtime ${runtime} is not yet supported with ${unsupported.join(", ")}: those Apps are not available on ${runtime} yet. Use --apps api or web (not both) or none, or --runtime node.`;
+  return `--runtime ${runtime} is not yet supported with ${unsupported.join(", ")}: those Apps are not available on ${runtime} yet. Use --apps api and/or web, or none, or --runtime node.`;
 }
