@@ -5,19 +5,34 @@
   "type": "module",
   "exports": { ".": "./src/index.ts" },
   "scripts": {
+@if node
     "dev": "tsx watch --env-file-if-exists=../../.env src/server.ts",
     "build": "tsdown",
     "start": "node --env-file-if-exists=../../.env dist/server.mjs",
     "typecheck": "tsc -p ."
+@endif
+@if cloudflare
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "deploy": "wrangler deploy",
+    "deploy:dry-run": "wrangler deploy --dry-run",
+    "typecheck": "wrangler types && tsc -p ."
+@endif
   },
   "dependencies": {
     "__SCOPE__/contracts": "workspace:*",
     "__SCOPE__/core": "workspace:*",
     "__SCOPE__/db": "workspace:*",
+@if node
     "@hono/node-server": "catalog:",
+@endif
     "@hono/zod-validator": "catalog:",
     "hono": "catalog:",
     "zod": "catalog:"
   },
+@if node
   "devDependencies": { "tsdown": "catalog:", "tsx": "catalog:" }
+@endif
+@if cloudflare
+  "devDependencies": { "wrangler": "catalog:" }
+@endif
 }

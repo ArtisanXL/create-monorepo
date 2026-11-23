@@ -58,6 +58,16 @@ export type Runtime = (typeof RUNTIMES)[number];
 export const DEFAULT_RUNTIME: Runtime = "node";
 export const isRuntime = (s: string): s is Runtime => (RUNTIMES as readonly string[]).includes(s);
 
+/**
+ * The `compatibility_date` written into every `wrangler.jsonc`. A constant of the generator,
+ * bumped per release: not the scaffold date, so goldens stay deterministic and a generated repo
+ * never gets a date newer than the workerd its install resolves.
+ */
+export const COMPATIBILITY_DATE = "2026-11-01";
+
+/** The Hyperdrive binding name in `wrangler.jsonc`, the entry and `loadEnv`. */
+export const HYPERDRIVE_BINDING = "HYPERDRIVE";
+
 /** What block resolution, file inclusion and ownership checks read: the Closure and the Runtime. */
 export interface ResolutionContext {
   closure: Closure;
@@ -109,10 +119,15 @@ export function componentsNeededBy(dest: string): ComponentName[] {
 }
 
 /**
- * Template files that exist under one Runtime only (ADR-0005). Empty until the App tickets add
- * `wrangler.jsonc` and friends; with the Component ownership above, no path has two writers.
+ * Template files that exist under one Runtime only (ADR-0005). With the Component ownership
+ * above, no path has two writers.
  */
-export const RUNTIME_OWNED_FILES: Readonly<Record<string, Runtime>> = {};
+export const RUNTIME_OWNED_FILES: Readonly<Record<string, Runtime>> = {
+  "apps/api/wrangler.jsonc": "cloudflare",
+  "apps/api/src/cloudflare.ts": "cloudflare",
+  "apps/api/src/server.ts": "node",
+  "apps/api/tsdown.config.ts": "node",
+};
 
 export const isGenerated = (
   dest: string,
@@ -122,13 +137,16 @@ export const isGenerated = (
   componentsNeededBy(dest).every((c) => closure.has(c)) &&
   (runtimeOwned[dest] ?? runtime) === runtime;
 
+/** Apps that already run on Cloudflare; later tickets add `worker` and `web`. */
+const CLOUDFLARE_APPS: readonly AppName[] = ["api"];
+
 /**
  * Why `runtime` cannot generate `closure` yet, or undefined when the combination is supported.
  * Later tickets widen this until the App tickets are all in, and the last one removes it.
  */
 export function runtimeSupportError(closure: Closure, runtime: Runtime): string | undefined {
   if (runtime === "node") return undefined;
-  const apps = APP_NAMES.filter((n) => closure.has(n));
-  if (apps.length === 0) return undefined;
-  return `--runtime ${runtime} is not yet supported with ${apps.join(", ")}: Apps are not available on ${runtime} yet. Use --apps none (packages only) or --runtime node.`;
+  const unsupported = APP_NAMES.filter((n) => closure.has(n) && !CLOUDFLARE_APPS.includes(n));
+  if (unsupported.length === 0) return undefined;
+  return `--runtime ${runtime} is not yet supported with ${unsupported.join(", ")}: those Apps are not available on ${runtime} yet. Use --apps ${CLOUDFLARE_APPS.join(",")} or none, or --runtime node.`;
 }

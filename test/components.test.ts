@@ -123,11 +123,19 @@ describe("Runtime support", () => {
     ).toBeUndefined();
   });
 
-  it("rejects cloudflare when any App is in the Closure, as not yet supported", () => {
-    for (const app of ["api", "web", "worker"] as const) {
-      expect(runtimeSupportError(closureOf({ apps: [app], packages: [] }), "cloudflare")).toMatch(
-        new RegExp(`not yet supported.*${app}`),
-      );
+  it("accepts cloudflare with an api-only Closure, with or without db in it", () => {
+    expect(runtimeSupportError(closureOf({ apps: ["api"], packages: [] }), "cloudflare")).toBe(
+      undefined,
+    );
+  });
+
+  it("rejects cloudflare with web or worker in the Closure, as not yet supported", () => {
+    for (const app of ["web", "worker"] as const) {
+      for (const apps of [[app], ["api", app]] as const) {
+        expect(
+          runtimeSupportError(closureOf({ apps: [...apps], packages: [] }), "cloudflare"),
+        ).toMatch(new RegExp(`not yet supported with ${app}\\b`));
+      }
     }
   });
 });
