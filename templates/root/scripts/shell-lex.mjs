@@ -324,6 +324,7 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
     } else {
       grow().text += c;
       if (c === "{") cur.brace = true;
+      if (c === "*" || c === "?" || c === "[") cur.glob = true;
     }
   }
   end("");
@@ -456,7 +457,6 @@ function expandVars(text, vars, budget) {
 // Keywords after which a command runs only on some paths.
 const BRANCH_KEYWORDS = new Set(["then", "else", "elif", "do"]);
 const BRACE_GROUP = /(?<![$\\])\{([^{}]*)\}/g;
-const BRACE_RANGE = /(?<![$\\])\{[^{}]*\.\.[^{}]*\}/g;
 const MAX_BRACE_WORDS = 64;
 
 // The first `{a,b}` group of a word, found without backtracking: `[^{}]*` cannot cross another brace.
@@ -467,29 +467,32 @@ function commaGroup(t) {
 
 /**
  * Brace expansion of a word with an unquoted `{` (`{r,}m` is `rm` and `m`). A `{x..y}` range stands for
- * anything, so it becomes a `*` glob. A word that would expand past the cap spends the whole budget.
+ * anything, so it becomes a `*` glob (and the word is a glob). A word that would expand past the cap spends
+ * the whole budget.
  */
 function braceWords(w, budget) {
   if (!w.brace || ASSIGN_WORD.test(w.text)) return [w];
-  const ranged = w.text.replace(BRACE_RANGE, "*");
-  if (ranged !== w.text) return [{ ...w, text: ranged, quoted: false }];
+  const text = w.text.replace(BRACE_GROUP, (m, g) => (g.includes("..") ? "*" : m));
+  const ranged = text !== w.text;
   let calls = 0;
   const expand = (t) => {
     const m = commaGroup(t);
     if (!m || ++calls > MAX_BRACE_WORDS) return [t];
     return m[1].split(",").flatMap((alt) => expand(t.slice(0, m.index) + alt + t.slice(m.index + m[0].length)));
   };
-  const out = expand(w.text);
+  const out = expand(text);
   if (calls > MAX_BRACE_WORDS) {
     budget.left = -1;
     return [w];
   }
-  return out.length > 1 ? out.map((text) => ({ ...w, text })) : [w];
+  if (out.length === 1 && !ranged) return [w];
+  return out.map((t) => (ranged ? { ...w, text: t, glob: true } : { ...w, text: t }));
 }
 
 // A value that no longer fits is not cut (the dropped part would go unchecked): the whole line counts as too complex.
-const fits = (value, budget) => {
-  if (value.length > MAX_VAR_LENGTH) budget.left = -1;
+// Only text that grew through `$` expansion is capped: literal text is bounded by the command itself.
+const fits = (value, budget, expanded) => {
+  if (expanded && value.length > MAX_VAR_LENGTH) budget.left = -1;
   return value;
 };
 
@@ -500,8 +503,8 @@ const fits = (value, budget) => {
  * so `$NAME` stays unexpanded and the rules for variables of unknown value apply. `for NAME in a b` and
  * `read NAME <<< text` (also `while read NAME; do ...; done <<< text`, passed as `loopInput`) set NAME to
  * every value it can take; an assignment that runs only on some paths (`a && X=1 || X=2`, `then X=1`) adds
- * its value to the earlier ones instead of replacing them. Lists and accumulated values that outgrow
- * MAX_VAR_LENGTH spend the budget; a plain assignment that long is forgotten.
+ * its value to the earlier ones instead of replacing them. A value that grew through `$` expansion past
+ * MAX_VAR_LENGTH spends the budget; literal text is kept whole.
  * Words with an unquoted `{` are brace-expanded first. Returns false once the expansion budget is spent.
  */
 function applyVars(seg, vars, budget, conditional = false, loopInput = undefined) {
@@ -513,13 +516,14 @@ function applyVars(seg, vars, budget, conditional = false, loopInput = undefined
   if (rest.length && rest.every((w) => ASSIGN_WORD.test(w.text))) {
     for (const w of rest) {
       const m = ASSIGN_WORD.exec(w.text);
-      const value = expandVars(w.text.slice(m[0].length), vars, budget);
+      const raw = w.text.slice(m[0].length);
+      const value = expandVars(raw, vars, budget);
+      const grew = raw.includes("$");
       const old = vars.get(m[1]);
       if (w.dyn || (m[2] && old === undefined)) vars.delete(m[1]);
-      else if (m[2]) vars.set(m[1], fits(old + value, budget));
-      else if (conditional && old !== undefined && old !== value) vars.set(m[1], fits(`${old} ${value}`, budget));
-      else if (value.length > MAX_VAR_LENGTH) vars.delete(m[1]);
-      else vars.set(m[1], value);
+      else if (m[2]) vars.set(m[1], fits(old + value, budget, grew));
+      else if (conditional && old !== undefined && old !== value) vars.set(m[1], fits(`${old} ${value}`, budget, grew));
+      else vars.set(m[1], fits(value, budget, grew));
     }
     return budget.left >= 0;
   }
@@ -534,17 +538,17 @@ function applyVars(seg, vars, budget, conditional = false, loopInput = undefined
     const text = expandVars(w.text, vars, budget);
     if (text === w.text || budget.left < 0) return [w];
     const parts = text.split(/\s+/).filter(Boolean);
-    return (parts.length ? parts : [""]).map((t) => ({ ...w, text: t, fromVar: true }));
+    return (parts.length ? parts : [""]).map((t) => ({ ...w, text: t, fromVar: true, glob: w.glob || /[*?[]/.test(t) }));
   });
   for (const r of seg.redirs) r.target = expandVars(r.target, vars, budget);
   for (const r of seg.inputs) r.target = expandVars(r.target, vars, budget);
   const names = seg.words.slice(at + 1).filter((w) => /^[A-Za-z_]\w*$/.test(w.text));
   if (setter === "for" && seg.words[at + 2]?.text === "in") {
     const items = seg.words.slice(at + 3);
-    if (!items.some((w) => w.dyn || w.text.includes("$"))) vars.set(seg.words[at + 1].text, fits(items.map((w) => w.text).join(" "), budget));
+    if (!items.some((w) => w.dyn || w.text.includes("$"))) vars.set(seg.words[at + 1].text, fits(items.map((w) => w.text).join(" "), budget, items.some((w) => w.fromVar)));
   } else if (setter === "read") {
     const here = seg.inputs.find((x) => x.op === "<<<") ?? (loopInput ? { target: expandVars(loopInput.target, vars, budget), dyn: loopInput.dyn } : undefined);
-    if (here && !here.dyn && !here.target.includes("$")) for (const n of names) vars.set(n.text, fits(here.target, budget));
+    if (here && !here.dyn && !here.target.includes("$")) for (const n of names) vars.set(n.text, fits(here.target, budget, false));
   }
   return budget.left >= 0;
 }

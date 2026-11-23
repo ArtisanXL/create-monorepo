@@ -1592,14 +1592,75 @@ describe("guard decision: constructed bypasses (#37)", () => {
         "; ",
       );
       expect(bash(`${chain}; true && X=docs; rm -rf $X`).allow).toBe(false);
-      expect(bash(`for X in ${long}; do echo $X; done`).allow).toBe(false);
+      expect(bash(`for X in ${long}; do echo $X; done`).allow).toBe(true);
     });
 
     it("lexes a hostile brace word in linear time", () => {
       const cmd = `echo ${"{a,b}".repeat(5)}{${",".repeat(50_000)}`;
-      const t0 = performance.now();
-      bash(cmd);
-      expect(performance.now() - t0).toBeLessThan(1000);
+      for (const c of [cmd, `echo {${".".repeat(49_000)}`, `echo ${"{".repeat(20_000)}`]) {
+        const t0 = performance.now();
+        bash(c);
+        expect(performance.now() - t0).toBeLessThan(1000);
+      }
     });
+  });
+
+  describe("second review (#37)", () => {
+    const pad = "x".repeat(1100);
+    cases(
+      [
+        // globs with a quoted part still glob
+        'rm -rf "d"*',
+        'rm -rf d"o"c*',
+        "rm -rf ''d*",
+        'rm -rf "do"?s',
+        'rm -rf "docs"/*',
+        'rm "architecture".*',
+        'rm -rf "."git*',
+        'mv "d"* /tmp',
+        'find "d"* -delete',
+        'X=d; rm -rf "$X"*',
+        // ranges next to commas, glob as a command
+        "rm -rf {d,x}{o..o}cs",
+        "rm -rf {x,d}o{c..c}s",
+        "{r..r}m architecture.json",
+        // long literal values stay whole
+        `X="${pad} docs"; rm -rf $X`,
+        `X="${pad} architecture.json"; rm $X`,
+        `X="docs ${pad}"; rm -rf $X`,
+        // glob and magic pathspecs after a rewind
+        "git reset abc1234 && git checkout -- '*.json'",
+        "git reset abc1234 && git checkout -- 'scri*'",
+        "git reset abc1234 && git checkout -- './*'",
+        "git reset abc1234 && git checkout -- '**'",
+        "git reset abc1234 && git checkout -- ':(glob)**'",
+        "git reset abc1234 && git checkout -- ':/*'",
+        "git reset abc1234 && git checkout -- ':(top,glob)*'",
+        "git reset abc1234 && git checkout -- d*",
+        "git reset abc1234 && git restore -- '*.json'",
+        "git reset abc1234 && git checkout -- ':(top)architecture.json'",
+        // printf
+        `printf 'rm architecture.js'"on" | sh`,
+        "X=$(printf 'architecture.%s' json); rm $X",
+        "X=$(printf 'a.%s' txt); rm $X",
+        "printf -v X 'architecture.%s' json; rm $X",
+        'X=$(printf "docs"); rm -rf "$X"',
+      ],
+      [
+        "rm -rf 'd*'",
+        "rm -rf '*'",
+        'rm -rf "*"',
+        "rm -rf 'do'cx",
+        "rm -rf {a,b}{1..3}x",
+        "[ -f architecture.json ] && echo yes",
+        `X="${pad}"; echo $X`,
+        "git reset abc1234 && git checkout -- src/x.ts",
+        "git reset abc1234 && git checkout -- ':(exclude)docs'",
+        "git reset abc1234 && git checkout -- 'src/*.ts'",
+        "git checkout @{-1}",
+        "git switch @{-1}",
+        "X=$(printf 'a.%s' txt); echo $X architecture.json",
+      ],
+    );
   });
 });

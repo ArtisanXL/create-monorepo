@@ -1593,7 +1593,7 @@ export function check(snapshot) {
   return errors;
 }
 
-=== scripts/guard-rules.mjs (40117 bytes) ===
+=== scripts/guard-rules.mjs (41938 bytes) ===
 // The guard hook's decision, free of I/O: no stdin, env, filesystem or exit. The first matching
 // rule wins, so each message stays the same as it always was. Imported by .claude/hooks/guard.mjs.
 import path from "node:path";
@@ -1748,7 +1748,9 @@ const MSG = {
   findRoot:
     "find would delete from the project root, which covers protected paths; start the search in a subfolder (`find src -name x -delete`) instead.",
   formatted:
-    "Text formatted at run time (printf with a format, echo -e with escapes) is piped into a shell or interpreter, so the guard cannot see the command. Write the command out directly instead.",
+    "Text formatted at run time (printf, echo -e with escapes) is piped into a shell or interpreter, so the guard cannot see the command. Write the command out directly instead.",
+  printfVar:
+    "A variable built with printf names the target of a delete or move; the guard cannot see its value. Write the path out directly instead.",
   rewind:
     "git reset / checkout / switch / read-tree to another revision, or a whole-tree restore after one, rewrites protected files too; only humans may do that. Branch switches, `git checkout -b <name>` and path checkouts are fine.",
   complex: "Command is too complex for the guard to check; split it into simpler commands.",
@@ -1804,7 +1806,7 @@ function globHitsProtected(contract, rel) {
 const HEAD_ONLY = /^(?:HEAD|@)?$/;
 const CURRENT = /^(?:HEAD|@)@?(?:\{0\})?$/;
 const isRevision = (t) =>
-  !t.startsWith(":") && !CURRENT.test(t) && /^[0-9a-f]{7,40}$|^ORIG_HEAD|^FETCH_HEAD|^refs\/|[~^]|@\{/i.test(t);
+  !t.startsWith(":") && !CURRENT.test(t) && !/^@\{-\d+\}$/.test(t) && /^[0-9a-f]{7,40}$|^ORIG_HEAD|^FETCH_HEAD|^refs\/|[~^]|@\{/i.test(t);
 // Whole-tree pathspecs: `.`, `:/`, `*`, `:(top)`.
 const WHOLE_TREE = /^(?:\.\/?|:\/\.?|\*|:\(top\)[.*]?)$/;
 
@@ -1839,6 +1841,16 @@ function checksOutRevision(g, rest) {
   const creates = g.flags.some((x) => /^-[A-Za-z]*[bB]$|^--orphan$/.test(x));
   if (g.flags.includes("--detach") && g.operands.some((o) => !HEAD_ONLY.test(o.text))) return true;
   return revs.length > 0 && g.operands.length - revs.length <= (creates ? 1 : 0);
+}
+
+/** A glob or `:(magic)` pathspec as a path, and whether it is relative to the project root; undefined for exclusions and plain paths. */
+function pathspec(t) {
+  const m = /^:(?:\(([^)]*)\)|([/!^]?))(.*)$/s.exec(t);
+  if (!m) return GLOB.test(t) ? { path: t, top: false, magic: false } : undefined;
+  const words = (m[1] ?? "").split(",");
+  if (words.includes("exclude") || m[2] === "!" || m[2] === "^") return undefined;
+  const path = m[3] === "" ? "." : m[3];
+  return { path, top: words.includes("top") || m[2] === "/", magic: true };
 }
 
 function gitRule(env, words, bases, parsed) {
@@ -1884,6 +1896,14 @@ function gitRule(env, words, bases, parsed) {
   const force = sub === "checkout" && g.flags.some((x) => /^-[A-Za-z]*f|^--force$/.test(x)) && g.operands.every((o) => HEAD_ONLY.test(o.text));
   if ((dots.length || force) && rewinds(env, parsed)) return MSG.rewind;
   if (sub === "checkout" && checksOutRevision(g, args.slice(i + 1))) return MSG.rewind;
+  // After a rewind a glob or magic pathspec restores whatever it matches from the rewound index.
+  if ((sub === "checkout" || sub === "restore") && rewinds(env, parsed))
+    for (const o of g.operands) {
+      const spec = pathspec(o.text);
+      if (!spec) continue;
+      const rels = relsOf([spec.path], spec.top ? [env.root] : gb);
+      if (rels.some((r) => (GLOB.test(r) ? globHitsProtected(contract, r) : spec.magic && (isProtectedOrDir(contract, r) || holdsProtected(contract, r))))) return MSG.rewind;
+    }
   const fromRev =
     (sub === "checkout" && g.operands.length > dots.length) ||
     (sub === "restore" && g.flags.some((x) => /^(?:--source|-s)/.test(x)));
@@ -1935,10 +1955,18 @@ function removeRule(env, c) {
   const holds = env.relsOf(sources, c.bases).some((r) => holdsProtected(env.contract, r));
   if (holds || (c.name === "rm" && env.relsOf(sources, c.tight, true).includes(""))) return MSG.folder;
   // A glob (`rm -rf d*`) is resolved against the directory the command really runs in, not every `cd` that might have failed.
-  // A quoted word is a literal name.
+  // Only unquoted metacharacters glob; a quoted `'*'` is a literal name.
   const recursiveRm = c.name !== "rm" || flags.some((x) => /^-[A-Za-z]*[rR]|^--recursive$/.test(x));
-  const globs = sources.filter((w) => !w.quoted && GLOB.test(w.text ?? w));
+  const globs = sources.filter((w) => w.glob);
   return env.relsOf(globs, c.tight).some((r) => shellGlobHits(env.contract, r, recursiveRm)) ? MSG.glob : undefined;
+}
+
+/** Variables the line sets from printf: `X=$(printf ...)`, `X=`printf ...``, `printf -v X ...`. */
+function printfNames(cmd) {
+  if (!cmd.includes("printf")) return [];
+  const out = [];
+  for (const m of cmd.matchAll(/(?:^|[\s;&|(])([A-Za-z_]\w*)\+?=["']?(?:\$\(|`)\s*printf\b|\bprintf\s+-v\s*([A-Za-z_]\w*)/g)) out.push(m[1] ?? m[2]);
+  return out;
 }
 
 const DELETERS = new Set(["rm", "mv", "shred", "unlink", "rmdir"]);
@@ -1958,7 +1986,7 @@ function bulkRule(env, c) {
     // The search covers every protected path when it starts at the project root (or nowhere: the default is `.`).
     if (relsOf(start.length ? start : ["."], c.tight, true).includes("")) return MSG.findRoot;
     if (relsOf(start, c.bases).some((r) => isProtectedOrDir(contract, r) || holdsProtected(contract, r))) return MSG.folder;
-    return relsOf(start.filter((w) => !w.quoted && GLOB.test(w.text)), c.tight).some((r) => shellGlobHits(contract, r, true)) ? MSG.glob : undefined;
+    return relsOf(start.filter((w) => w.glob), c.tight).some((r) => shellGlobHits(contract, r, true)) ? MSG.glob : undefined;
   }
   if (c.name === "rsync") {
     const { flags, operands } = splitArgs(c.args);
@@ -2028,7 +2056,8 @@ function fallbackRule(env, parsed, idx, writeRels) {
   });
   const writer = at < 0 ? undefined : s.words[at];
   const head = s.words.find((w) => !KEYWORDS.has(w.text));
-  if (!writer && !head?.text.startsWith("$") && !head?.fromVar) return undefined;
+  // A glob in command position (`{r..r}m` is `*m`) may name any command.
+  if (!writer && !head?.text.startsWith("$") && !head?.fromVar && !(head?.glob && /[*?]/.test(head.text))) return undefined;
   const wname = writer ? word(writer) : "";
   const after = s.words.slice(at < 0 ? 1 : at + 1);
   const prev = idx > s.pipeStart ? parsed.segments[idx - 1] : undefined;
@@ -2072,8 +2101,8 @@ const INTERP_WRITE = new RegExp(
 );
 // A recursive delete, `-delete`, `--delete` or a move: with a folder that holds protected paths it destroys them.
 const FOLDER_DELETE = /\brm[ \t]+(?:-\S+[ \t]+){0,5}?-[A-Za-z]*[rR]|\brm\b.{0,20}--recursive|[ \t]-delete\b|--delete|\bmv\b|\brmdir\b/;
-// Text formatted at run time: printf with a format or escape, `echo -e` with an escape.
-const FORMATTED = /\bprintf\b[^|;&\n]*[%\\]|\becho[ \t]+-[A-Za-z]*e[^|;&\n]*\\/;
+// Text formatted at run time: any printf, `echo -e` with an escape.
+const FORMATTED = /\bprintf\b|\becho[ \t]+-[A-Za-z]*e[^|;&\n]*\\/;
 // Decoders and decompressors; their output piped into a shell or interpreter cannot be inspected.
 const DECODER =
   /\b(?:base64|base32|basenc)\b.{0,40}?(?:[ \t]-[A-Za-z]*[dD]\b|--decode)|\bxxd\b.{0,40}?[ \t]-[A-Za-z]*r|\bopenssl\b.{0,40}?[ \t]-d\b|\b(?:gunzip|gzcat|zcat|bzcat|xzcat|unxz|bunzip2|unzstd|zstdcat|uudecode)\b|\b(?:gzip|bzip2|xz|zstd)\b.{0,30}?[ \t]-[A-Za-z]*d[A-Za-z]*\b/;
@@ -2223,6 +2252,7 @@ function directRule(ctx, cmd, parsed) {
     });
     const msg = removeRule(env, c) ?? bulkRule(env, c);
     if (msg) return msg;
+    if (DELETERS.has(c.name) && printfNames(cmd).some((n) => c.args.some((a) => new RegExp(`\\$(?:${n}\\b|\\{${n}[}:#%/^,@\\[+-])`).test(a.text)))) return MSG.printfVar;
   }
   const runtimeMsg = runtimeTextRule(env, cmd, parsed);
   if (runtimeMsg) return runtimeMsg;
@@ -2293,7 +2323,7 @@ export function decide({ tool, input, contract, root, home = "~", claudeMdText, 
   return message === undefined ? { allow: true } : { allow: false, message };
 }
 
-=== scripts/shell-lex.mjs (27486 bytes) ===
+=== scripts/shell-lex.mjs (27792 bytes) ===
 // The shell lexer and command segmenter behind the guard: splits a command line into simple commands,
 // redirects, heredocs and nested command strings, and works out where each runs. It knows nothing about
 // the architecture contract. Imported by guard-rules.mjs.
@@ -2620,6 +2650,7 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
     } else {
       grow().text += c;
       if (c === "{") cur.brace = true;
+      if (c === "*" || c === "?" || c === "[") cur.glob = true;
     }
   }
   end("");
@@ -2752,7 +2783,6 @@ function expandVars(text, vars, budget) {
 // Keywords after which a command runs only on some paths.
 const BRANCH_KEYWORDS = new Set(["then", "else", "elif", "do"]);
 const BRACE_GROUP = /(?<![$\\])\{([^{}]*)\}/g;
-const BRACE_RANGE = /(?<![$\\])\{[^{}]*\.\.[^{}]*\}/g;
 const MAX_BRACE_WORDS = 64;
 
 // The first `{a,b}` group of a word, found without backtracking: `[^{}]*` cannot cross another brace.
@@ -2763,29 +2793,32 @@ function commaGroup(t) {
 
 /**
  * Brace expansion of a word with an unquoted `{` (`{r,}m` is `rm` and `m`). A `{x..y}` range stands for
- * anything, so it becomes a `*` glob. A word that would expand past the cap spends the whole budget.
+ * anything, so it becomes a `*` glob (and the word is a glob). A word that would expand past the cap spends
+ * the whole budget.
  */
 function braceWords(w, budget) {
   if (!w.brace || ASSIGN_WORD.test(w.text)) return [w];
-  const ranged = w.text.replace(BRACE_RANGE, "*");
-  if (ranged !== w.text) return [{ ...w, text: ranged, quoted: false }];
+  const text = w.text.replace(BRACE_GROUP, (m, g) => (g.includes("..") ? "*" : m));
+  const ranged = text !== w.text;
   let calls = 0;
   const expand = (t) => {
     const m = commaGroup(t);
     if (!m || ++calls > MAX_BRACE_WORDS) return [t];
     return m[1].split(",").flatMap((alt) => expand(t.slice(0, m.index) + alt + t.slice(m.index + m[0].length)));
   };
-  const out = expand(w.text);
+  const out = expand(text);
   if (calls > MAX_BRACE_WORDS) {
     budget.left = -1;
     return [w];
   }
-  return out.length > 1 ? out.map((text) => ({ ...w, text })) : [w];
+  if (out.length === 1 && !ranged) return [w];
+  return out.map((t) => (ranged ? { ...w, text: t, glob: true } : { ...w, text: t }));
 }
 
 // A value that no longer fits is not cut (the dropped part would go unchecked): the whole line counts as too complex.
-const fits = (value, budget) => {
-  if (value.length > MAX_VAR_LENGTH) budget.left = -1;
+// Only text that grew through `$` expansion is capped: literal text is bounded by the command itself.
+const fits = (value, budget, expanded) => {
+  if (expanded && value.length > MAX_VAR_LENGTH) budget.left = -1;
   return value;
 };
 
@@ -2796,8 +2829,8 @@ const fits = (value, budget) => {
  * so `$NAME` stays unexpanded and the rules for variables of unknown value apply. `for NAME in a b` and
  * `read NAME <<< text` (also `while read NAME; do ...; done <<< text`, passed as `loopInput`) set NAME to
  * every value it can take; an assignment that runs only on some paths (`a && X=1 || X=2`, `then X=1`) adds
- * its value to the earlier ones instead of replacing them. Lists and accumulated values that outgrow
- * MAX_VAR_LENGTH spend the budget; a plain assignment that long is forgotten.
+ * its value to the earlier ones instead of replacing them. A value that grew through `$` expansion past
+ * MAX_VAR_LENGTH spends the budget; literal text is kept whole.
  * Words with an unquoted `{` are brace-expanded first. Returns false once the expansion budget is spent.
  */
 function applyVars(seg, vars, budget, conditional = false, loopInput = undefined) {
@@ -2809,13 +2842,14 @@ function applyVars(seg, vars, budget, conditional = false, loopInput = undefined
   if (rest.length && rest.every((w) => ASSIGN_WORD.test(w.text))) {
     for (const w of rest) {
       const m = ASSIGN_WORD.exec(w.text);
-      const value = expandVars(w.text.slice(m[0].length), vars, budget);
+      const raw = w.text.slice(m[0].length);
+      const value = expandVars(raw, vars, budget);
+      const grew = raw.includes("$");
       const old = vars.get(m[1]);
       if (w.dyn || (m[2] && old === undefined)) vars.delete(m[1]);
-      else if (m[2]) vars.set(m[1], fits(old + value, budget));
-      else if (conditional && old !== undefined && old !== value) vars.set(m[1], fits(`${old} ${value}`, budget));
-      else if (value.length > MAX_VAR_LENGTH) vars.delete(m[1]);
-      else vars.set(m[1], value);
+      else if (m[2]) vars.set(m[1], fits(old + value, budget, grew));
+      else if (conditional && old !== undefined && old !== value) vars.set(m[1], fits(`${old} ${value}`, budget, grew));
+      else vars.set(m[1], fits(value, budget, grew));
     }
     return budget.left >= 0;
   }
@@ -2830,17 +2864,17 @@ function applyVars(seg, vars, budget, conditional = false, loopInput = undefined
     const text = expandVars(w.text, vars, budget);
     if (text === w.text || budget.left < 0) return [w];
     const parts = text.split(/\s+/).filter(Boolean);
-    return (parts.length ? parts : [""]).map((t) => ({ ...w, text: t, fromVar: true }));
+    return (parts.length ? parts : [""]).map((t) => ({ ...w, text: t, fromVar: true, glob: w.glob || /[*?[]/.test(t) }));
   });
   for (const r of seg.redirs) r.target = expandVars(r.target, vars, budget);
   for (const r of seg.inputs) r.target = expandVars(r.target, vars, budget);
   const names = seg.words.slice(at + 1).filter((w) => /^[A-Za-z_]\w*$/.test(w.text));
   if (setter === "for" && seg.words[at + 2]?.text === "in") {
     const items = seg.words.slice(at + 3);
-    if (!items.some((w) => w.dyn || w.text.includes("$"))) vars.set(seg.words[at + 1].text, fits(items.map((w) => w.text).join(" "), budget));
+    if (!items.some((w) => w.dyn || w.text.includes("$"))) vars.set(seg.words[at + 1].text, fits(items.map((w) => w.text).join(" "), budget, items.some((w) => w.fromVar)));
   } else if (setter === "read") {
     const here = seg.inputs.find((x) => x.op === "<<<") ?? (loopInput ? { target: expandVars(loopInput.target, vars, budget), dyn: loopInput.dyn } : undefined);
-    if (here && !here.dyn && !here.target.includes("$")) for (const n of names) vars.set(n.text, fits(here.target, budget));
+    if (here && !here.dyn && !here.target.includes("$")) for (const n of names) vars.set(n.text, fits(here.target, budget, false));
   }
   return budget.left >= 0;
 }

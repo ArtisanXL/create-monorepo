@@ -152,7 +152,9 @@ const MSG = {
   findRoot:
     "find would delete from the project root, which covers protected paths; start the search in a subfolder (`find src -name x -delete`) instead.",
   formatted:
-    "Text formatted at run time (printf with a format, echo -e with escapes) is piped into a shell or interpreter, so the guard cannot see the command. Write the command out directly instead.",
+    "Text formatted at run time (printf, echo -e with escapes) is piped into a shell or interpreter, so the guard cannot see the command. Write the command out directly instead.",
+  printfVar:
+    "A variable built with printf names the target of a delete or move; the guard cannot see its value. Write the path out directly instead.",
   rewind:
     "git reset / checkout / switch / read-tree to another revision, or a whole-tree restore after one, rewrites protected files too; only humans may do that. Branch switches, `git checkout -b <name>` and path checkouts are fine.",
   complex: "Command is too complex for the guard to check; split it into simpler commands.",
@@ -208,7 +210,7 @@ function globHitsProtected(contract, rel) {
 const HEAD_ONLY = /^(?:HEAD|@)?$/;
 const CURRENT = /^(?:HEAD|@)@?(?:\{0\})?$/;
 const isRevision = (t) =>
-  !t.startsWith(":") && !CURRENT.test(t) && /^[0-9a-f]{7,40}$|^ORIG_HEAD|^FETCH_HEAD|^refs\/|[~^]|@\{/i.test(t);
+  !t.startsWith(":") && !CURRENT.test(t) && !/^@\{-\d+\}$/.test(t) && /^[0-9a-f]{7,40}$|^ORIG_HEAD|^FETCH_HEAD|^refs\/|[~^]|@\{/i.test(t);
 // Whole-tree pathspecs: `.`, `:/`, `*`, `:(top)`.
 const WHOLE_TREE = /^(?:\.\/?|:\/\.?|\*|:\(top\)[.*]?)$/;
 
@@ -243,6 +245,16 @@ function checksOutRevision(g, rest) {
   const creates = g.flags.some((x) => /^-[A-Za-z]*[bB]$|^--orphan$/.test(x));
   if (g.flags.includes("--detach") && g.operands.some((o) => !HEAD_ONLY.test(o.text))) return true;
   return revs.length > 0 && g.operands.length - revs.length <= (creates ? 1 : 0);
+}
+
+/** A glob or `:(magic)` pathspec as a path, and whether it is relative to the project root; undefined for exclusions and plain paths. */
+function pathspec(t) {
+  const m = /^:(?:\(([^)]*)\)|([/!^]?))(.*)$/s.exec(t);
+  if (!m) return GLOB.test(t) ? { path: t, top: false, magic: false } : undefined;
+  const words = (m[1] ?? "").split(",");
+  if (words.includes("exclude") || m[2] === "!" || m[2] === "^") return undefined;
+  const path = m[3] === "" ? "." : m[3];
+  return { path, top: words.includes("top") || m[2] === "/", magic: true };
 }
 
 function gitRule(env, words, bases, parsed) {
@@ -288,6 +300,14 @@ function gitRule(env, words, bases, parsed) {
   const force = sub === "checkout" && g.flags.some((x) => /^-[A-Za-z]*f|^--force$/.test(x)) && g.operands.every((o) => HEAD_ONLY.test(o.text));
   if ((dots.length || force) && rewinds(env, parsed)) return MSG.rewind;
   if (sub === "checkout" && checksOutRevision(g, args.slice(i + 1))) return MSG.rewind;
+  // After a rewind a glob or magic pathspec restores whatever it matches from the rewound index.
+  if ((sub === "checkout" || sub === "restore") && rewinds(env, parsed))
+    for (const o of g.operands) {
+      const spec = pathspec(o.text);
+      if (!spec) continue;
+      const rels = relsOf([spec.path], spec.top ? [env.root] : gb);
+      if (rels.some((r) => (GLOB.test(r) ? globHitsProtected(contract, r) : spec.magic && (isProtectedOrDir(contract, r) || holdsProtected(contract, r))))) return MSG.rewind;
+    }
   const fromRev =
     (sub === "checkout" && g.operands.length > dots.length) ||
     (sub === "restore" && g.flags.some((x) => /^(?:--source|-s)/.test(x)));
@@ -339,10 +359,18 @@ function removeRule(env, c) {
   const holds = env.relsOf(sources, c.bases).some((r) => holdsProtected(env.contract, r));
   if (holds || (c.name === "rm" && env.relsOf(sources, c.tight, true).includes(""))) return MSG.folder;
   // A glob (`rm -rf d*`) is resolved against the directory the command really runs in, not every `cd` that might have failed.
-  // A quoted word is a literal name.
+  // Only unquoted metacharacters glob; a quoted `'*'` is a literal name.
   const recursiveRm = c.name !== "rm" || flags.some((x) => /^-[A-Za-z]*[rR]|^--recursive$/.test(x));
-  const globs = sources.filter((w) => !w.quoted && GLOB.test(w.text ?? w));
+  const globs = sources.filter((w) => w.glob);
   return env.relsOf(globs, c.tight).some((r) => shellGlobHits(env.contract, r, recursiveRm)) ? MSG.glob : undefined;
+}
+
+/** Variables the line sets from printf: `X=$(printf ...)`, `X=`printf ...``, `printf -v X ...`. */
+function printfNames(cmd) {
+  if (!cmd.includes("printf")) return [];
+  const out = [];
+  for (const m of cmd.matchAll(/(?:^|[\s;&|(])([A-Za-z_]\w*)\+?=["']?(?:\$\(|`)\s*printf\b|\bprintf\s+-v\s*([A-Za-z_]\w*)/g)) out.push(m[1] ?? m[2]);
+  return out;
 }
 
 const DELETERS = new Set(["rm", "mv", "shred", "unlink", "rmdir"]);
@@ -362,7 +390,7 @@ function bulkRule(env, c) {
     // The search covers every protected path when it starts at the project root (or nowhere: the default is `.`).
     if (relsOf(start.length ? start : ["."], c.tight, true).includes("")) return MSG.findRoot;
     if (relsOf(start, c.bases).some((r) => isProtectedOrDir(contract, r) || holdsProtected(contract, r))) return MSG.folder;
-    return relsOf(start.filter((w) => !w.quoted && GLOB.test(w.text)), c.tight).some((r) => shellGlobHits(contract, r, true)) ? MSG.glob : undefined;
+    return relsOf(start.filter((w) => w.glob), c.tight).some((r) => shellGlobHits(contract, r, true)) ? MSG.glob : undefined;
   }
   if (c.name === "rsync") {
     const { flags, operands } = splitArgs(c.args);
@@ -432,7 +460,8 @@ function fallbackRule(env, parsed, idx, writeRels) {
   });
   const writer = at < 0 ? undefined : s.words[at];
   const head = s.words.find((w) => !KEYWORDS.has(w.text));
-  if (!writer && !head?.text.startsWith("$") && !head?.fromVar) return undefined;
+  // A glob in command position (`{r..r}m` is `*m`) may name any command.
+  if (!writer && !head?.text.startsWith("$") && !head?.fromVar && !(head?.glob && /[*?]/.test(head.text))) return undefined;
   const wname = writer ? word(writer) : "";
   const after = s.words.slice(at < 0 ? 1 : at + 1);
   const prev = idx > s.pipeStart ? parsed.segments[idx - 1] : undefined;
@@ -476,8 +505,8 @@ const INTERP_WRITE = new RegExp(
 );
 // A recursive delete, `-delete`, `--delete` or a move: with a folder that holds protected paths it destroys them.
 const FOLDER_DELETE = /\brm[ \t]+(?:-\S+[ \t]+){0,5}?-[A-Za-z]*[rR]|\brm\b.{0,20}--recursive|[ \t]-delete\b|--delete|\bmv\b|\brmdir\b/;
-// Text formatted at run time: printf with a format or escape, `echo -e` with an escape.
-const FORMATTED = /\bprintf\b[^|;&\n]*[%\\]|\becho[ \t]+-[A-Za-z]*e[^|;&\n]*\\/;
+// Text formatted at run time: any printf, `echo -e` with an escape.
+const FORMATTED = /\bprintf\b|\becho[ \t]+-[A-Za-z]*e[^|;&\n]*\\/;
 // Decoders and decompressors; their output piped into a shell or interpreter cannot be inspected.
 const DECODER =
   /\b(?:base64|base32|basenc)\b.{0,40}?(?:[ \t]-[A-Za-z]*[dD]\b|--decode)|\bxxd\b.{0,40}?[ \t]-[A-Za-z]*r|\bopenssl\b.{0,40}?[ \t]-d\b|\b(?:gunzip|gzcat|zcat|bzcat|xzcat|unxz|bunzip2|unzstd|zstdcat|uudecode)\b|\b(?:gzip|bzip2|xz|zstd)\b.{0,30}?[ \t]-[A-Za-z]*d[A-Za-z]*\b/;
@@ -627,6 +656,7 @@ function directRule(ctx, cmd, parsed) {
     });
     const msg = removeRule(env, c) ?? bulkRule(env, c);
     if (msg) return msg;
+    if (DELETERS.has(c.name) && printfNames(cmd).some((n) => c.args.some((a) => new RegExp(`\\$(?:${n}\\b|\\{${n}[}:#%/^,@\\[+-])`).test(a.text)))) return MSG.printfVar;
   }
   const runtimeMsg = runtimeTextRule(env, cmd, parsed);
   if (runtimeMsg) return runtimeMsg;
