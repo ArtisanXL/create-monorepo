@@ -15,14 +15,16 @@ you did not pass on the command line.
 ## Usage
 
 ```text
-create-monorepo <target-dir> [--scope @app] [--db-prefix app] [--pm pnpm] [--no-install] [-y|--yes]
+create-monorepo <target-dir> [--apps api,web,worker|none] [--packages domain,contracts,db,core] [--scope @app] [--db-prefix app] [--pm pnpm] [--no-install] [-y|--yes]
 ```
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `<target-dir>` | required | Directory to scaffold into. Created if missing. |
+| `--apps` | all (`api,web,worker`) | Apps to generate; `none` for a packages-only repo. Their dependencies are added automatically (the Closure). |
+| `--packages` | none extra | Extra packages to add to the Closure (`domain`, `contracts`, `db`, `core`); packages can be added, never removed from it. |
 | `--scope` | `@<dir-name>` in the wizard, `@app` otherwise | npm scope of the workspace packages. |
-| `--db-prefix` | derived from the scope | Postgres database name prefix (`^[a-z][a-z0-9_]{0,29}$`, no `_wt`). |
+| `--db-prefix` | derived from the scope | Postgres database name prefix (`^[a-z][a-z0-9_]{0,29}$`, no `_wt`). An error without `db` in the Closure. |
 | `--pm` | detected from how you ran it, else `pnpm` | Package manager. `0.1.x` supports `pnpm` only. |
 | `--no-install` | install on | Skip install, formatting and `verify`. |
 | `-y`, `--yes` | off | Accept defaults for everything not given; never prompt. |
@@ -31,6 +33,13 @@ create-monorepo <target-dir> [--scope @app] [--db-prefix app] [--pm pnpm] [--no-
 prefix, package manager and whether to install. Invalid input is rejected and asked again. If the
 target directory is not empty, it asks for confirmation first: only missing files are added and
 existing files are never touched. Ctrl-C at any prompt exits without writing anything.
+
+**Selectable components.** The wizard asks which apps to generate (all checked), then which extra
+packages outside their Closure to add. `web` is connected to the API (`hc<AppType>`, React Query)
+only when `api` is in the Closure; otherwise it is a standalone React SPA. Without `db`, no
+Postgres or worktree infrastructure is generated. Built-in components left out are recorded under
+`architecture.json > deferred`. Re-running on a repo that has `architecture.json` keeps its
+Selection; a conflicting `--apps`/`--packages` is an error. See `docs/adr/0004-selectable-components.md`.
 
 **Automation.** When stdin/stdout is not a TTY, `CI` is set, or `--yes` is passed, it never
 prompts. A missing `<target-dir>` is then an error.

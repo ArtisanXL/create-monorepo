@@ -1,6 +1,6 @@
 # 4. Selectable components: Closure-based selection and conditional template blocks
 
-Status: proposed
+Status: accepted
 
 ## Context
 
@@ -35,6 +35,13 @@ Several shared files (root `package.json`, `paseo.json`, `architecture.json`, th
 - The generated repo's ADRs follow the Closure. ADRs owned by an absent Component (job queue →
   `worker`, worktree isolation → `db`) are not generated, and the numbering gaps stay because ADR
   numbers are stable identifiers. The package-boundaries ADR is narrowed with conditional blocks.
+- Directives: `@if <component>`, `@if !<component>`, `@if a b` (all terms hold), `@if a|b` (any of
+  them) and `@else`, each on its own line. In JSON files, when removed lines are followed by a line
+  that closes an object or array, the comma ending the last kept line before them is dropped
+  (line-based; string values are never read).
+- The root `package.json` template is named `package.json.tmpl` (the suffix is dropped on output):
+  it is not valid JSON before its blocks are resolved, and tools that import
+  `templates/root/scripts/*.mjs` read the nearest `package.json`. Other templates keep their names.
 - On a target that already has `architecture.json`, the Selection is read from it. A conflicting
   `--apps`/`--packages` is an error.
 

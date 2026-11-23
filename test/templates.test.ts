@@ -1,8 +1,9 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { catalogPackages, listTemplateFiles } from "../src/templates.ts";
+import { checkBlocks } from "../src/blocks.ts";
+import { catalogPackages, listTemplateFiles, TEMPLATES_DIR } from "../src/templates.ts";
 
 let dir: string | undefined;
 afterEach(async () => {
@@ -82,5 +83,26 @@ describe("listTemplateFiles", () => {
       "scripts/arch-check.mjs",
       "scripts/worktree.mjs",
     ]);
+  });
+});
+
+describe("conditional blocks in the real templates", () => {
+  it("are balanced and name only known components, in every template", async () => {
+    const files = [
+      ...(await listTemplateFiles()),
+      {
+        dest: "claude-md/block.md",
+        text: await readFile(`${TEMPLATES_DIR}claude-md/block.md`, "utf8"),
+      },
+    ];
+    for (const f of files) expect(checkBlocks(f.text), f.dest).toEqual([]);
+  });
+
+  it("keep root/package.json out of tools that read it as a package scope (.tmpl)", async () => {
+    const dests = (await listTemplateFiles()).map((f) => f.dest);
+    expect(dests).toContain("package.json");
+    expect((await listTemplateFiles()).find((f) => f.dest === "package.json")?.src).toBe(
+      "root/package.json.tmpl",
+    );
   });
 });

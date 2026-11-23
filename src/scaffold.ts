@@ -1,7 +1,9 @@
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { resolveBlocks } from "./blocks.ts";
 import { claudeBlockHash, hasBlock, upsertBlock } from "./claude-md.ts";
+import { closureOf, FULL_SELECTION, isGenerated, type Selection } from "./components.ts";
 import type { Command, PackageManagerAdapter } from "./pm/types.ts";
 import { catalogPackagesOf, listTemplateFiles, TEMPLATES_DIR } from "./templates.ts";
 
@@ -11,6 +13,8 @@ export interface Options {
   dbPrefix: string;
   install: boolean;
   nodeMajor: number;
+  /** What to generate the Closure from; defaults to every Component. */
+  selection?: Selection;
 }
 
 export interface Deps {
@@ -130,12 +134,21 @@ export async function gather(
   view: TargetView,
 ): Promise<Gathered> {
   const { pm } = deps;
-  const templates = (await listTemplateFiles()).map(({ dest, text, executable }) => ({
-    dest,
-    text,
-    executable,
-  }));
-  const blockText = await readFile(join(TEMPLATES_DIR, "claude-md", "block.md"), "utf8");
+  const closure = closureOf(options.selection ?? FULL_SELECTION);
+  // Only the Closure's files exist, and their `@if` blocks are resolved here, before anything
+  // else reads the text (the catalog, the token filling).
+  const templates = (await listTemplateFiles())
+    .filter(({ dest }) => isGenerated(dest, closure))
+    .map(({ dest, text, executable }) => ({
+      dest,
+      text: resolveBlocks(text, closure, dest),
+      executable,
+    }));
+  const blockText = resolveBlocks(
+    await readFile(join(TEMPLATES_DIR, "claude-md", "block.md"), "utf8"),
+    closure,
+    "claude-md/block.md",
+  );
 
   const existing = new Set<string>();
   for (const rel of [...templates.map((t) => t.dest), ...pm.files]) {

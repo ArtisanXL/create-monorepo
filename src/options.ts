@@ -1,10 +1,24 @@
 import { basename, resolve } from "node:path";
 import { parseArgs } from "node:util";
+import {
+  APP_NAMES,
+  type AppName,
+  closureOf,
+  FULL_SELECTION,
+  isAppName,
+  isComponentName,
+  isPackageName,
+  PACKAGE_NAMES,
+  type PackageName,
+  type Selection,
+  sameClosure,
+  selectionOf,
+} from "./components.ts";
 import { isPmName, PM_NAMES, type PmName } from "./pm/index.ts";
 import type { Options } from "./scaffold.ts";
 
 export const USAGE =
-  "Usage: create-monorepo <target-dir> [--scope @app] [--db-prefix app] [--pm pnpm] [--no-install] [-y|--yes]";
+  "Usage: create-monorepo <target-dir> [--apps api,web,worker|none] [--packages domain,contracts,db,core] [--scope @app] [--db-prefix app] [--pm pnpm] [--no-install] [-y|--yes]";
 
 /** A user-facing input error; the CLI maps it to a non-zero exit code. */
 export class OptionsError extends Error {
@@ -43,6 +57,12 @@ export interface Prompter {
     defaultValue: string,
   ): Promise<string | Cancel>;
   confirm(message: string, defaultValue: boolean): Promise<boolean | Cancel>;
+  /** Pick any number of `choices` (including none); `initial` are pre-checked. */
+  multiselect(
+    message: string,
+    choices: readonly string[],
+    initial: readonly string[],
+  ): Promise<string[] | Cancel>;
 }
 
 /** Filesystem inspection seam. */
@@ -50,9 +70,14 @@ export interface FsProbe {
   exists(path: string): Promise<boolean>;
   /** True when the path is a directory containing at least one entry. */
   isNonEmptyDir(path: string): Promise<boolean>;
+  /** The file's text, or undefined when it does not exist. */
+  readText(path: string): Promise<string | undefined>;
 }
 
-export type ResolvedOptions = Omit<Options, "nodeMajor"> & { pm: PmName };
+export type ResolvedOptions = Omit<Options, "nodeMajor" | "selection"> & {
+  pm: PmName;
+  selection: Selection;
+};
 
 const DEFAULT_SCOPE = "@app";
 const DB_PREFIX_RE = /^[a-z][a-z0-9_]{0,29}$/;
@@ -116,6 +141,56 @@ const suggestScope = (dirName: string) => {
   return SCOPE_RE.test(`@${name}`) ? `@${name}` : DEFAULT_SCOPE;
 };
 
+/** Parses `--apps`/`--packages`: a comma list of known names, or `none` for an empty list. */
+function parseNames<T extends string>(
+  flag: string,
+  raw: string,
+  known: readonly T[],
+  isKnown: (s: string) => s is T,
+): T[] {
+  const names = raw.split(",").map((n) => n.trim());
+  if (names.length === 1 && names[0] === "none") return [];
+  const bad = names.find((n) => !isKnown(n));
+  if (bad !== undefined) {
+    const hint = isComponentName(bad) ? ` ('${bad}' belongs to the other flag)` : "";
+    throw new OptionsError(
+      `Unknown ${flag} value '${bad}'${hint}. Use a comma list of: ${known.join(", ")} (or 'none')`,
+    );
+  }
+  return [...new Set(names as T[])];
+}
+
+/** The Selection recorded by a generated repo's architecture.json; it must be a closed set. */
+function selectionFromArchitecture(text: string): Selection {
+  const unreadable = (why: string) =>
+    new OptionsError(
+      `architecture.json exists but its Selection ${why}. Changing the Selection of an existing repo needs an accepted ADR (docs/adr/0002-deferred-packages.md); fix the file or scaffold into a new directory.`,
+    );
+  let packages: unknown;
+  try {
+    packages = (JSON.parse(text) as { packages?: unknown } | null)?.packages;
+  } catch {
+    throw unreadable("cannot be read (invalid JSON)");
+  }
+  if (typeof packages !== "object" || packages === null || Array.isArray(packages)) {
+    throw unreadable("cannot be read (`packages` is not an object)");
+  }
+  const names = new Set(Object.keys(packages).map((p) => p.split("/")[1] ?? ""));
+  const selection: Selection = {
+    apps: APP_NAMES.filter((n) => names.has(n)),
+    packages: PACKAGE_NAMES.filter((n) => names.has(n)),
+  };
+  const recorded = new Set<string>([...selection.apps, ...selection.packages]);
+  if (recorded.size === 0) throw unreadable("is empty (no built-in component is declared)");
+  const missing = [...closureOf(selection)].filter((n) => !recorded.has(n));
+  if (missing.length > 0) {
+    throw unreadable(
+      `is not closed: it declares ${[...recorded].join(", ")} but not their dependencies ${missing.join(", ")}`,
+    );
+  }
+  return selection;
+}
+
 export type ParsedArgs = ReturnType<typeof parse>;
 
 /** Parses argv once; an invalid flag throws an OptionsError carrying the usage text. */
@@ -156,6 +231,9 @@ export async function resolveOptions(
     if (!proceed) throw new CancelledError();
   }
 
+  const selection = await resolveSelection(values, targetPath, interactive, prompter, fsProbe);
+  const hasDb = closureOf(selection).has("db");
+
   let scope = values.scope;
   if (scope === undefined) {
     const fallback = suggestScope(basename(targetPath));
@@ -167,14 +245,24 @@ export async function resolveOptions(
   if (badScope) throw new OptionsError(badScope);
 
   let dbPrefix = values["db-prefix"];
-  if (dbPrefix === undefined) {
-    const derived = deriveDbPrefix(scope);
-    dbPrefix = interactive
-      ? await askValid(prompter, "Database prefix", derived, dbPrefixError)
-      : derived;
+  if (!hasDb) {
+    // No database, no worktree databases to name: the flag is an error, the prompt is skipped.
+    if (dbPrefix !== undefined) {
+      throw new OptionsError(
+        "--db-prefix needs the db package, but it is not in the Closure of the Selection (no database infrastructure is generated without it). Add db with --packages db, or drop --db-prefix.",
+      );
+    }
+    dbPrefix = deriveDbPrefix(scope);
+  } else {
+    if (dbPrefix === undefined) {
+      const derived = deriveDbPrefix(scope);
+      dbPrefix = interactive
+        ? await askValid(prompter, "Database prefix", derived, dbPrefixError)
+        : derived;
+    }
+    const badPrefix = dbPrefixError(dbPrefix);
+    if (badPrefix) throw new OptionsError(badPrefix);
   }
-  const badPrefix = dbPrefixError(dbPrefix);
-  if (badPrefix) throw new OptionsError(badPrefix);
 
   let pm = values.pm;
   if (pm === undefined) {
@@ -190,7 +278,77 @@ export async function resolveOptions(
   if (install && interactive)
     install = uncancel(await prompter.confirm("Install dependencies?", true));
 
-  return { target: targetPath, scope, dbPrefix, pm, install };
+  return { target: targetPath, scope, dbPrefix, pm, install, selection };
+}
+
+/**
+ * The Selection to generate. A target that already has architecture.json keeps the Selection it
+ * records; flags may only restate it. Otherwise: flags, then prompts, then everything.
+ */
+async function resolveSelection(
+  values: ParsedArgs["values"],
+  targetPath: string,
+  interactive: boolean,
+  prompter: Prompter,
+  fsProbe: FsProbe,
+): Promise<Selection> {
+  const flagApps =
+    values.apps === undefined ? undefined : parseNames("--apps", values.apps, APP_NAMES, isAppName);
+  const flagPackages =
+    values.packages === undefined
+      ? undefined
+      : parseNames("--packages", values.packages, PACKAGE_NAMES, isPackageName);
+
+  const recorded = await fsProbe.readText(resolve(targetPath, "architecture.json"));
+  if (recorded !== undefined) {
+    const existing = selectionFromArchitecture(recorded);
+    const requested: Selection = {
+      apps: flagApps ?? existing.apps,
+      packages: flagPackages ?? existing.packages,
+    };
+    if (!sameClosure(closureOf(requested), closureOf(existing))) {
+      throw new OptionsError(
+        `--apps/--packages conflict with the existing architecture.json, which has: ${[...closureOf(existing)].join(", ") || "no components"}. Changing the Selection of an existing repo needs an accepted ADR (docs/adr/0002-deferred-packages.md); remove the flags to keep it.`,
+      );
+    }
+    return existing;
+  }
+
+  // Interactive and nothing selected: ask again (like askValid), unless the flags decided it.
+  for (let retry = false; ; retry = true) {
+    const apps: readonly AppName[] =
+      flagApps ??
+      (interactive
+        ? (uncancel(
+            await prompter.multiselect(
+              retry ? "Apps (select at least one app or package)" : "Apps",
+              APP_NAMES,
+              APP_NAMES,
+            ),
+          ) as AppName[])
+        : FULL_SELECTION.apps);
+    let packages: readonly PackageName[] = flagPackages ?? [];
+    if (flagPackages === undefined && interactive) {
+      const inClosure = closureOf({ apps, packages: [] });
+      const extra = PACKAGE_NAMES.filter((n) => !inClosure.has(n));
+      if (extra.length > 0) {
+        packages = uncancel(
+          await prompter.multiselect(
+            "Extra packages (not already required by the apps)",
+            extra,
+            [],
+          ),
+        ) as PackageName[];
+      }
+    }
+    const selection: Selection = { apps, packages };
+    if (closureOf(selection).size > 0) return selectionOf(closureOf(selection));
+    if (!interactive || flagApps !== undefined) {
+      throw new OptionsError(
+        "Nothing selected: pick at least one app or package (--apps, --packages).",
+      );
+    }
+  }
 }
 
 function parse(argv: readonly string[]) {
@@ -198,6 +356,8 @@ function parse(argv: readonly string[]) {
     args: [...argv],
     allowPositionals: true,
     options: {
+      apps: { type: "string" },
+      packages: { type: "string" },
       scope: { type: "string" },
       "db-prefix": { type: "string" },
       pm: { type: "string" },

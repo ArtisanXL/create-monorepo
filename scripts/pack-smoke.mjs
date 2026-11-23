@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { closureOf, FULL_SELECTION, isGenerated } from "../src/components.ts";
 import { listTemplateFiles } from "../src/templates.ts";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -49,9 +50,6 @@ try {
     throw new Error("dist/cli.mjs has no shebang");
   }
 
-  const target = join(work, "generated");
-  run("npx", ["--no-install", "create-monorepo", target, "-y", "--no-install"], consumer);
-
   // Expected files come from the repo tree; the installed package must ship exactly that tree.
   const expected = (await listTemplateFiles()).map((f) => f.dest);
   const shipped = (await listTemplateFiles(join(pkgDir, "templates"))).map((f) => f.dest);
@@ -62,12 +60,43 @@ try {
       `packed templates differ from the repo tree (missing: ${lost.join(", ") || "none"}; unexpected: ${extra.join(", ") || "none"})`,
     );
   }
-  expected.push("pnpm-workspace.yaml", "CLAUDE.md");
-  for (const f of expected) {
-    if (!existsSync(join(target, f))) throw new Error(`generated repo lacks ${f}`);
+
+  const generate = (name, args) => {
+    const target = join(work, name);
+    run("npx", ["--no-install", "create-monorepo", target, "-y", ...args], consumer);
+    return target;
+  };
+  const checkFiles = (target, selection) => {
+    const closure = closureOf(selection);
+    const files = [
+      ...expected.filter((f) => isGenerated(f, closure)),
+      "pnpm-workspace.yaml",
+      "CLAUDE.md",
+    ];
+    for (const f of files) {
+      if (!existsSync(join(target, f))) throw new Error(`${target} lacks ${f}`);
+    }
+    const leftover = readFileSync(join(target, "package.json"), "utf8").match(
+      /__[A-Z_]+__|^@(if|endif)/m,
+    );
+    if (leftover) throw new Error(`unfilled placeholder ${leftover[0]} in generated package.json`);
+  };
+
+  // The default Selection: files only (the repo's own CI runs the full verify on it).
+  checkFiles(generate("default", ["--no-install"]), FULL_SELECTION);
+
+  // The Selections without a database: a real install and `verify` (scaffold runs both).
+  for (const [name, args, selection] of [
+    ["web", ["--apps", "web"], { apps: ["web"], packages: [] }],
+    [
+      "library",
+      ["--apps", "none", "--packages", "domain,contracts"],
+      { apps: [], packages: ["domain", "contracts"] },
+    ],
+  ]) {
+    checkFiles(generate(name, args), selection);
+    console.log(`verify OK: ${name}`);
   }
-  const leftover = readFileSync(join(target, "package.json"), "utf8").match(/__[A-Z_]+__/);
-  if (leftover) throw new Error(`unfilled placeholder ${leftover[0]} in generated package.json`);
   console.log("pack-smoke OK");
 } catch (error) {
   console.error(`pack-smoke FAILED: ${error instanceof Error ? error.message : String(error)}`);

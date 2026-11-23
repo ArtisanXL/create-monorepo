@@ -1,3 +1,4 @@
+import { type Closure, closureOf } from "./components.ts";
 import type { ResolvedOptions } from "./options.ts";
 import {
   CancelledError,
@@ -35,12 +36,21 @@ function formatResult(result: Result, target: string, nextSteps: string): string
   ].join("\n");
 }
 
-function nextSteps(run: string): string {
-  return `Next steps:
-  cp .env.example .env && docker compose up -d
-  ${`${run} dev`.padEnd(31)}# api :3000, web :5173, worker
-  ${".github/CODEOWNERS".padEnd(31)}# assign owners for architecture files
-  git add -A && git commit -m "chore: scaffold"`;
+function nextSteps(run: string, closure: Closure): string {
+  const servers = [
+    closure.has("api") && "api :3000",
+    closure.has("web") && "web :5173",
+    closure.has("worker") && "worker",
+  ].filter(Boolean);
+  return [
+    "Next steps:",
+    closure.has("db") && "  cp .env.example .env && docker compose up -d",
+    servers.length > 0 && `  ${`${run} dev`.padEnd(31)}# ${servers.join(", ")}`,
+    `  ${".github/CODEOWNERS".padEnd(31)}# assign owners for architecture files`,
+    '  git add -A && git commit -m "chore: scaffold"',
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 /** Runs the CLI end to end and returns the process exit code. */
@@ -63,7 +73,8 @@ export async function run(io: RunIo): Promise<number> {
     const resolved = await resolveOptions(parsed, io.env, io.tty, io.prompter, io.fsProbe);
     const deps = io.makeDeps(resolved);
     const result = await scaffold({ ...resolved, nodeMajor }, deps);
-    out(formatResult(result, resolved.target, nextSteps(deps.pm.commands.run.join(" "))));
+    const steps = nextSteps(deps.pm.commands.run.join(" "), closureOf(resolved.selection));
+    out(formatResult(result, resolved.target, steps));
     return 0;
   } catch (error) {
     if (error instanceof CancelledError) {

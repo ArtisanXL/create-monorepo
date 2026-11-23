@@ -1,0 +1,2450 @@
+=== .claude/hooks/guard-worker.mjs (1480 bytes) ===
+// Runs inside the supervisor's child process (guard.mjs). Exit 0 = allow, exit 2 = block with the
+// message on stderr. Any other outcome (crash, signal, OOM, uncaught error) is treated as a block by the supervisor.
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+
+const block = (message) => `⛔ ${message}\nRules: CLAUDE.md and architecture.json.\n`;
+
+// Sets process.exitCode and ends naturally (no process.exit) so a long message is not truncated.
+let message = null;
+try {
+  const { loadContract } = await import("../../scripts/arch-contract.mjs");
+  const { decide } = await import("../../scripts/guard-rules.mjs");
+  const input = JSON.parse(readFileSync(0, "utf8") || "{}");
+  const root = process.env.CLAUDE_PROJECT_DIR || input.cwd || process.cwd();
+  const claudeMd = path.join(root, "CLAUDE.md");
+
+  const result = decide({
+    tool: input.tool_name,
+    input: input.tool_input,
+    contract: loadContract(root),
+    root,
+    home: process.env.HOME ?? "~",
+    platform: process.platform,
+    claudeMdText: existsSync(claudeMd) ? readFileSync(claudeMd, "utf8") : undefined,
+  });
+  if (!result.allow) message = block(result.message);
+} catch (error) {
+  message = block(`The guard hook failed (${error instanceof Error ? error.message : String(error)}); blocking this call. Ask the user to check .claude/hooks/guard.mjs and architecture.json.`);
+}
+if (message !== null) {
+  process.stderr.write(message);
+  process.exitCode = 2;
+}
+
+=== .claude/hooks/guard.mjs (3593 bytes) ===
+#!/usr/bin/env node
+// PreToolUse: blocks writes to protected files, undeclared packages, deferred dependencies and
+// hook bypass attempts (exit 2 → the tool call is cancelled and the message goes to the agent).
+// Claude Code only cancels a PreToolUse call on exit 2: by default a timed-out hook does not block
+// and any other exit code (1, a signal such as a segfault's 139) is a non-blocking error.
+// Two layers keep this failing closed (https://code.claude.com/docs/en/hooks):
+//  1. settings.json sets `"onFailure": "block"` (Claude Code v2.1.295+), so timeouts and other
+//     exit codes block, plus an explicit `timeout` (seconds; command hooks default to 600) above LIMIT_MS.
+//     The hook uses the documented exec form (`command: "node"` + `args`, no shell) so it also runs on
+//     Windows without Git Bash, where `$CLAUDE_PROJECT_DIR` is not expanded.
+//     Requires Claude Code v2.1.295+: hook `args` (exec form) arrived in v2.1.139, and older versions
+//     ignore it, run a bare `node` (exit 1, non-blocking) and fail open. `onFailure` arrived in v2.1.295;
+//     whether v2.1.139-2.1.294 ignore that unknown key is unverified (believed ignored).
+//  2. This file is a supervisor for older versions and for a clear message: it runs the real decision
+//     (guard-worker.mjs → scripts/guard-rules.mjs) in a child Node process with a wall-clock limit and a
+//     heap cap, and maps every outcome except a clean exit 0 / exit 2 to a block.
+// Cost of layer 2: one extra Node start per call (~40 ms), accepted so a native crash cannot fail open.
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const DEFAULT_LIMIT_MS = 10_000;
+// GUARD_TIMEOUT_MS may only lower the limit (stricter), never raise it.
+const requested = Number(process.env.GUARD_TIMEOUT_MS);
+const LIMIT_MS =
+  Number.isInteger(requested) && requested > 0 && requested < DEFAULT_LIMIT_MS ? requested : DEFAULT_LIMIT_MS;
+const MAX_HEAP_MB = 512;
+
+const block = (message) => `⛔ ${message}\nRules: CLAUDE.md and architecture.json.\n`;
+const failed = (why) =>
+  block(`The guard hook failed (${why}); blocking this call. Ask the user to check .claude/hooks/guard.mjs and architecture.json.`);
+
+// Returns the stderr text for a block (exit 2) or null to allow. The caller sets process.exitCode and
+// lets the process end naturally: process.exit() can truncate a long message on a piped stderr.
+function supervise() {
+  let stdin;
+  try {
+    stdin = readFileSync(0);
+  } catch (error) {
+    return failed(error instanceof Error ? error.message : String(error));
+  }
+
+  const worker = fileURLToPath(new URL("./guard-worker.mjs", import.meta.url));
+  const child = spawnSync(process.execPath, [`--max-old-space-size=${MAX_HEAP_MB}`, worker], {
+    input: stdin,
+    timeout: LIMIT_MS,
+    killSignal: "SIGKILL",
+    maxBuffer: 1024 * 1024,
+    env: process.env,
+    stdio: ["pipe", "ignore", "pipe"],
+    windowsHide: true,
+  });
+
+  if (child.error) {
+    return failed(child.error.code === "ETIMEDOUT" ? `timed out after ${LIMIT_MS} ms` : child.error.message);
+  }
+  if (child.signal) return failed(`worker killed by ${child.signal}`);
+  if (child.status === 2) {
+    const message = child.stderr.toString();
+    return message.trim() ? message : failed("worker blocked the call without giving a reason");
+  }
+  if (child.status !== 0) return failed(`worker exited with code ${child.status}`);
+  return null;
+}
+
+const blocked = supervise();
+if (blocked !== null) {
+  process.stderr.write(blocked);
+  process.exitCode = 2;
+}
+
+=== .claude/hooks/stop-check.mjs (1243 bytes) ===
+#!/usr/bin/env node
+// Stop: architecture + lint checks must pass before the agent finishes (exit 2 → agent continues).
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+
+const input = JSON.parse(readFileSync(0, "utf8") || "{}");
+if (input.stop_hook_active) process.exit(0); // avoid infinite loops
+const root = process.env.CLAUDE_PROJECT_DIR || input.cwd || process.cwd();
+const run = (cmd, args) => spawnSync(cmd, args, { cwd: root, encoding: "utf8" });
+
+const checks = [["architecture", run(process.execPath, ["scripts/arch-check.mjs"])]];
+// node_modules/.bin/biome is a shell/cmd shim on Windows and cannot be spawned directly: run the
+// package's JS entry with this Node instead.
+const biome = path.join(root, "node_modules", "@biomejs", "biome", "bin", "biome");
+if (existsSync(biome)) checks.push(["lint", run(process.execPath, [biome, "check", "."])]);
+
+const failed = checks.filter(([, r]) => r.status !== 0);
+if (failed.length) {
+  const out = failed.map(([n, r]) => `## ${n}\n${r.stdout ?? ""}${r.stderr ?? ""}`).join("\n");
+  process.stderr.write(`Fix these checks before finishing (pnpm verify):\n${out.slice(-6000)}`);
+  process.exitCode = 2;
+}
+
+=== .claude/settings.json (512 bytes) ===
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash",
+        "hooks": [{ "type": "command", "command": "node", "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/guard.mjs"], "timeout": 30, "onFailure": "block" }]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [{ "type": "command", "command": "node", "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/stop-check.mjs"] }]
+      }
+    ]
+  }
+}
+
+=== .editorconfig (147 bytes) ===
+root = true
+
+[*]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+charset = utf-8
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+=== .env.example (21 bytes) ===
+NODE_ENV=development
+
+=== .githooks/pre-commit (43 bytes) ===
+#!/bin/sh
+set -e
+pnpm -s arch
+pnpm -s lint
+
+=== .github/CODEOWNERS (327 bytes) ===
+# Architecture contract files require human review. Replace OWNER with a GitHub user/team
+# and uncomment the lines below.
+# /architecture.json        OWNER
+# /CLAUDE.md                OWNER
+# /docs/adr/                OWNER
+# /scripts/                 OWNER
+# /.claude/                 OWNER
+# /.github/                 OWNER
+
+=== .github/workflows/ci.yml (383 bytes) ===
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify
+      - run: pnpm build
+
+=== .gitignore (74 bytes) ===
+node_modules
+dist
+.turbo
+coverage
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+
+=== .nvmrc (3 bytes) ===
+24
+
+=== CLAUDE.md (1862 bytes) ===
+<!-- scaffold:begin — managed by @artisanxl/create-monorepo -->
+# Project rules
+
+This block is protected by `.claude/hooks/guard.mjs` and `pnpm arch`. Anything outside it may be edited freely. The hook fails closed only on Claude Code v2.1.295+.
+
+## Language
+Chat with the user in the user's language. Everything else — code, comments, docs, ADRs, commit messages, PR text, log and error messages — is written in English.
+
+## Commands
+- `pnpm verify`: architecture, lint, typecheck and tests. **Work is done only when this passes.**
+- `pnpm arch`: architecture check only.
+- `pnpm add <pkg> --filter @acme/<target>`: add a dependency; the version is written to the catalog.
+
+## Where code goes
+| Need | Location |
+|---|---|
+| Business rule, calculation, value object | `packages/domain` |
+| Request/response schema, validation | `packages/contracts` (Zod) |
+
+Dependency direction and package roles: `architecture.json` and `docs/adr/0001-package-boundaries.md`.
+
+## Hard rules
+1. **No new packages or folders.** Only the packages in `architecture.json` may exist under `apps/` and `packages/`.
+2. **Deferred work stays deferred.** Packages and dependencies under `architecture.json > deferred` are not added before their trigger. If you think one is needed, **stop**, write a draft under `docs/adr/proposed/` following `docs/adr/TEMPLATE.md`, and ask the user.
+3. **Protected files are not changed:** `architecture.json > protected_paths` and this block. Humans only.
+4. Never silence checks: `@ts-ignore`, `@ts-nocheck`, `--no-verify` are forbidden. Every `biome-ignore` needs a reason.
+5. Money is always the `Money` type from `domain` (`bigint` + currency); never `number`.
+6. Relative imports include the `.ts` extension (`./foo.ts`).
+7. No empty placeholder files/folders (`.gitkeep`, `export {}`). Write code when it is needed.
+<!-- scaffold:end -->
+
+=== architecture.json (3654 bytes) ===
+{
+  "$comment": "Single source of truth. Humans only (agent hook + CODEOWNERS). Every change requires an accepted ADR.",
+  "scope": "@acme",
+  "package_manager": "pnpm",
+  "test_allow": ["vitest"],
+  "packages": {
+    "packages/domain": {
+      "adr": "docs/adr/0001-package-boundaries.md",
+      "role": "Pure business rules and value objects (Money etc.). No I/O.",
+      "may_depend_on": [],
+      "external_allow": []
+    },
+    "packages/contracts": {
+      "adr": "docs/adr/0001-package-boundaries.md",
+      "role": "API input/output Zod schemas. Validation rules live only here.",
+      "may_depend_on": [],
+      "external_allow": ["zod"]
+    }
+  },
+  "deferred": [
+    {
+      "name": "api",
+      "path": "apps/api",
+      "trigger": "When the first HTTP endpoint is needed.",
+      "deps": ["hono", "@hono/node-server", "@hono/zod-validator"]
+    },
+    {
+      "name": "web",
+      "path": "apps/web",
+      "trigger": "When a UI is needed.",
+      "deps": ["react", "react-dom", "vite", "@vitejs/plugin-react", "@tanstack/react-query"]
+    },
+    {
+      "name": "worker",
+      "path": "apps/worker",
+      "trigger": "When the first background job is needed.",
+      "deps": ["pg-boss"]
+    },
+    {
+      "name": "core",
+      "path": "packages/core",
+      "trigger": "When the first use case is needed.",
+      "deps": []
+    },
+    {
+      "name": "db",
+      "path": "packages/db",
+      "trigger": "When persistent storage is needed.",
+      "deps": ["drizzle-orm", "drizzle-kit", "postgres"]
+    },
+    {
+      "name": "auth",
+      "path": "packages/auth",
+      "trigger": "When real user sign-in becomes a requirement (preferred: better-auth).",
+      "deps": ["better-auth", "lucia", "next-auth", "@auth/core", "passport", "jsonwebtoken", "jose"]
+    },
+    {
+      "name": "i18n",
+      "path": "packages/i18n",
+      "trigger": "When a second UI language is requested.",
+      "deps": ["i18next", "react-i18next", "@lingui/core", "@lingui/react", "react-intl", "@inlang/paraglide-js"]
+    },
+    {
+      "name": "ui",
+      "path": "packages/ui",
+      "trigger": "When a second app needs the same components.",
+      "deps": []
+    },
+    {
+      "name": "config",
+      "path": "packages/config",
+      "trigger": "When the same env schema is duplicated in a third app.",
+      "deps": ["@t3-oss/env-core", "dotenv", "convict"]
+    },
+    {
+      "name": "integrations",
+      "path": "packages/integrations",
+      "trigger": "When the first third-party API integration is approved.",
+      "deps": []
+    },
+    {
+      "name": "crawler",
+      "path": "apps/crawler",
+      "trigger": "When a data need that the official API cannot cover (ToS) is approved.",
+      "deps": ["crawlee", "playwright", "puppeteer", "cheerio"]
+    },
+    {
+      "name": "e2e",
+      "path": "apps/e2e",
+      "trigger": "When the first critical user flow is complete.",
+      "deps": ["@playwright/test", "cypress"]
+    }
+  ],
+  "protected_paths": [
+    "architecture.json",
+    "docs/adr/",
+    "scripts/",
+    "paseo.json",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".claude/hooks/",
+    ".githooks/",
+    ".github/",
+    "biome.json",
+    "tsconfig.base.json",
+    "turbo.json",
+    "vitest.config.ts"
+  ],
+  "agent_writable_exceptions": ["docs/adr/proposed/"],
+  "claude_md_block": {
+    "$comment": "The scaffold block in CLAUDE.md is protected; everything outside it is free. If a human changes the block, update sha256 (pnpm arch --claude-hash).",
+    "begin": "<!-- scaffold:begin",
+    "end": "<!-- scaffold:end -->",
+    "sha256": "4b0166955b0c1954150bbae740c71ce00b506490203f31d8307d96071f584bd0"
+  }
+}
+
+=== biome.json (484 bytes) ===
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "files": { "includes": ["**", "!**/migrations", "!**/*.md"] },
+  "formatter": { "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "suspicious": { "noExplicitAny": "error" },
+      "style": { "noNonNullAssertion": "error" }
+    }
+  }
+}
+
+=== docs/adr/0001-package-boundaries.md (642 bytes) ===
+# 0001. Package boundaries
+
+- Status: accepted
+
+## Decision
+The monorepo consists only of the packages listed in `architecture.json`.
+
+- `domain` depends on no package and no external library.
+- `contracts` depends only on `zod`; validation rules are written only here.
+- Relative imports across packages (`../../packages/...`) are forbidden.
+
+## Enforcement
+`scripts/arch-check.mjs` (`pnpm arch`): folder list, package names, package.json dependencies,
+source imports, deferred dependencies, `@ts-ignore`/`@ts-nocheck`, empty placeholder files and the
+CLAUDE.md scaffold block. Runs in the pre-commit hook, CI and the Claude Code Stop hook.
+
+=== docs/adr/0002-deferred-packages.md (717 bytes) ===
+# 0002. Packages deferred until needed
+
+- Status: accepted
+
+## Context
+Empty packages and `.gitkeep` folders signal "fill me" to agents and produce speculative code.
+
+## Decision
+Packages and dependencies listed under `architecture.json > deferred` are **not created/installed**
+until their trigger condition is met and an ADR is accepted. Empty placeholder files (`.gitkeep`) are forbidden.
+
+## Process
+1. An agent or developer notices the need.
+2. They write a draft under `docs/adr/proposed/NNNN-title.md` following `TEMPLATE.md` (the only ADR path agents may write).
+3. A human reviews the draft; if accepted, moves it to `docs/adr/` and updates `architecture.json`.
+4. Only then is the package/dependency added.
+
+=== docs/adr/TEMPLATE.md (165 bytes) ===
+# NNNN. Title
+
+- Status: proposed | accepted | superseded by NNNN
+- Date: YYYY-MM-DD
+
+## Context
+## Decision
+## Consequences
+## architecture.json change
+```json
+```
+
+=== docs/adr/proposed/README.md (139 bytes) ===
+ADR **drafts** written by agents and developers go here. Nothing in this folder is accepted, and
+`architecture.json` may not reference it.
+
+=== package.json (695 bytes) ===
+{
+  "name": "@acme/root",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "packageManager": "pnpm@9.9.9",
+  "scripts": {
+    "prepare": "git config core.hooksPath .githooks || true",
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "vitest run",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "arch": "node scripts/arch-check.mjs",
+    "verify": "pnpm arch && pnpm lint && pnpm typecheck && pnpm test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:",
+    "@types/node": "catalog:",
+    "turbo": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
+
+=== packages/contracts/package.json (241 bytes) ===
+{
+  "name": "@acme/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsc -p ." },
+  "dependencies": { "zod": "catalog:" },
+  "devDependencies": {}
+}
+
+=== packages/contracts/src/index.ts (912 bytes) ===
+import { z } from "zod";
+
+export const HealthResponse = z.object({
+  status: z.enum(["ok", "degraded"]),
+  db: z.enum(["up", "down"]),
+});
+export type HealthResponse = z.infer<typeof HealthResponse>;
+
+export const FormatPriceRequest = z.object({
+  /** Integer amount in minor units, as a string (JSON cannot carry bigint). */
+  amount: z.string().regex(/^-?\d+$/, "must be an integer"),
+  currency: z.string().regex(/^[A-Za-z]{3}$/, "must be a 3-letter ISO 4217 code"),
+  locale: z
+    .string()
+    .refine((v) => {
+      try {
+        return Intl.getCanonicalLocales(v).length === 1;
+      } catch {
+        return false;
+      }
+    }, "must be a valid BCP 47 locale")
+    .default("en-US"),
+});
+export type FormatPriceRequest = z.infer<typeof FormatPriceRequest>;
+
+export const FormatPriceResponse = z.object({ formatted: z.string() });
+export type FormatPriceResponse = z.infer<typeof FormatPriceResponse>;
+
+=== packages/contracts/tsconfig.json (81 bytes) ===
+{
+  "extends": "../../tsconfig.base.json",
+  "include": ["src", "*.config.ts"]
+}
+
+=== packages/domain/package.json (219 bytes) ===
+{
+  "name": "@acme/domain",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsc -p ." },
+  "dependencies": {},
+  "devDependencies": {}
+}
+
+=== packages/domain/src/index.ts (34 bytes) ===
+export * from "./money/money.ts";
+
+=== packages/domain/src/money/money.test.ts (1033 bytes) ===
+import { describe, expect, it } from "vitest";
+import { add, CurrencyMismatchError, format, money, toDecimalString } from "./money.ts";
+
+describe("money", () => {
+  it("adds amounts in the same currency", () => {
+    expect(add(money(10n, "USD"), money(20n, "usd"))).toEqual(money(30n, "USD"));
+  });
+
+  it("refuses to add different currencies", () => {
+    expect(() => add(money(1n, "USD"), money(1n, "EUR"))).toThrow(CurrencyMismatchError);
+  });
+
+  it("respects the currency's minor digits", () => {
+    expect(toDecimalString(money(12345n, "USD"))).toBe("123.45");
+    expect(toDecimalString(money(12345n, "JPY"))).toBe("12345");
+    expect(toDecimalString(money(12345n, "KWD"))).toBe("12.345");
+    expect(toDecimalString(money(-5n, "USD"))).toBe("-0.05");
+  });
+
+  it("does not lose precision above 2^53", () => {
+    expect(toDecimalString(money(9007199254740993n, "USD"))).toBe("90071992547409.93");
+  });
+
+  it("formats for a locale", () => {
+    expect(format(money(123456n, "USD"), "en-US")).toBe("$1,234.56");
+  });
+});
+
+=== packages/domain/src/money/money.ts (1814 bytes) ===
+/** Money: amount in minor units (cents) as bigint + ISO 4217 currency. Never use number. */
+export interface Money {
+  readonly amount: bigint;
+  readonly currency: string;
+}
+
+export class CurrencyMismatchError extends Error {
+  override name = "CurrencyMismatchError";
+}
+
+const digitsCache = new Map<string, number>();
+
+/** Number of minor-unit digits for a currency (USD: 2, JPY: 0, KWD: 3). */
+export function minorDigits(currency: string): number {
+  let digits = digitsCache.get(currency);
+  if (digits === undefined) {
+    digits =
+      new Intl.NumberFormat("en", { style: "currency", currency }).resolvedOptions()
+        .maximumFractionDigits ?? 2;
+    digitsCache.set(currency, digits);
+  }
+  return digits;
+}
+
+export function money(amount: bigint, currency: string): Money {
+  const code = currency.toUpperCase();
+  minorDigits(code); // throws RangeError for an invalid currency
+  return { amount, currency: code };
+}
+
+export function add(a: Money, b: Money): Money {
+  if (a.currency !== b.currency) {
+    throw new CurrencyMismatchError(`Cannot add ${a.currency} and ${b.currency}`);
+  }
+  return money(a.amount + b.amount, a.currency);
+}
+
+/** Lossless decimal representation: 12345n USD → "123.45" */
+export function toDecimalString(m: Money): string {
+  const digits = minorDigits(m.currency);
+  const negative = m.amount < 0n;
+  const abs = (negative ? -m.amount : m.amount).toString().padStart(digits + 1, "0");
+  const whole = digits === 0 ? abs : abs.slice(0, -digits);
+  const fraction = digits === 0 ? "" : `.${abs.slice(-digits)}`;
+  return `${negative ? "-" : ""}${whole}${fraction}`;
+}
+
+export function format(m: Money, locale: string): string {
+  return new Intl.NumberFormat(locale, { style: "currency", currency: m.currency }).format(
+    toDecimalString(m) as `${number}`,
+  );
+}
+
+=== packages/domain/tsconfig.json (81 bytes) ===
+{
+  "extends": "../../tsconfig.base.json",
+  "include": ["src", "*.config.ts"]
+}
+
+=== paseo.json (172 bytes) ===
+{
+  "worktree": {
+    "servicePorts": { "range": "4100-4999" }
+  },
+  "scripts": {
+    "test": { "command": "pnpm test" },
+    "verify": { "command": "pnpm verify" }
+  }
+}
+
+=== pnpm-workspace.yaml (353 bytes) ===
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# All external versions live here; package.json files only use "catalog:".
+catalogMode: strict
+catalog:
+  "@biomejs/biome": "^1.2.3"
+  "@types/node": "^24"
+  "turbo": "^1.2.3"
+  "typescript": "~1.2.3"
+  "vitest": "^1.2.3"
+  "zod": "^1.2.3"
+
+# Packages allowed to run install scripts
+allowBuilds:
+  esbuild: true
+
+=== scripts/arch-check.mjs (3059 bytes) ===
+#!/usr/bin/env node
+// Enforces the contract in architecture.json. Dependency-free; does not need the TS compiler API.
+// Gathers a snapshot of the repo, runs the pure rules in arch-rules.mjs, prints the result.
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { claudeBlockHash, contractFrom, PACKAGE_GROUPS } from "./arch-contract.mjs";
+import { check } from "./arch-rules.mjs";
+
+const root = path.resolve(import.meta.dirname, "..");
+const readText = (...p) => readFileSync(path.join(root, ...p), "utf8");
+const readJson = (...p) => JSON.parse(readText(...p));
+const rel = (p) => path.relative(root, p).split(path.sep).join("/");
+
+const contract = contractFrom(readJson("architecture.json"));
+const claudeMdText = existsSync(path.join(root, "CLAUDE.md")) ? readText("CLAUDE.md") : null;
+
+// A human intentionally changed the block: `pnpm arch --claude-hash` → write it into architecture.json.
+if (process.argv.includes("--claude-hash")) {
+  const hash = contract.claudeBlock && claudeMdText !== null ? claudeBlockHash(claudeMdText, contract.claudeBlock) : null;
+  console.log(hash ?? "CLAUDE.md scaffold block not found");
+  process.exit(0);
+}
+
+const SOURCE_RE = /\.(ts|tsx|mts|cts|js|mjs|jsx)$/;
+
+/** Files and empty folders below a package, in walk order, with the source of code files. */
+function entriesOf(dir, out = []) {
+  if (!existsSync(dir)) return out;
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.name === "node_modules" || e.name === "dist" || e.name === ".turbo") continue;
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      if (readdirSync(p).length === 0) out.push({ path: rel(p), kind: "emptyDir" });
+      entriesOf(p, out);
+    } else {
+      out.push({ path: rel(p), kind: "file", source: SOURCE_RE.test(p) ? readFileSync(p, "utf8") : undefined });
+    }
+  }
+  return out;
+}
+
+function gather() {
+  const packages = {};
+  for (const dir of Object.keys(contract.packages)) {
+    const pjPath = path.join(root, dir, "package.json");
+    const adr = contract.packages[dir].adr;
+    packages[dir] = {
+      packageJson: existsSync(pjPath) ? JSON.parse(readFileSync(pjPath, "utf8")) : null,
+      adrExists: Boolean(adr) && existsSync(path.join(root, adr)),
+      entries: existsSync(pjPath) ? entriesOf(path.join(root, dir)) : [],
+    };
+  }
+  const groupDirs = {};
+  for (const group of PACKAGE_GROUPS)
+    groupDirs[group] = existsSync(path.join(root, group)) ? readdirSync(path.join(root, group)) : [];
+  return {
+    contract,
+    rootPackageJson: readJson("package.json"),
+    catalogText: readText("pnpm-workspace.yaml"),
+    claudeMdText,
+    groupDirs,
+    packages,
+  };
+}
+
+const errors = check(gather());
+if (errors.length) {
+  console.error(`✗ Architecture check failed (${errors.length}):\n${errors.map((e) => `  - ${e}`).join("\n")}`);
+  console.error("\nRules: CLAUDE.md, architecture.json, docs/adr/");
+  process.exit(1);
+}
+console.log(`✓ Architecture check passed (${Object.keys(contract.packages).length} packages)`);
+
+=== scripts/arch-contract.mjs (5196 bytes) ===
+// The single interpreter of architecture.json. Dependency-free (Node built-ins only); imported by
+// the guard hook, arch-check and the scaffolder. Under scripts/, so it is protected like them.
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
+/** Marker prefixes that bound the CLAUDE.md scaffold block. */
+export const DEFAULT_MARKERS = Object.freeze({
+  begin: "<!-- scaffold:begin",
+  end: "<!-- scaffold:end -->",
+});
+
+/** Folders that hold workspace packages. */
+export const PACKAGE_GROUPS = Object.freeze(["apps", "packages"]);
+
+/**
+ * @typedef {{ name: string, path?: string, trigger?: string, deps?: string[] }} Deferred
+ * @typedef {{ begin: string, end: string, sha256?: string }} BlockMarkers
+ * @typedef {ReturnType<typeof contractFrom>} Contract
+ */
+
+/**
+ * Applies defaults to a parsed architecture.json. Pure.
+ * @param {any} json
+ */
+export function contractFrom(json) {
+  /** @type {Record<string, any>} */
+  const packages = json.packages ?? {};
+  /** @type {Deferred[]} */
+  const deferred = json.deferred ?? [];
+  return {
+    scope: /** @type {string | undefined} */ (json.scope),
+    packages,
+    deferred,
+    protectedPaths: /** @type {string[]} */ (json.protected_paths ?? []),
+    exceptions: /** @type {string[]} */ (json.agent_writable_exceptions ?? []),
+    testAllow: /** @type {string[]} */ (json.test_allow ?? []),
+    packageManager: /** @type {string | undefined} */ (json.package_manager),
+    claudeBlock: /** @type {BlockMarkers | undefined} */ (json.claude_md_block),
+  };
+}
+
+/** @param {string} root */
+export function loadContract(root) {
+  return contractFrom(JSON.parse(readFileSync(path.join(root, "architecture.json"), "utf8")));
+}
+
+/**
+ * Whether a root-relative, forward-slash path is off limits to agents.
+ * @param {Contract} contract
+ * @param {string} rel
+ */
+export function isProtected(contract, rel) {
+  return (
+    !contract.exceptions.some((e) => rel.startsWith(e)) &&
+    contract.protectedPaths.some((p) => (p.endsWith("/") ? rel.startsWith(p) : rel === p))
+  );
+}
+
+/** Like isProtected, but a protected folder itself (`docs/adr`) counts too. */
+export function isProtectedOrDir(contract, rel) {
+  return (
+    isProtected(contract, rel) ||
+    contract.protectedPaths.some((p) => p.endsWith("/") && rel === p.slice(0, -1))
+  );
+}
+
+/**
+ * Which package folder owns a root-relative path; null when it is not under apps/ or packages/.
+ * @param {Contract} contract
+ * @param {string} rel
+ * @returns {{ dir: string, declared: boolean, deferred: Deferred | undefined } | null}
+ */
+export function packageOf(contract, rel) {
+  const m = rel.match(/^(apps|packages)\/([^/]+)/);
+  if (!m) return null;
+  const dir = `${m[1]}/${m[2]}`;
+  return {
+    dir,
+    declared: Object.hasOwn(contract.packages, dir),
+    deferred: contract.deferred.find((d) => d.path === dir),
+  };
+}
+
+/** The deferred entry that lists `dep` as a forbidden dependency, if any. */
+export function deferredOfDep(contract, dep) {
+  return contract.deferred.find((d) => (d.deps ?? []).includes(dep));
+}
+
+const esc = (/** @type {string} */ s) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+
+/**
+ * A deferred dependency named (optionally with a version) in a shell command.
+ * @returns {{ dep: string, deferred: Deferred } | undefined}
+ */
+export function deferredDepInCommand(contract, cmd) {
+  for (const d of contract.deferred)
+    for (const dep of d.deps ?? [])
+      if (new RegExp(`(^|[\\s"'])${esc(dep)}(@[^\\s"']*)?(?=$|[\\s"'])`).test(cmd))
+        return { dep, deferred: d };
+  return undefined;
+}
+
+/**
+ * Deferred dependencies declared as keys in a pnpm-workspace.yaml catalog.
+ * @returns {{ dep: string, deferred: Deferred }[]}
+ */
+export function deferredDepsInCatalog(contract, text) {
+  const found = [];
+  for (const d of contract.deferred)
+    for (const dep of d.deps ?? [])
+      if (new RegExp(`^\\s+["']?${esc(dep)}["']?\\s*:`, "m").test(text)) found.push({ dep, deferred: d });
+  return found;
+}
+
+/** @param {Deferred} d */
+export function deferredHint(d) {
+  return `This is deferred "${d.name}" (trigger: ${d.trigger}). If you think it is needed, stop, write an ADR draft under docs/adr/proposed/ and ask the user.`;
+}
+
+/**
+ * Location of the scaffold block (markers included) in the caller's own text, so the positions
+ * line up with that text whatever its line endings.
+ * @param {string} text
+ * @param {{ begin: string, end: string }} [markers]
+ * @returns {{ start: number, end: number } | null}
+ */
+export function claudeBlockSpan(text, markers = DEFAULT_MARKERS) {
+  const start = text.indexOf(markers.begin);
+  const e = start < 0 ? -1 : text.indexOf(markers.end, start);
+  return e < 0 ? null : { start, end: e + markers.end.length };
+}
+
+/**
+ * sha256 of the block with LF endings, so a CRLF checkout hashes the same; null when absent.
+ * @param {string} text
+ * @param {{ begin: string, end: string }} [markers]
+ */
+export function claudeBlockHash(text, markers = DEFAULT_MARKERS) {
+  const lf = text.replace(/\r\n/g, "\n");
+  const span = claudeBlockSpan(lf, markers);
+  return span ? createHash("sha256").update(lf.slice(span.start, span.end)).digest("hex") : null;
+}
+
+=== scripts/arch-rules.mjs (6861 bytes) ===
+// The architecture rules as a pure function over a snapshot of the repo: no filesystem, env or
+// exit. scripts/arch-check.mjs gathers the snapshot and prints the result.
+import path from "node:path";
+import {
+  claudeBlockHash,
+  deferredDepsInCatalog,
+  deferredHint,
+  deferredOfDep,
+  PACKAGE_GROUPS,
+  packageOf,
+} from "./arch-contract.mjs";
+
+const IMPORT_RE =
+  /(?:^|[\s;])(import|export)\s+(type\s+)?(?:([\w*{}\s,$]+?)\s+from\s+)?["']([^"']+)["']|import\(\s*["']([^"']+)["']\s*\)/g;
+
+const depsOf = (pj) => ({
+  ...pj.dependencies,
+  ...pj.devDependencies,
+  ...pj.peerDependencies,
+  ...pj.optionalDependencies,
+});
+const pkgNameOf = (spec) => (spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0]);
+const base = (p) => p.slice(p.lastIndexOf("/") + 1);
+
+/**
+ * @typedef {{ path: string, kind: "file" | "emptyDir", source?: string }} Entry  root-relative, walk order;
+ *   `source` is set for code files only
+ * @typedef {{
+ *   contract: ReturnType<typeof import("./arch-contract.mjs").contractFrom>,
+ *   rootPackageJson: any,
+ *   catalogText: string,
+ *   claudeMdText: string | null,
+ *   groupDirs: Record<string, string[]>,
+ *   packages: Record<string, { packageJson: any | null, adrExists: boolean, entries: Entry[] }>,
+ * }} Snapshot
+ */
+
+/**
+ * @param {Snapshot} snapshot
+ * @returns {string[]}
+ */
+export function check(snapshot) {
+  const { contract, rootPackageJson, catalogText, claudeMdText, groupDirs } = snapshot;
+  const { scope, packages } = contract;
+  const testAllow = new Set(contract.testAllow);
+  const errors = [];
+  const err = (m) => errors.push(m);
+  const hint = deferredHint;
+  const forbidden = (dep) => deferredOfDep(contract, dep);
+  const nameToDir = new Map(Object.keys(packages).map((d) => [`${scope}/${base(d)}`, d]));
+
+  // 1) Only declared packages under apps/ and packages/
+  for (const group of PACKAGE_GROUPS)
+    for (const name of groupDirs[group] ?? []) {
+      const owner = packageOf(contract, `${group}/${name}`);
+      if (owner?.declared) continue;
+      const d = owner?.deferred;
+      err(
+        `${group}/${name}: not declared in architecture.json — ${d ? hint(d) : "new packages require an accepted ADR."}`,
+      );
+    }
+
+  // 2) Deferred dependencies must not appear anywhere (root + catalog included)
+  for (const dep of Object.keys(depsOf(rootPackageJson))) {
+    const d = forbidden(dep);
+    if (d) err(`package.json → ${dep}: ${hint(d)}`);
+  }
+  for (const { dep, deferred } of deferredDepsInCatalog(contract, catalogText))
+    err(`pnpm-workspace.yaml catalog → ${dep}: ${hint(deferred)}`);
+
+  // 3) Per-package checks
+  for (const [dir, spec] of Object.entries(packages)) {
+    const snap = snapshot.packages[dir];
+    const pj = snap?.packageJson;
+    if (!pj) {
+      err(`${dir}: package.json missing`);
+      continue;
+    }
+    if (!spec.adr || spec.adr.includes("/proposed/") || !snap.adrExists)
+      err(`${dir}: missing or invalid accepted ADR reference (${spec.adr ?? "-"})`);
+
+    const expected = `${scope}/${base(dir)}`;
+    if (pj.name !== expected) err(`${dir}: package name must be "${expected}" (found: ${pj.name})`);
+
+    const mayDepend = new Set(spec.may_depend_on ?? []);
+    const typeOnly = new Set(spec.type_only ?? []);
+    const extAllow = spec.external_allow ? new Set(spec.external_allow) : null;
+
+    for (const dep of Object.keys(depsOf(pj))) {
+      const target = nameToDir.get(dep);
+      if (target) {
+        if (!mayDepend.has(target) && !typeOnly.has(target))
+          err(`${dir} → ${dep}: dependency not allowed (allowed: ${[...mayDepend, ...typeOnly].join(", ") || "none"})`);
+      } else if (dep.startsWith(`${scope}/`)) err(`${dir} → ${dep}: unknown workspace package`);
+      else if (forbidden(dep)) err(`${dir} → ${dep}: ${hint(forbidden(dep))}`);
+      else if (extAllow && !extAllow.has(dep) && !testAllow.has(dep))
+        err(`${dir} → ${dep}: external dependency not in allow list (${[...extAllow].join(", ") || "none"})`);
+    }
+
+    for (const entry of snap.entries) {
+      const r = entry.path;
+      if (entry.kind === "emptyDir") {
+        err(`${r}: empty folder (placeholders are forbidden)`);
+        continue;
+      }
+      if (base(r) === ".gitkeep") err(`${r}: placeholder files are forbidden`);
+      const src = entry.source;
+      if (src === undefined) continue;
+      if (/@ts-(ignore|nocheck)/.test(src)) err(`${r}: @ts-ignore / @ts-nocheck are forbidden`);
+      if (/^\s*export\s*\{\s*\}\s*;?\s*$/.test(src)) err(`${r}: empty module (export {}) — placeholders are forbidden`);
+      const isTest = /\.(test|spec)\.[cm]?[jt]sx?$/.test(r);
+
+      for (const m of src.matchAll(IMPORT_RE)) {
+        // `import type ...` or `import { type A, type B } ...` (every binding type-prefixed) is type-only.
+        const named = m[3]?.trim().match(/^\{([^}]*)\}$/);
+        const items = named ? named[1].split(",").map((x) => x.trim()).filter(Boolean) : [];
+        const isType = Boolean(m[2]) || (items.length > 0 && items.every((x) => /^type\s/.test(x)));
+        const s = m[4] ?? m[5];
+        if (!s) continue;
+        if (s.startsWith(".")) {
+          const resolved = path.posix.join(path.posix.dirname(r), s);
+          if (!resolved.startsWith(`${dir}/`)) err(`${r}: relative import outside the package ("${s}")`);
+          continue;
+        }
+        const name = pkgNameOf(s);
+        if (name.startsWith(`${scope}/`)) {
+          const target = nameToDir.get(name);
+          if (!target) err(`${r}: unknown workspace package "${name}"`);
+          else if (target === dir) err(`${r}: a package must not import itself by name ("${s}")`);
+          else if (typeOnly.has(target) && !isType) err(`${r}: "${name}" may only be imported with \`import type\``);
+          else if (!mayDepend.has(target) && !typeOnly.has(target)) err(`${r}: import of "${name}" is not allowed`);
+          continue;
+        }
+        if (forbidden(name)) {
+          err(`${r}: "${name}": ${hint(forbidden(name))}`);
+          continue;
+        }
+        if (extAllow && !(isTest && testAllow.has(name))) {
+          const ok = s.startsWith("node:") ? extAllow.has("node:*") : extAllow.has(name);
+          if (!ok) err(`${r}: import of "${s}" is not allowed (${dir} external allow list: ${[...extAllow].join(", ") || "none"})`);
+        }
+      }
+    }
+  }
+
+  // 4) The CLAUDE.md scaffold block must exist and be unchanged (outside the block is free)
+  if (contract.claudeBlock) {
+    const h = claudeMdText === null ? null : claudeBlockHash(claudeMdText, contract.claudeBlock);
+    if (!h) err("CLAUDE.md: scaffold block missing");
+    else if (h !== contract.claudeBlock.sha256)
+      err("CLAUDE.md: scaffold block was modified. Humans only; if intentional, write the output of `pnpm arch --claude-hash` into architecture.json > claude_md_block.sha256.");
+  }
+  return errors;
+}
+
+=== scripts/guard-rules.mjs (43058 bytes) ===
+// The guard hook's decision, free of I/O: no stdin, env, filesystem or exit. The first matching
+// rule wins, so each message stays the same as it always was. Imported by .claude/hooks/guard.mjs.
+import path from "node:path";
+import {
+  claudeBlockSpan,
+  deferredDepInCommand,
+  deferredHint,
+  isProtected,
+  isProtectedOrDir,
+  packageOf,
+} from "./arch-contract.mjs";
+import { ASSIGNMENT, INTERPRETERS, KEYWORDS, SHELL_NAME, baseName, gitOptions, knownSafe, splitArgs, targetsOf } from "./shell-lex.mjs";
+
+const toPosix = (p) => p.split(path.sep).join("/");
+
+// darwin and win32 filesystems are case-insensitive by default: fold the contract and every path
+// to lower case there. The platform is injected (see decide) so this module stays pure.
+const CASE_INSENSITIVE = new Set(["darwin", "win32"]);
+const lower = (s) => s.toLowerCase();
+const foldContract = (c) => ({
+  ...c,
+  protectedPaths: c.protectedPaths.map(lower),
+  exceptions: c.exceptions.map(lower),
+  packages: Object.fromEntries(Object.entries(c.packages).map(([k, v]) => [lower(k), v])),
+  deferred: c.deferred.map((d) => (d.path ? { ...d, path: lower(d.path) } : d)),
+});
+
+/** A folder that contains protected paths (`docs` for `docs/adr/`); deleting or moving it destroys them. */
+const holdsProtected = (contract, rel) => rel !== "" && contract.protectedPaths.some((p) => p.startsWith(`${rel}/`));
+
+function pathRule(contract, r) {
+  if (r.startsWith("..") || path.isAbsolute(r)) return undefined;
+  if (isProtected(contract, r))
+    return `${r} is protected; only humans may change it. If a change is needed, write an ADR draft under docs/adr/proposed/ and ask the user.`;
+  const owner = packageOf(contract, r);
+  if (owner && !owner.declared)
+    return `${owner.dir} is not a package declared in architecture.json. ${owner.deferred ? deferredHint(owner.deferred) : "Adding a package requires an accepted ADR."}`;
+  return undefined;
+}
+
+/** CLAUDE.md: edits touching the scaffold block are blocked; outside the block is free. */
+function claudeMdRule(contract, tool, ti, text) {
+  if (!contract.claudeBlock || text === undefined) return undefined;
+  const span = claudeBlockSpan(text, contract.claudeBlock);
+  if (!span) return undefined;
+  const { start: b, end } = span;
+  const msg = "The scaffold block in CLAUDE.md is protected; edit only outside the block.";
+  // A second begin marker would make a decoy block the real first-marker span, so adding one is blocked.
+  const begins = (s) => s.split(contract.claudeBlock.begin).length - 1;
+  if (tool === "Write") {
+    const content = String(ti.content ?? "");
+    if (!content.includes(text.slice(b, end))) return msg;
+    return begins(content) > Math.max(1, begins(text)) ? msg : undefined;
+  }
+  const edits = tool === "MultiEdit" ? (ti.edits ?? []) : [ti];
+  if (edits.some((ed) => String(ed.new_string ?? "").includes(contract.claudeBlock.begin))) return msg;
+  // Checked on the file's own text and on its LF form, so an LF old_string cannot slip past a CRLF file.
+  const lf = text.replace(/\r\n/g, "\n");
+  const lfSpan = claudeBlockSpan(lf, contract.claudeBlock);
+  const touches = (haystack, old, from, to) => {
+    for (let i = haystack.indexOf(old); i >= 0; i = haystack.indexOf(old, i + 1))
+      if (i < to && i + old.length > from) return true;
+    return false;
+  };
+  for (const ed of edits) {
+    const old = String(ed.old_string ?? "");
+    if (!old) continue;
+    if (touches(text, old, b, end)) return msg;
+    if (lfSpan && touches(lf, old.replace(/\r\n/g, "\n"), lfSpan.start, lfSpan.end)) return msg;
+  }
+  return undefined;
+}
+
+function fileRule({ contract, root, f }, tool, ti, claudeMdText) {
+  const fp = ti.file_path ?? ti.notebook_path;
+  if (!fp) return undefined;
+  const r = toPosix(path.relative(root, path.resolve(root, f(fp))));
+  return pathRule(contract, r) ?? (r === f("CLAUDE.md") ? claudeMdRule(contract, tool, ti, claudeMdText) : undefined);
+}
+
+
+const WRITERS = new Set(["mkdir", "touch", "cp", "mv", "rm", "tee", "truncate", "ln", "install", "chmod", "chown", "chgrp", "unlink", "shred", "rmdir"]);
+const EVAL_FLAG = /^(?:-[A-Za-z]*[ecEp]|--eval(?:=.*)?|--print(?:=.*)?)$/;
+// Programs that run a command string given to their -c flag.
+const COMMAND_STRING_RUNNERS = new Set(["su", "flock", "script", "runuser", "sg"]);
+// Path lookups (words x directories) one decision may spend, shared by nested strings; past it the call is blocked.
+const WORK_BUDGET = 30_000;
+// Environment variables whose value is a command that some tool runs (`PAGER=rm man ls`).
+const COMMAND_ENV = /^(?:PAGER|MANPAGER|GIT_PAGER|LESSOPEN|LESSCLOSE|GIT_EXTERNAL_DIFF|GIT_SSH_COMMAND|GIT_EDITOR|GIT_ASKPASS|SSH_ASKPASS|EDITOR|VISUAL|PROMPT_COMMAND|BROWSER)$/;
+
+
+/** Command strings that other commands run: `$(...)`, `sh -c`, `eval`, `watch`, `su -c`, git aliases, pager variables, heredoc scripts. */
+function innerStrings({ commands, nested, segments, vars }) {
+  const out = [...nested];
+  for (const seg of segments) {
+    addAll(out, seg.scriptBodies);
+    // A here-string fed to a shell is a script (`bash <<< "npm install"`).
+    if (seg.words.some((w) => !w.quoted && SHELL_NAME.test(baseName(w.text)))) for (const x of seg.inputs) if (x.op === "<<<") out.push(x.target);
+    // The other words a command-running option hands to that command (`rg --pre rm x file` runs `rm file`).
+    const others = seg.words.filter((w) => !ASSIGNMENT.test(w.text) && !w.text.startsWith("-")).slice(1).map((w) => w.text).join(" ");
+    seg.words.forEach((w, k) => {
+      const env = ASSIGNMENT.test(w.text) ? /^([A-Za-z_]\w*)=(.*)$/s.exec(w.text) : null;
+      if (env && (COMMAND_ENV.test(env[1]) || /^GIT_CONFIG_VALUE_\d+$/.test(env[1])))
+        out.push(env[2].replace(/^[|!]/, "").replace(/%s/g, others));
+      // A value with whitespace may be a command line that a later `eval $X` / `$X` / `bash -c '$X'` runs.
+      else if (env && /\s/.test(env[2])) out.push({ text: env[2], hint: MSG.assignmentHint });
+      const opt = /^--(?:pre|pager)(?:=(.*))?$/s.exec(w.text) ?? (seg.name === "man" ? /^-P(.*)$/s.exec(w.text) : null);
+      if (opt) out.push(`${opt[1] || seg.words[k + 1]?.text || ""} ${others}`);
+    });
+  }
+  for (const { name, args } of commands) {
+    if (name === "eval" || name === "watch") out.push(args.filter((a) => name === "eval" || !a.text.startsWith("-")).map((a) => a.text).join(" "));
+    else if (name === "git")
+      args.forEach((a, i) => {
+        // Any `-c key=value` may name a program git runs (gpg.program, diff.x.command, filter.x.clean, ...).
+        const kv = a.text === "-c" ? /^([^=]+)=(.*)$/s.exec(args[i + 1]?.text ?? "") : null;
+        if (kv) out.push(kv[2].replace(/^!/, ""));
+        // `--config-env=key=VAR` takes the value from an environment variable; one assigned in this line is a command too.
+        const ce = configEnv(args, i);
+        if (ce) for (const v of assignedValues({ vars, segments }, ce.env)) out.push(v.replace(/^!/, ""));
+      });
+    else if (SHELL_NAME.test(name) || COMMAND_STRING_RUNNERS.has(name))
+      for (let i = 0; i < args.length; i++) {
+        const t = args[i].text;
+        if (/^-[A-Za-z]*c$/.test(t) && args[i + 1]) out.push(args[i + 1].text);
+        else if (t.startsWith("--command=")) out.push(t.slice("--command=".length));
+        else continue;
+        break;
+      }
+  }
+  return out;
+}
+
+const MSG = {
+  claude: "CLAUDE.md must not be modified via Bash; use the Edit tool, outside the scaffold block only.",
+  protected: "Command touches a protected path; only humans may change it.",
+  git: "Command touches a protected path via git; only humans may change it.",
+  folder: "Command would delete or move a folder that contains protected paths; only humans may change them.",
+  oneLiner:
+    "Command touches a protected path through interpreter code; only humans may change it. Code that only reads a protected file is blocked too: read it with cat instead.",
+  assignmentHint: "If this is a commit or PR message, pass it with `git commit -F -` or `gh ... --body-file -` and a heredoc instead of a variable.",
+  runtime: "This command runs text built at run time (a pipe into a shell, a here-string, a script file, a variable as the command) and also names a write command and a protected path; only humans may change protected paths. Run the commands directly instead.",
+  gitConfig: "git -c include.path / includeIf pulls in a config file the guard cannot inspect; set the options you need directly.",
+  gitConfigEnv:
+    "git --config-env names an environment variable the guard cannot see; assign it in the same command or pass the value directly.",
+  reset: "git reset --hard to another revision rewrites protected files too; only humans may do that. Plain `git reset --hard`, `--hard HEAD`, `HEAD~N` and `git reset --soft` are fine.",
+  decode:
+    "A decoded or decompressed stream is run by a shell or interpreter, so the guard cannot inspect it. Decode it to a file you can read, or run the commands directly.",
+  script:
+    "A shell script is given a protected path as an argument; the guard cannot see what the script does with it. Run the commands directly instead.",
+  glob: "A glob in this delete or move could match protected paths (or a folder inside one); name the files or folders explicitly, and quote a name that really contains `*`.",
+  findRoot:
+    "find would delete from the project root, which covers protected paths; start the search in a subfolder (`find src -name x -delete`) instead.",
+  formatted:
+    "Text formatted at run time (printf, echo -e with escapes) is piped into a shell or interpreter, so the guard cannot see the command. Write the command out directly instead.",
+  printfVar:
+    "A variable built with printf names the target of a delete or move; the guard cannot see its value. Write the path out directly instead.",
+  rewind:
+    "git reset / checkout / switch / read-tree to another revision, or a whole-tree restore after one, rewrites protected files too; only humans may do that. Branch switches, `git checkout -b <name>` and path checkouts are fine.",
+  complex: "Command is too complex for the guard to check; split it into simpler commands.",
+  nested: "Shell strings are nested too deeply to check; run the inner command directly.",
+};
+
+/** git clean/checkout/restore/rm/mv aimed at protected paths (also behind `sudo -u x git ...`). */
+// HEAD and revisions relative to it (`HEAD~2`, `HEAD^`, `@{u}`, `HEAD@{1}`, `ORIG_HEAD`): resetting to them stays in the current history.
+const HEAD_RELATIVE = /^(?:HEAD|@)?(?:~\d*|\^\d*|@\{[^}]*\})*$|^ORIG_HEAD$/;
+const INCLUDE_KEY = /^include(?:if\..+)?\.path$/i;
+// Config keys that name a program or file git runs or reads.
+const COMMAND_KEY = /pager|editor|ssh|askpass|fsmonitor|external|textconv|command|driver|clean|smudge|process|helper|program|hookspath|alias|include|exec/i;
+
+/** `--config-env=key=VAR` (or `--config-env key=VAR`) at args[i]. */
+function configEnv(args, i) {
+  const t = args[i].text;
+  const v = t.startsWith("--config-env=") ? t.slice("--config-env=".length) : t === "--config-env" ? (args[i + 1]?.text ?? "") : undefined;
+  const m = v === undefined ? null : /^([^=]*)=(.*)$/s.exec(v);
+  return m ? { key: m[1], env: m[2] } : undefined;
+}
+
+/** Values the line assigns to a variable: assignment-only segments and `VAR=x cmd` prefixes. */
+function assignedValues({ vars, segments }, name) {
+  const out = [];
+  if (vars?.has(name)) out.push(vars.get(name));
+  for (const s of segments) for (const w of s.words) if (w.text.startsWith(`${name}=`)) out.push(w.text.slice(name.length + 1));
+  return out;
+}
+
+/** Whether a git pathspec glob could match a protected path (or something inside a protected folder). */
+function globHitsProtected(contract, rel) {
+  const star = rel.search(/[*?[]/);
+  if (star < 0) return false;
+  if (rel.length > 512) return true;
+  const head = rel.slice(0, star);
+  // Fails closed: a pattern the regex engine cannot compile or run counts as a hit.
+  try {
+    const re = new RegExp(`^${rel.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
+    for (const p of contract.protectedPaths) {
+      const dir = p.endsWith("/");
+      const parts = (dir ? p.slice(0, -1) : p).split("/");
+      for (let k = 1; k <= parts.length; k++) if (re.test(parts.slice(0, k).join("/"))) return true;
+      if (dir && (head.startsWith(p) || (rel[star] === "*" && p.startsWith(head)))) return true;
+    }
+  } catch {
+    return true;
+  }
+  return false;
+}
+
+// Revisions that cannot be a branch name: an object id, FETCH_HEAD, ORIG_HEAD, refs/..., or anything with `~`, `^` or `@{`
+// (`HEAD@{0}` is the current commit).
+const HEAD_ONLY = /^(?:HEAD|@)?$/;
+const CURRENT = /^(?:HEAD|@)@?(?:\{0\})?$/;
+const isRevision = (t) =>
+  !t.startsWith(":") && !CURRENT.test(t) && !/^@\{-\d+\}$/.test(t) && /^[0-9a-f]{7,40}$|^ORIG_HEAD|^FETCH_HEAD|^refs\/|[~^]|@\{/i.test(t);
+// Whole-tree pathspecs: `.`, `:/`, `*`, `:(top)`.
+const WHOLE_TREE = /^(?:\.\/?|:\/\.?|\*|:\(top\)[.*]?)$/;
+
+/**
+ * Whether the line moves HEAD or the index to another revision (`git reset <rev>` other than `--soft`, `git read-tree <rev>`):
+ * a whole-tree restore after it rewrites protected files. Only the first operand before `--` is a revision.
+ * It sees one command line: a reset in one call and the checkout in the next is not connected.
+ */
+function rewinds(env, parsed) {
+  parsed.rewound ??= parsed.segments.some((s) => {
+    const at = s.words.findIndex((w) => !w.quoted && env.fold(baseName(w.text)) === "git");
+    if (at < 0) return false;
+    const args = s.words.slice(at + 1);
+    const { i } = gitOptions(args);
+    const sub = args[i]?.text;
+    if (sub !== "reset" && sub !== "read-tree") return false;
+    const rest = args.slice(i + 1);
+    const dd = rest.findIndex((a) => a.text === "--");
+    const before = dd < 0 ? rest : rest.slice(0, dd);
+    if (before.some((a) => a.text === "--soft" || a.text === "-n")) return false;
+    const first = before.find((a) => !a.text.startsWith("-"));
+    return first !== undefined && !HEAD_RELATIVE.test(first.text);
+  });
+  return parsed.rewound;
+}
+
+/** `git checkout <rev>` / `-b name <rev>` / `--detach <x>` with no paths: switches the whole tree to that revision. */
+function checksOutRevision(g, rest) {
+  const isRev = (o) => isRevision(o.text);
+  if (rest.some((a) => a.text === "--") && rest.slice(rest.findIndex((a) => a.text === "--") + 1).length) return false;
+  const revs = g.operands.filter(isRev);
+  const creates = g.flags.some((x) => /^-[A-Za-z]*[bB]$|^--orphan$/.test(x));
+  if (g.flags.includes("--detach") && g.operands.some((o) => !HEAD_ONLY.test(o.text))) return true;
+  return revs.length > 0 && g.operands.length - revs.length <= (creates ? 1 : 0);
+}
+
+/**
+ * A pathspec that is a glob or has `:(magic)`: its path, whether it is relative to the project root, and whether it
+ * ignores case. `{ exclude: true }` for an exclusion; undefined for a plain path (those are checked by path).
+ */
+function pathspec(t) {
+  const m = /^:(?:\(([^)]*)\)|([/!^]?))(.*)$/s.exec(t);
+  if (!m) return GLOB.test(t) ? { path: t, top: false, magic: false, icase: false } : undefined;
+  const words = (m[1] ?? "").split(",");
+  if (words.includes("exclude") || m[2] === "!" || m[2] === "^") return { exclude: true };
+  return { path: m[3] === "" ? "." : m[3], top: words.includes("top") || m[2] === "/", magic: true, icase: words.includes("icase") };
+}
+
+function gitRule(env, words, bases, parsed) {
+  const { contract, relsOf, expand } = env;
+  const at = words.findIndex((w) => !w.quoted && env.fold(baseName(w.text)) === "git");
+  if (at < 0) return undefined;
+  const args = words.slice(at + 1);
+  const { i, dirs } = gitOptions(args);
+  const sub = args[i] && env.fold(args[i].text);
+  for (let k = 0; k < i; k++) {
+    const key = args[k].text === "-c" ? /^[^=]*/.exec(args[k + 1]?.text ?? "")[0] : undefined;
+    if (key !== undefined && INCLUDE_KEY.test(key)) return MSG.gitConfig;
+    const ce = configEnv(args, k);
+    if (!ce) continue;
+    if (INCLUDE_KEY.test(ce.key)) return MSG.gitConfig;
+    if (COMMAND_KEY.test(ce.key) && !assignedValues(parsed, ce.env).length) return MSG.gitConfigEnv;
+  }
+  if (sub === "reset") {
+    const r = splitArgs(args.slice(i + 1));
+    return r.flags.some((x) => /^--(?:hard|keep|merge)$/.test(x)) && r.operands.some((o) => !HEAD_RELATIVE.test(o.text)) ? MSG.reset : undefined;
+  }
+  if (sub === "stash") return rewinds(env, parsed) ? MSG.rewind : undefined;
+  if (sub === "read-tree") {
+    const r = splitArgs(args.slice(i + 1));
+    return r.flags.some((x) => /^-[A-Za-z]*u|^--reset$/.test(x)) ? MSG.rewind : undefined;
+  }
+  if (sub === "switch") {
+    const r = splitArgs(args.slice(i + 1));
+    const detach = r.flags.some((x) => /^(?:--detach|-d)$/.test(x)) && r.operands.some((o) => !HEAD_ONLY.test(o.text));
+    return detach || r.operands.some((o) => isRevision(o.text)) ? MSG.rewind : undefined;
+  }
+  if (sub === "checkout-index") {
+    const r = splitArgs(args.slice(i + 1));
+    return rewinds(env, parsed) && r.flags.some((x) => /^-[A-Za-z]*a|^--all$/.test(x)) ? MSG.rewind : undefined;
+  }
+  if (!["clean", "checkout", "restore", "rm", "mv"].includes(sub ?? "")) return undefined;
+  const gb = [...bases, ...dirs.map((d) => path.resolve(env.root, expand(d)))];
+  const g = splitArgs(args.slice(i + 1));
+  if (relsOf(g.operands, gb).some((r) => isProtectedOrDir(contract, r) || holdsProtected(contract, r))) return MSG.git;
+  // A whole-tree revert from a revision rewrites protected files too: `checkout <rev> -- .`, `restore --source=<rev> .`.
+  // Decided on the resolved path, so `src/..` and `./` are the project root too.
+  const isRoot = (text, top) => relsOf([text], top ? [env.root] : gb, true).includes("");
+  const dots = g.operands.filter((o) => WHOLE_TREE.test(o.text) || (!o.text.startsWith(":") && isRoot(o.text, false)));
+  // A whole-tree restore reads the index, which an earlier `git reset <rev>` on the line may have rewound.
+  const force = sub === "checkout" && g.flags.some((x) => /^-[A-Za-z]*f|^--force$/.test(x)) && g.operands.every((o) => HEAD_ONLY.test(o.text));
+  if ((dots.length || force) && rewinds(env, parsed)) return MSG.rewind;
+  if (sub === "checkout" && checksOutRevision(g, args.slice(i + 1))) return MSG.rewind;
+  // After a rewind (or from a revision) a glob or magic pathspec restores whatever it matches. Only exclusions restore the
+  // whole tree; a magic pathspec with no path or `.` is the whole tree too; `icase` compares in lower case.
+  const tail = args.slice(i + 1);
+  const dashes = tail.findIndex((a) => a.text === "--");
+  const fromRevision = sub === "restore" ? g.flags.some((x) => /^(?:--source|-s)/.test(x)) : dashes >= 0 && tail.slice(0, dashes).some((a) => !a.text.startsWith("-"));
+  if ((sub === "checkout" || sub === "restore") && (fromRevision || rewinds(env, parsed))) {
+    const specs = (dashes >= 0 ? tail.slice(dashes + 1) : g.operands).map((o) => pathspec(o.text));
+    if (specs.length && specs.every((x) => x?.exclude)) return MSG.rewind;
+    for (const spec of specs) {
+      if (!spec || spec.exclude) continue;
+      if (spec.magic && isRoot(spec.path, spec.top)) return MSG.rewind;
+      const c = spec.icase ? foldContract(contract) : contract;
+      const rels = relsOf([spec.icase ? lower(spec.path) : spec.path], spec.top ? [env.root] : gb).map((r) => (spec.icase ? lower(r) : r));
+      if (rels.some((r) => (GLOB.test(r) ? globHitsProtected(c, r) : spec.magic && (isProtectedOrDir(c, r) || holdsProtected(c, r))))) return MSG.rewind;
+    }
+  }
+  const fromRev =
+    (sub === "checkout" && g.operands.length > dots.length) ||
+    (sub === "restore" && g.flags.some((x) => /^(?:--source|-s)/.test(x)));
+  if (dots.length && fromRev) return MSG.git;
+  // A glob after a revision restores every path it matches: `checkout HEAD~5 -- '*'`, `restore -s rev '*.json'`.
+  const glob = (o) => /[*?[]/.test(o.text);
+  const rest = args.slice(i + 1);
+  const dd = rest.findIndex((a) => a.text === "--");
+  const hasRev =
+    sub === "restore"
+      ? g.flags.some((x) => /^(?:--source|-s)/.test(x))
+      : sub === "checkout" && (dd >= 0 ? rest.slice(0, dd).some((a) => !a.text.startsWith("-")) : g.operands.some((o) => !glob(o)));
+  if (hasRev && g.operands.filter(glob).some((o) => relsOf([o], gb).some((r) => globHitsProtected(contract, r)))) return MSG.git;
+  return undefined;
+}
+
+const GLOB = /[*?[]/;
+
+/** Whether a shell glob (each `*` / `?` / `[..]` stays inside one path segment) could match a protected path, or, when `folders`, a folder holding one. */
+function shellGlobHits(contract, rel, folders) {
+  if (!GLOB.test(rel)) return false;
+  if (contract.exceptions.some((e) => rel.startsWith(e))) return false;
+  const segs = rel.split("/");
+  if (rel.length > 512 || (rel.match(/[*?[]/g) ?? []).length > 12) return true;
+  try {
+    const match = (pat, name) =>
+      !GLOB.test(pat) ||
+      /\[[:.=]/.test(pat) ||
+      new RegExp(`^${pat.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\[!/g, "[^").replace(/\*+/g, "[^/]*").replace(/\?/g, "[^/]")}$`).test(name);
+    for (const p of contract.protectedPaths) {
+      const dir = p.endsWith("/");
+      const parts = (dir ? p.slice(0, -1) : p).split("/");
+      if (!segs.slice(0, parts.length).every((g, j) => match(g, parts[j]) && (GLOB.test(g) || g === parts[j]))) continue;
+      if (segs.length === parts.length || (folders && segs.length < parts.length) || (dir && segs.length > parts.length)) return true;
+    }
+  } catch {
+    return true;
+  }
+  return false;
+}
+
+/** rm / mv of a folder that holds protected paths; `rm -rf .` only when no `cd` moved elsewhere first. */
+function removeRule(env, c) {
+  const recursive = ["chmod", "chown", "chgrp"].includes(c.name) && c.args.some((a) => /^-[A-Za-z]*R|^--recursive$/.test(a.text));
+  if (!DELETERS.has(c.name) && !recursive) return undefined;
+  const { flags, operands } = splitArgs(c.args);
+  const byTarget = flags.some((x) => /^--target-directory|^-[A-Za-z]*t$/.test(x));
+  const sources = c.name !== "mv" || byTarget ? operands : operands.slice(0, -1);
+  const holds = env.relsOf(sources, c.bases).some((r) => holdsProtected(env.contract, r));
+  if (holds || (c.name === "rm" && env.relsOf(sources, c.tight, true).includes(""))) return MSG.folder;
+  // A glob (`rm -rf d*`) is resolved against the directory the command really runs in, not every `cd` that might have failed.
+  // Only unquoted metacharacters glob; a quoted `'*'` is a literal name.
+  const recursiveRm = c.name !== "rm" || flags.some((x) => /^-[A-Za-z]*[rR]|^--recursive$/.test(x));
+  const globs = sources.filter((w) => w.glob);
+  return env.relsOf(globs, c.tight).some((r) => shellGlobHits(env.contract, r, recursiveRm)) ? MSG.glob : undefined;
+}
+
+/** Variables the line sets from printf: `X=$(printf ...)`, `X=`printf ...``, `printf -v X ...`. */
+function printfNames(cmd) {
+  if (!cmd.includes("printf")) return [];
+  const out = [];
+  for (const m of cmd.matchAll(/(?:^|[\s;&|(])([A-Za-z_]\w*)\+?=["']?(?:\$\(|`)\s*printf\b|\bprintf\s+-v\s*([A-Za-z_]\w*)/g)) out.push(m[1] ?? m[2]);
+  return out;
+}
+
+const DELETERS = new Set(["rm", "mv", "shred", "unlink", "rmdir"]);
+
+/** `find <folder holding protected paths> ... -delete | -exec rm`, and `rsync` into protected paths or `--delete` into a folder holding them. */
+function bulkRule(env, c) {
+  const { contract, relsOf } = env;
+  if (c.name === "find") {
+    const start = [];
+    for (const a of c.args) {
+      if (/^-|^[()!]$/.test(a.text)) break;
+      start.push(a);
+    }
+    const k = c.args.findIndex((a) => /^-(?:exec|execdir|ok|okdir)$/.test(a.text));
+    const deletes = c.args.some((a) => a.text === "-delete") || (k >= 0 && DELETERS.has(env.fold(baseName(c.args[k + 1]?.text ?? ""))));
+    if (!deletes) return undefined;
+    // The search covers every protected path when it starts at the project root (or nowhere: the default is `.`).
+    if (relsOf(start.length ? start : ["."], c.tight, true).includes("")) return MSG.findRoot;
+    if (relsOf(start, c.bases).some((r) => isProtectedOrDir(contract, r) || holdsProtected(contract, r))) return MSG.folder;
+    return relsOf(start.filter((w) => w.glob), c.tight).some((r) => shellGlobHits(contract, r, true)) ? MSG.glob : undefined;
+  }
+  if (c.name === "rsync") {
+    const { flags, operands } = splitArgs(c.args);
+    const dest = relsOf(operands.slice(-1), c.bases);
+    if (dest.some((r) => isProtectedOrDir(contract, r))) return MSG.protected;
+    return flags.some((x) => /^--(?:delete|remove-source-files)/.test(x)) && dest.some((r) => holdsProtected(contract, r)) ? MSG.folder : undefined;
+  }
+  return undefined;
+}
+
+// Whether any of the code texts names a protected path: a protected file, or a protected folder written
+// as `folder/` or as a quoted literal.
+function mentionsProtected(env, texts, bases) {
+  for (const text of texts)
+    for (const m of text.matchAll(/[^\s"'`<>|;&()]+/g)) {
+      const t = m[0];
+      for (const r of env.relsOf([t], bases)) {
+        if (isProtected(env.contract, r)) return true;
+        if (!isProtectedOrDir(env.contract, r) && !holdsProtected(env.contract, r)) continue;
+        if (t.endsWith("/") || ["'", '"', "`"].some((q) => text.includes(q + t + q))) return true;
+      }
+    }
+  return false;
+}
+
+/**
+ * Interpreter one-liners (`node -e`, `python -c`, `deno eval`) hide the write inside a string; blocked
+ * when the code mentions a protected path. Read-only code is blocked too: a read cannot be told from a write.
+ */
+function oneLinerRule(env, words, bases) {
+  const at = words.findIndex((w) => !w.quoted && INTERPRETERS.test(env.fold(baseName(w.text))));
+  if (at < 0) return undefined;
+  const args = words.slice(at + 1);
+  let code;
+  if (env.fold(baseName(words[at].text)) === "deno" && args[0]?.text === "eval") code = args.slice(1);
+  else
+    for (let i = 0; i < args.length; i++) {
+      const t = args[i].text;
+      if (!t.startsWith("-")) break;
+      if (EVAL_FLAG.test(t)) {
+        code = args.slice(i + 1);
+        break;
+      }
+      if (/^--?(?:r|require|import|loader|experimental-loader)$/.test(t)) i++;
+    }
+  return code && mentionsProtected(env, code.map((w) => w.text), bases) ? MSG.oneLiner : undefined;
+}
+
+const addAll = (list, items) => {
+  for (const x of items) list.push(x);
+};
+
+/**
+ * A write command, or a command named by a variable, behind prefixes the parser does not know
+ * (`timeout 5 rm x`, `sudo -u root rm x`, `$X x`, `xargs rm` fed by a pipe or heredoc): every word counts as
+ * a target. Only known-safe readers are skipped (`grep rm architecture.json`); their redirects are checked apart.
+ */
+function fallbackRule(env, parsed, idx, writeRels) {
+  const { contract, fold: f, relsOf } = env;
+  const s = parsed.segments[idx];
+  if (knownSafe(s, f)) return undefined;
+  const word = (w) => f(baseName(w.text));
+  const at = s.words.findIndex((w, k) => {
+    if (w.quoted && /\s/.test(w.text)) return false;
+    const n = word(w);
+    return WRITERS.has(n) || n === "dd" || ((n === "sed" || n === "perl") && inPlace(n, s.words.slice(k + 1).map((x) => x.text)));
+  });
+  const writer = at < 0 ? undefined : s.words[at];
+  const head = s.words.find((w) => !KEYWORDS.has(w.text));
+  // A glob in command position (`{r..r}m` is `*m`) may name any command.
+  if (!writer && !head?.text.startsWith("$") && !head?.fromVar && !(head?.glob && /[*?]/.test(head.text))) return undefined;
+  const wname = writer ? word(writer) : "";
+  const after = s.words.slice(at < 0 ? 1 : at + 1);
+  const prev = idx > s.pipeStart ? parsed.segments[idx - 1] : undefined;
+  const bodyWords = (seg) => seg.bodies.flatMap((b) => b.split(/\s+/).filter(Boolean));
+  const fed = s.words.some((w) => !w.quoted && word(w) === "xargs") ? [...(prev ? [...prev.words, ...bodyWords(prev)] : []), ...bodyWords(s)] : [];
+  // Any word may be a target (a dd `of=` is unwrapped); only the words after the write command are checked as packages.
+  const targets = [...fed, ...s.words].map((w) => (typeof w !== "string" && w.text.startsWith("of=") ? w.text.slice(3) : w));
+  const rels = relsOf(targets, s.bases);
+  const appends = after.some((w) => /^-[A-Za-z]*a|^--append/.test(w.text));
+  if (rels.includes(f("CLAUDE.md")) && (["rm", "mv", "cp", "truncate", "sed", "perl"].includes(wname) || (wname === "tee" && !appends)))
+    return MSG.claude;
+  if (rels.some((r) => isProtectedOrDir(contract, r))) return MSG.protected;
+  // `echo docs | xargs rm -rf`: the words that feed xargs are the folders it removes.
+  const fedWords = wname === "rm" && after.some((w) => /^-[A-Za-z]*[rR]|^--recursive$/.test(w.text)) ? fed.map((w) => (typeof w === "string" ? { text: w } : w)) : [];
+  const folder = removeRule(env, { name: wname, args: [...fedWords, ...after], bases: s.bases, tight: s.tight });
+  if (folder) return folder;
+  addAll(writeRels, relsOf(after.filter((w) => !w.text.startsWith("-")), s.bases));
+  return undefined;
+}
+
+const inPlace = (name, flags) =>
+  (name === "sed" && flags.some((x) => /^-[A-Za-z]*i|^--in-place/.test(x))) ||
+  (name === "perl" && flags.some((x) => /^-[A-Za-z]*i/.test(x)));
+
+const WRITE_WORD = /\b(?:mkdir|touch|cp|mv|rm|tee|truncate|ln|install|dd|chmod|chown|chgrp|unlink|shred|rmdir)\b|\bsed\s+-i|\bperl\s+-p?i/;
+// File-changing calls of interpreters (node fs, python os/shutil/pathlib, perl): counted when an interpreter runs run-time text.
+const INTERP_WRITE = new RegExp(
+  [
+    // node fs: fs.unlinkSync(, fs.promises.rm(, writeFile(, ...
+    String.raw`\b(?:unlink|unlinkSync|rmSync|rmdirSync|writeFile|writeFileSync|appendFile|appendFileSync|rename|renameSync|copyFile|copyFileSync|cpSync|truncate|truncateSync|createWriteStream|symlinkSync|chmodSync)\s*\(`,
+    String.raw`\.(?:rm|rmdir|cp|copy|unlink|write_text|write_bytes|rename|replace|touch|symlink_to|chmod)\s*\(`,
+    // python: os.remove(, shutil.rmtree(, ...
+    String.raw`\bos\.(?:remove|unlink|rename|replace|removedirs|rmdir|truncate|chmod|chown|symlink|link)\s*\(`,
+    String.raw`\bshutil\.\w+\s*\(`,
+    // perl: unlink 'x', rename(...)
+    String.raw`\b(?:unlink|rmdir|rename|truncate|chmod|chown|symlink)(?=[ \t(])`,
+    // open(path, "w" | "a" | "+")
+    String.raw`\bopen\w*\s*\(\s*[^,()]+,\s*["'][rwabxt+]*[wa+][rwabxt+]*["']`,
+    String.raw`\bopen\b[^;\n]{0,80}["']\s*\+?>`,
+  ].join("|"),
+);
+// A recursive delete, `-delete`, `--delete` or a move: with a folder that holds protected paths it destroys them.
+const FOLDER_DELETE = /\brm[ \t]+(?:-\S+[ \t]+){0,5}?-[A-Za-z]*[rR]|\brm\b.{0,20}--recursive|[ \t]-delete\b|--delete|\bmv\b|\brmdir\b/;
+// Text formatted at run time: any printf, `echo -e` with an escape.
+const FORMATTED = /\bprintf\b|\becho[ \t]+-[A-Za-z]*e[^|;&\n]*\\/;
+// Decoders and decompressors; their output piped into a shell or interpreter cannot be inspected.
+const DECODER =
+  /\b(?:base64|base32|basenc)\b.{0,40}?(?:[ \t]-[A-Za-z]*[dD]\b|--decode)|\bxxd\b.{0,40}?[ \t]-[A-Za-z]*r|\bopenssl\b.{0,40}?[ \t]-d\b|\b(?:gunzip|gzcat|zcat|bzcat|xzcat|unxz|bunzip2|unzstd|zstdcat|uudecode)\b|\b(?:gzip|bzip2|xz|zstd)\b.{0,30}?[ \t]-[A-Za-z]*d[A-Za-z]*\b/;
+
+/**
+ * Backstop for text that becomes a command at run time (`echo 'rm x' | sh`, `bash <<< '...'`, `bash <(...)`,
+ * `bash script.sh`, `eval`, `$X` or `$(...)` as the command, `bash -c --`, `xargs -a`, `node` reading stdin):
+ * it cannot be parsed ahead, so the old rough check applies to the whole raw command, quotes included: a write
+ * word and a protected path anywhere block it. A folder holding protected paths counts when a recursive delete,
+ * `-delete` or `--delete` is named, and with an interpreter its file-changing calls count as write words.
+ */
+function runtimeTextRule(env, cmd, parsed) {
+  const { contract, fold: f } = env;
+  const isFlag = (t) => t.startsWith("-");
+  const dynamic = (w) => w.dyn || /\$[A-Za-z_{]|^\$$/.test(w.text);
+  // Heredoc bodies are data (or checked on their own), so they are left out of the command-position test.
+  let bare = cmd;
+  for (const seg of parsed.segments) for (const b of seg.bodies) if (b) bare = bare.replace(b, "");
+  // [ \t]* rather than \s*: a run of newlines must not be rescanned from every newline.
+  let runtime = /(?:^|[;&|(\n])[ \t]*"?(?:\$[({\w]|`)/.test(bare);
+  // `strong` is run-time text of unknown content; running a script file is `runtime` but not `strong`.
+  let strong = runtime;
+  // Scripts under protected paths cannot have been changed by an agent; running one is not run-time text.
+  const ownScripts = [];
+  let interpreter = false;
+  for (const [idx, s] of parsed.segments.entries()) {
+    if (s.words.some((w) => !w.quoted && INTERPRETERS.test(f(baseName(w.text))))) interpreter = true;
+    if (strong) continue;
+    const texts = s.words.map((w) => w.text);
+    if (s.words.some((w, k) => !w.quoted && f(baseName(w.text)) === "xargs" && texts.slice(k + 1).some((t) => /^-[A-Za-z]*a$|^--arg-file/.test(t)))) runtime = strong = true;
+    const k = s.words.findIndex((w) => !w.quoted && (SHELL_NAME.test(f(baseName(w.text))) || INTERPRETERS.test(f(baseName(w.text))) || [".", "source", "eval"].includes(w.text)));
+    if (k < 0) continue;
+    const name = f(baseName(texts[k]));
+    const args = s.words.slice(k + 1);
+    const after = texts.slice(k + 1);
+    if (name === "eval") runtime = strong = true;
+    else if (SHELL_NAME.test(name) && after.some((t) => /^-[A-Za-z]*c$/.test(t))) {
+      // `-c` takes a string; one built at run time (`"$(...)"`, `$X`, `--`, or nothing before a backtick) is run-time text.
+      const j = after.findIndex((t) => /^-[A-Za-z]*c$/.test(t));
+      if (!args[j + 1] || after[j + 1] === "--" || dynamic(args[j + 1])) runtime = strong = true;
+    } else {
+      const leading = after.slice(0, after.findIndex((t) => !isFlag(t)) + 1 || after.length);
+      // `-e` is errexit for a shell, not code.
+      const scriptRunner = SHELL_NAME.test(name) || name === "." || name === "source";
+      const evalAt = scriptRunner ? -1 : name === "deno" && after[0] === "eval" ? 0 : leading.findIndex((t) => EVAL_FLAG.test(t));
+      const file = after.find((t) => !isFlag(t));
+      if (evalAt >= 0 && (name === "deno" || !/^-.*=/.test(leading[evalAt]))) {
+        // An interpreter's `-c` / `-e` string built at run time (`python3 -c "$(echo ...)"`) is run-time text too.
+        const code = args[evalAt + 1];
+        if (!code || code.dyn || code.text === "$" || (!code.quoted && dynamic(code))) runtime = strong = true;
+        continue;
+      }
+      if (evalAt >= 0) continue;
+      if (file === undefined) {
+        if (idx > s.pipeStart || s.inputs.length > 0 || s.procSub) runtime = strong = true;
+      } else if (env.relsOf([file], s.bases).some((r) => isProtected(contract, r))) ownScripts.push(file);
+      else if (!parsed.checked.has(path.normalize(file))) {
+        runtime = true;
+        // A shell script that is not protected may do anything to the protected path it is handed.
+        const given = args.slice(after.indexOf(file) + 1);
+        if (scriptRunner && env.relsOf(given, s.bases).some((r) => isProtectedOrDir(contract, r) || holdsProtected(contract, r))) return MSG.script;
+      }
+    }
+  }
+  if (!runtime) return undefined;
+  if (strong && DECODER.test(bare)) return MSG.decode;
+  // printf / `echo -e` spell the command out only at run time (`printf 'r%s x' m | sh`), so nothing in the text can be checked.
+  if (strong && FORMATTED.test(bare)) return MSG.formatted;
+  const REDIRECT_TO = />[>|]?[ \t]*["']?([^\s"'<>|;&()\\]+)/g;
+  // Adjacent empty quotes are dropped too (`'r''m'` runs rm), so both spellings are checked.
+  const squashed = cmd.replace(/(?:''|"")+/g, "");
+  for (const text of squashed === cmd ? [cmd] : [cmd, squashed]) {
+    const tokens = [...text.matchAll(/[^\s"'<>|;&()\\]+/g)].flatMap((m) => (m[0].startsWith("of=") ? [m[0], m[0].slice(3)] : [m[0]]));
+    const targets = [...text.matchAll(REDIRECT_TO)].map((m) => m[1]);
+    const protectedIn = (words) => env.relsOf(words, [env.root]).some((r) => isProtectedOrDir(contract, r));
+    // A redirect into a protected path is a write on its own; other writes need a write word.
+    if (protectedIn(targets)) return MSG.runtime;
+    const interpWrite = interpreter && INTERP_WRITE.test(text);
+    const writes = WRITE_WORD.test(text) || interpWrite;
+    const folderDelete = FOLDER_DELETE.test(text);
+    // Interpreter code names a folder as a quoted string (`rmSync('docs')`), not as `docs/`.
+    if (interpWrite && mentionsProtected(env, [text, text.replace(/\\/g, "")], [env.root])) return MSG.runtime;
+    if (!writes && !folderDelete) continue;
+    const seen = tokens.filter((t) => !ownScripts.includes(t));
+    if (writes && protectedIn(seen)) return MSG.runtime;
+    if (folderDelete && env.relsOf(seen, [env.root]).some((r) => holdsProtected(contract, r))) return MSG.runtime;
+  }
+  return undefined;
+}
+
+function directRule(ctx, cmd, parsed) {
+  const { contract, root, f, expand, budget } = ctx;
+  if (parsed.tooComplex) return MSG.complex;
+  // Root-relative paths of the words, against each base; paths outside the project are ignored.
+  // Every lookup spends from the shared budget; once it is gone nothing is resolved and the call is blocked.
+  const relsOf = (words, bases, keepRoot = false) => {
+    budget.left -= words.length * bases.length;
+    if (budget.over || budget.left < 0) {
+      budget.over = true;
+      return [];
+    }
+    return words.flatMap((w) => {
+      const e = expand(typeof w === "string" ? w : w.text);
+      return bases.flatMap((b) => {
+        const r = toPosix(path.relative(root, path.resolve(b, e)));
+        return (keepRoot || r) && !r.startsWith("..") && !path.isAbsolute(r) ? [r] : [];
+      });
+    });
+  };
+  const env = { contract, root, expand, fold: f, relsOf };
+  const claudeMd = f("CLAUDE.md");
+
+  const writeRels = [];
+  for (const r of parsed.redirects) {
+    const rels = relsOf([r.target], r.bases);
+    if (r.op === ">" && rels.includes(claudeMd)) return MSG.claude;
+    addAll(writeRels, rels);
+  }
+
+  for (const [idx, s] of parsed.segments.entries()) {
+    const msg =
+      gitRule(env, s.words, s.bases, parsed) ??
+      oneLinerRule(env, s.words, s.bases) ??
+      (mentionsProtected(env, s.codeBodies, s.bases) ? MSG.oneLiner : undefined) ??
+      fallbackRule(env, parsed, idx, writeRels);
+    if (msg) return msg;
+  }
+  if (budget.over) return MSG.complex;
+
+  for (const c of parsed.commands) {
+    const { flags: fl, operands } = splitArgs(c.args);
+    if (WRITERS.has(c.name) || inPlace(c.name, fl)) {
+      const rels = relsOf(operands, c.bases);
+      const appends = fl.some((x) => /^-[A-Za-z]*a|^--append/.test(x));
+      if (rels.includes(claudeMd) && (["rm", "mv", "cp", "truncate", "sed", "perl"].includes(c.name) || (c.name === "tee" && !appends)))
+        return MSG.claude;
+      addAll(writeRels, rels);
+    }
+    if (c.name === "dd")
+      for (const a of c.args) if (a.text.startsWith("of=")) addAll(writeRels, relsOf([a.text.slice(3)], c.bases));
+    // `--output=path` (git diff/log, ...) and `sort -o` / `less -o` write to their target.
+    c.args.forEach((a, k) => {
+      const long = /^--output(?:=(.*))?$/s.exec(a.text);
+      const short = c.name === "sort" || c.name === "less" ? /^-[A-Za-z]*[oO](.*)$/s.exec(a.text) : null;
+      const target = long ? (long[1] ?? c.args[k + 1]?.text) : short ? (short[1] || c.args[k + 1]?.text) : undefined;
+      if (target) addAll(writeRels, relsOf([target], c.bases));
+    });
+    const msg = removeRule(env, c) ?? bulkRule(env, c);
+    if (msg) return msg;
+    if (DELETERS.has(c.name) && printfNames(cmd).some((n) => c.args.some((a) => new RegExp(`\\$(?:${n}\\b|\\{${n}[}:#%/^,@\\[+-])`).test(a.text)))) return MSG.printfVar;
+  }
+  const runtimeMsg = runtimeTextRule(env, cmd, parsed);
+  if (runtimeMsg) return runtimeMsg;
+  if (budget.over) return MSG.complex;
+  if (/--no-verify\b/.test(cmd) || /\bgit\s+commit\b[^|;&]*\s-n\b/.test(cmd))
+    return "Skipping git hooks is forbidden (--no-verify).";
+  if (/core\.hooksPath/.test(cmd) && !/\.githooks/.test(cmd)) return "Changing the git hooks path is forbidden.";
+  // pm-guard:begin
+  const chosenPm = contract.packageManager;
+  if (chosenPm) {
+    // Optional command prefixes: sudo/time/env/corepack..., their flags and VAR=value assignments.
+    const wrappers =
+      "(?:(?:sudo|time|env|command|exec|nohup|nice|corepack)\\s+|-\\S+\\s+|[A-Za-z_]\\w*=\\S*\\s+)*";
+    for (const pm of ["pnpm", "npm", "yarn", "bun"].filter((x) => x !== chosenPm)) {
+      const install = new RegExp(
+        `(^|[;&|(])\\s*${wrappers}${pm}(\\s*($|[;&|)])|\\s+(install|i|add|ci|update|up|upgrade)\\b)`,
+      );
+      if (cmd.split("\n").some((l) => install.test(l)))
+        return `This project uses ${chosenPm} (architecture.json > package_manager); "${pm}" installs would create a second lockfile. Use ${chosenPm} instead.`;
+    }
+  }
+  // pm-guard:end
+
+  // Flags and their values may sit between the PM and the verb (`pnpm --filter x add`, `pnpm -w add`).
+  if (/\b(pnpm|npm|yarn|bun)\b[^|;&\n]*\s(add|install|i|update|up)\b/.test(cmd)) {
+    const hit = deferredDepInCommand(contract, cmd);
+    if (hit) return `"${hit.dep}" cannot be installed. ${deferredHint(hit.deferred)}`;
+  }
+
+  if (budget.over) return MSG.complex;
+  if (writeRels.some((r) => isProtectedOrDir(contract, r))) return MSG.protected;
+  for (const r of writeRels) if (packageOf(contract, r)) {
+    const msg = pathRule(contract, r);
+    if (msg) return msg;
+  }
+  return undefined;
+}
+
+function bashRule(ctx, cmd, depth = 0, scope = undefined) {
+  const parsed = targetsOf(cmd, ctx.root, ctx.expand, ctx.f, scope);
+  const own = directRule(ctx, cmd, parsed);
+  if (own !== undefined) return own;
+  // The same rules apply to every command string another command runs (`bash -c`, `eval`, `$(...)`...).
+  const inner = innerStrings(parsed);
+  if (depth >= 3) return inner.length ? MSG.nested : undefined;
+  for (const item of inner) {
+    const msg = bashRule(ctx, typeof item === "string" ? item : item.text, depth + 1, { vars: parsed.vars, budget: parsed.budget });
+    if (msg !== undefined) return typeof item === "string" ? msg : `${msg} ${item.hint}`;
+  }
+  return undefined;
+}
+
+/**
+ * @param {{ tool: string, input?: any, contract: ReturnType<typeof import("./arch-contract.mjs").contractFrom>,
+ *   root: string, home?: string, claudeMdText?: string, platform?: string | undefined }} args
+ * @returns {{ allow: true } | { allow: false, message: string }}
+ */
+export function decide({ tool, input, contract, root, home = "~", claudeMdText, platform }) {
+  const ti = input ?? {};
+  const ci = CASE_INSENSITIVE.has(platform);
+  const f = ci ? lower : (s) => s;
+  const expand = (t) => f(t.replace(/^~(?=\/)/, home));
+  const ctx = { contract: ci ? foldContract(contract) : contract, root: f(root), f, expand, budget: { left: WORK_BUDGET, over: false } };
+  let message;
+  if (["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(tool))
+    message = fileRule(ctx, tool, ti, claudeMdText);
+  else if (tool === "Bash") message = bashRule(ctx, String(ti.command ?? ""));
+  return message === undefined ? { allow: true } : { allow: false, message };
+}
+
+=== scripts/shell-lex.mjs (27792 bytes) ===
+// The shell lexer and command segmenter behind the guard: splits a command line into simple commands,
+// redirects, heredocs and nested command strings, and works out where each runs. It knows nothing about
+// the architecture contract. Imported by guard-rules.mjs.
+import path from "node:path";
+
+const WRAPPERS = new Set([
+  "sudo", "time", "env", "command", "exec", "nohup", "nice", "corepack", "npx", "bunx", "xargs", "builtin",
+]);
+export const KEYWORDS = new Set(["if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}"]);
+export const ASSIGNMENT = /^[A-Za-z_]\w*=/;
+export const INTERPRETERS = /^(?:node|nodejs|bun|deno|python[\d.]*|perl|ruby|php|tsx|ts-node)$/;
+export const SHELL_NAME = /^(?:ba|z|da|k|a)?sh$/;
+const MAX_CDS = 32;
+const MAX_COMMAND_LENGTH = 50_000;
+const READ_ONLY = new Set(["grep", "egrep", "fgrep", "rg", "ag", "ack", "man", "which", "whereis", "cat", "less", "more", "head", "tail", "ls", "wc", "stat", "file", "diff"]);
+const READ_ONLY_GIT = new Set(["log", "grep", "show", "diff", "status", "blame", "ls-files", "describe", "rev-parse"]);
+
+export const baseName = (w) => w.replace(/^.*[\\/]/, "");
+
+const MAX_LEX_LEVEL = 6;
+const ANSI_SIMPLE = { n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?" };
+
+// The `$'...'` string whose body starts at i: escapes are skipped (so `\'` does not end it) and decoded.
+// Returns the text and the index of the closing quote (or the string length).
+function ansiC(s, i) {
+  let text = "";
+  for (; i < s.length && s[i] !== "'"; i++) {
+    if (s[i] !== "\\") {
+      text += s[i];
+      continue;
+    }
+    const n = s[++i];
+    if (n === undefined) break;
+    if (Object.hasOwn(ANSI_SIMPLE, n)) text += ANSI_SIMPLE[n];
+    else if (n === "x" || n === "u" || n === "U") {
+      const max = n === "x" ? 2 : n === "u" ? 4 : 8;
+      const m = new RegExp(`^[0-9a-fA-F]{1,${max}}`).exec(s.slice(i + 1, i + 1 + max));
+      const code = m ? Number.parseInt(m[0], 16) : Number.NaN;
+      if (m && code <= 0x10ffff) text += String.fromCodePoint(code);
+      else text += `\\${n}${m ? m[0] : ""}`;
+      i += m ? m[0].length : 0;
+    } else if (/[0-7]/.test(n)) {
+      const m = /^[0-7]{1,3}/.exec(s.slice(i, i + 3));
+      text += String.fromCharCode(Number.parseInt(m[0], 8) & 255);
+      i += m[0].length - 1;
+    } else if (n === "c") text += String.fromCharCode((s.charCodeAt(++i) || 0) & 31);
+    else text += `\\${n}`;
+  }
+  return { text, end: i };
+}
+
+// `<<[-]WORD` starting just after the `<<`: the delimiter and where the word ends.
+function readHeredocDelimiter(s, i) {
+  let j = i;
+  const strip = s[j] === "-";
+  if (strip) j++;
+  while (s[j] === " " || s[j] === "\t") j++;
+  let delim = "";
+  let quoted = false;
+  for (; j < s.length && !/[\s;|&()<>]/.test(s[j]); j++) {
+    const c = s[j];
+    if (c === "$" && (s[j + 1] === "'" || s[j + 1] === '"')) continue;
+    if (c === "'" || c === '"') {
+      quoted = true;
+      const e = s.indexOf(c, j + 1);
+      const stop = e < 0 ? s.length : e;
+      delim += s.slice(j + 1, stop);
+      j = stop;
+    } else if (c === "\\") {
+      quoted = true;
+      delim += s[++j] ?? "";
+    } else delim += c;
+  }
+  return { delim, quoted, strip, end: j, body: "" };
+}
+
+// The body starting at `from` (just after a newline) up to its delimiter line; `next` is the index of
+// the newline that ends the delimiter line (or the string length).
+function heredocBody(s, from, h) {
+  for (let pos = from; pos <= s.length; ) {
+    const e = s.indexOf("\n", pos);
+    const stop = e < 0 ? s.length : e;
+    const line = s.slice(pos, stop).replace(/\r$/, "");
+    if ((h.strip ? line.replace(/^\t+/, "") : line) === h.delim) {
+      h.body = s.slice(from, pos);
+      return { next: stop };
+    }
+    if (e < 0) break;
+    pos = e + 1;
+  }
+  h.body = s.slice(from);
+  return { next: s.length };
+}
+
+// Index of the first `)` of the `))` that closes an arithmetic expression starting at i.
+function closeArith(s, i) {
+  let depth = 0;
+  for (; i < s.length; i++) {
+    if (s[i] === "(") depth++;
+    else if (s[i] === ")") {
+      if (depth === 0 && s[i + 1] === ")") return i;
+      depth = Math.max(0, depth - 1);
+    }
+  }
+  return s.length;
+}
+
+// Index of the `)` closing the `(` at i. This runs the same lexer as shellSegments, so comments,
+// quotes, arithmetic and heredocs are recognised by one set of rules.
+function closeParen(s, i, state, level) {
+  if (level >= MAX_LEX_LEVEL) {
+    state.complex = true;
+    return s.length;
+  }
+  return lexShell(s, state, i + 1, true, level + 1).end;
+}
+
+// `$(...)` and backtick substitutions in text the shell expands (unquoted heredoc bodies).
+function substitutionsIn(text, out, state, level) {
+  for (let j = 0; j < text.length; j++) {
+    if (text[j] === "\\") j++;
+    else if (text[j] === "$" && text[j + 1] === "(") {
+      const e = closeParen(text, j + 1, state, level);
+      out.push(text.slice(j + 2, e));
+      j = e;
+    } else if (text[j] === "`") {
+      let e = j + 1;
+      while (e < text.length && text[e] !== "`") e += text[e] === "\\" ? 2 : 1;
+      out.push(text.slice(j + 1, e));
+      j = e;
+    }
+  }
+}
+
+/**
+ * The one shell lexer. Splits a command into simple commands: quotes are removed, `;` `&&` `||` `|` `&`
+ * newlines, parentheses and backticks separate commands, comments (`#` at a word start) are dropped and
+ * redirects (`>`, `>>`, `>|`, `>&file`, `&>`) are collected apart from the words. `$(...)`, backticks and
+ * arithmetic inside double quotes or arithmetic are returned in `nested` as command strings of their own.
+ * Each segment records the operator that ended it (`sep`) and its heredocs: `<<WORD` is recognised
+ * outside quotes, comments and arithmetic, and the body is skipped rather than parsed as commands.
+ * With `stopAtClose` it stops at the `)` that closes an enclosing `$(` and returns its index in `end`.
+ */
+function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
+  const segments = [];
+  const nested = [];
+  let words = [];
+  let redirs = [];
+  let heredocs = [];
+  let inputs = [];
+  let procSub = false;
+  let waiting = [];
+  let cur = null;
+  let pending = null;
+  let depth = 0;
+  const pushWord = () => {
+    if (cur === null) return;
+    const w = cur;
+    cur = null;
+    if (pending) {
+      const p = pending;
+      pending = null;
+      if (p.op === "<" || p.op === "<<<") inputs.push({ op: p.op, target: w.text, dyn: w.dyn });
+      else if (!(p.amp && /^(\d+|-)$/.test(w.text))) redirs.push({ op: p.op, target: w.text });
+    } else words.push(w);
+  };
+  const end = (sep) => {
+    pushWord();
+    pending = null;
+    if (words.length || redirs.length || inputs.length || procSub) segments.push({ words, redirs, sep, heredocs, inputs, procSub });
+    words = [];
+    redirs = [];
+    heredocs = [];
+    inputs = [];
+    procSub = false;
+  };
+  const grow = () => {
+    cur ??= { text: "", quoted: false };
+    return cur;
+  };
+  // A quote or escape right after `$IFS` ends the variable name (`rm$IFS'x'` is `rm x`): spell it `${IFS}`.
+  const ifsEnd = () => {
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: the shell spelling, not a template
+    if (cur) cur.text = cur.text.replace(/\$IFS$/, "${IFS}");
+  };
+  // Arithmetic (`$((..))`, `$[..]`) and backticks are scanned for commands; returns the new index.
+  const expansion = (i) => {
+    grow().dyn = true;
+    if (cmd[i + 2] === "(") {
+      const e = closeArith(cmd, i + 3);
+      nested.push(cmd.slice(i + 3, e));
+      return e + 1;
+    }
+    const e = cmd.indexOf("]", i + 2);
+    const stop = e < 0 ? cmd.length : e;
+    nested.push(cmd.slice(i + 2, stop));
+    return stop;
+  };
+  let i = from;
+  for (; i < cmd.length; i++) {
+    const c = cmd[i];
+    if (c === "\\") {
+      if (cmd[i + 1] === "\n") i++;
+      else if (i + 1 < cmd.length) {
+        ifsEnd();
+        grow().text += cmd[++i];
+      }
+    } else if (c === "$" && cmd[i + 1] === "'") {
+      const r = ansiC(cmd, i + 2);
+      ifsEnd();
+      grow().quoted = true;
+      cur.text += r.text;
+      i = r.end;
+    } else if (c === "$" && cmd[i + 1] === '"') {
+      // $"..." quotes like "...": drop the $.
+    } else if (c === "$" && ((cmd[i + 1] === "(" && cmd[i + 2] === "(") || cmd[i + 1] === "[")) {
+      i = expansion(i);
+      grow().text += "0";
+    } else if (c === "'") {
+      const e = cmd.indexOf("'", i + 1);
+      const stop = e < 0 ? cmd.length : e;
+      ifsEnd();
+      grow().quoted = true;
+      cur.text += cmd.slice(i + 1, stop);
+      i = stop;
+    } else if (c === '"') {
+      ifsEnd();
+      grow().quoted = true;
+      for (i++; i < cmd.length && cmd[i] !== '"'; i++) {
+        if (cmd[i] === "\\" && '"\\$`'.includes(cmd[i + 1] ?? "")) i++;
+        else if (cmd[i] === "$" && ((cmd[i + 1] === "(" && cmd[i + 2] === "(") || cmd[i + 1] === "[")) {
+          i = expansion(i);
+          continue;
+        } else if (cmd[i] === "$" && cmd[i + 1] === "(") {
+          const e = closeParen(cmd, i + 1, state, level);
+          nested.push(cmd.slice(i + 2, e));
+          cur.dyn = true;
+          i = e;
+          continue;
+        } else if (cmd[i] === "`") {
+          let e = i + 1;
+          while (e < cmd.length && cmd[e] !== "`") e += cmd[e] === "\\" ? 2 : 1;
+          nested.push(cmd.slice(i + 1, e));
+          cur.dyn = true;
+          i = e;
+          continue;
+        }
+        cur.text += cmd[i];
+      }
+      ifsEnd();
+    } else if (c === " " || c === "\t" || c === "\r") pushWord();
+    else if (c === "#" && cur === null) {
+      const e = cmd.indexOf("\n", i);
+      i = e < 0 ? cmd.length : e - 1;
+    } else if (c === "|") {
+      const sep = cmd[i + 1] === "|" ? "||" : "|";
+      end(sep);
+      if (sep === "||") i++;
+    } else if (c === "<" && cmd[i + 1] === "<" && cmd[i + 2] !== "<") {
+      if (cur !== null && !cur.quoted && /^\d+$/.test(cur.text)) cur = null;
+      else pushWord();
+      const h = readHeredocDelimiter(cmd, i + 2);
+      if (h.delim) {
+        heredocs.push(h);
+        waiting.push(h);
+      }
+      i = h.end - 1;
+    } else if (c === "\n" && waiting.length) {
+      for (const h of waiting) {
+        i = heredocBody(cmd, i + 1, h).next;
+        // An unquoted delimiter lets the shell expand substitutions inside the body.
+        if (!h.quoted) substitutionsIn(h.body, nested, state, level);
+      }
+      waiting = [];
+      end(";");
+    } else if (c === "(" && cmd[i + 1] === "(" && cur === null && words.every((w) => KEYWORDS.has(w.text))) {
+      // `(( expr ))` as a command: arithmetic, not two subshells.
+      const e = closeArith(cmd, i + 2);
+      nested.push(cmd.slice(i + 2, e));
+      i = e + 1;
+    } else if (c === "(") {
+      if (cur?.text.endsWith("$")) cur.dyn = true;
+      depth++;
+      end(";");
+    } else if (c === ")") {
+      if (stopAtClose && depth === 0) break;
+      depth = Math.max(0, depth - 1);
+      end(";");
+    } else if (c === "`") {
+      // An unquoted backtick ends the word but leaves its value to run time (`X=`cmd``).
+      if (cur !== null) cur.dyn = true;
+      end(";");
+    } else if (c === "\n" || c === ";") end(";");
+    else if (c === "&" && cmd[i + 1] !== ">") {
+      const sep = cmd[i + 1] === "&" ? "&&" : "&";
+      end(sep);
+      if (sep === "&&") i++;
+    } else if (c === "<" && cmd[i + 1] === "(") {
+      // `<(...)`: process substitution, a command's output read as a file.
+      pushWord();
+      procSub = true;
+    } else if (c === ">" || c === "<" || c === "&") {
+      if (cur !== null && !cur.quoted && /^\d+$/.test(cur.text)) cur = null;
+      else pushWord();
+      if (c === "&") i++;
+      let op = c === "<" ? "<" : ">";
+      let amp = false;
+      if (c === "<") {
+        let n = 1;
+        while (cmd[i + 1] === "<") {
+          i++;
+          n++;
+        }
+        if (n >= 3) op = "<<<";
+      } else if (cmd[i + 1] === ">") {
+        op = ">>";
+        i++;
+      } else if (cmd[i + 1] === "|") i++;
+      else if (cmd[i + 1] === "&") {
+        amp = true;
+        i++;
+      }
+      pending = { op, amp };
+    } else {
+      grow().text += c;
+      if (c === "{") cur.brace = true;
+      if (c === "*" || c === "?" || c === "[") cur.glob = true;
+    }
+  }
+  end("");
+  return { segments, nested, end: i };
+}
+
+const shellSegments = (cmd) => {
+  const state = { complex: false };
+  const { segments, nested } = lexShell(cmd, state);
+  return { segments, nested, complex: state.complex };
+};
+
+/** Drops assignments, keywords and wrapper prefixes (and their flags); `find -exec` yields its inner command too. */
+function commandsOf(words, fold) {
+  let i = 0;
+  while (i < words.length) {
+    const w = words[i].text;
+    if (ASSIGNMENT.test(w) || KEYWORDS.has(w)) i++;
+    else if (WRAPPERS.has(fold(baseName(w)))) {
+      i++;
+      while (i < words.length && words[i].text.startsWith("-")) i++;
+    } else break;
+  }
+  if (i >= words.length) return [];
+  const name = fold(baseName(words[i].text));
+  const args = words.slice(i + 1);
+  const out = [{ name, args }];
+  if (name === "find") {
+    const k = args.findIndex((a) => /^-(?:exec|execdir|ok|okdir)$/.test(a.text));
+    if (k >= 0) out.push(...commandsOf(args.slice(k + 1), fold));
+  }
+  return out;
+}
+
+/** Splits arguments into flags and operands; everything after `--` is an operand. */
+export function splitArgs(args) {
+  const flags = [];
+  const operands = [];
+  let rest = false;
+  for (const a of args) {
+    if (!rest && a.text === "--") rest = true;
+    else if (!rest && a.text.length > 1 && a.text.startsWith("-")) flags.push(a.text);
+    else operands.push(a);
+  }
+  return { flags, operands };
+}
+
+// git global options and the position of the subcommand.
+export function gitOptions(args) {
+  let i = 0;
+  const dirs = [];
+  for (; i < args.length; i++) {
+    const t = args[i].text;
+    if (t === "-C" || t === "-c" || /^--(?:git-dir|work-tree|namespace|config-env)$/.test(t)) {
+      if (t === "-C" && args[i + 1]) dirs.push(args[i + 1].text);
+      i++;
+    } else if (!t.startsWith("-")) break;
+  }
+  return { i, dirs };
+}
+
+// Files a segment writes: its `>` / `>>` redirect targets and the operands of tee.
+function writtenTargets(seg, fold) {
+  const out = seg.redirs.filter((r) => r.op === ">" || r.op === ">>").map((r) => path.normalize(r.target));
+  const at = seg.words.findIndex((w) => !w.quoted && fold(baseName(w.text)) === "tee");
+  if (at >= 0) for (const w of seg.words.slice(at + 1)) if (!w.text.startsWith("-")) out.push(path.normalize(w.text));
+  return out;
+}
+
+// Whether a segment executes one of the files: `bash f`, `. f`, `node f`, or `./f` itself.
+function runs(seg, targets, fold) {
+  const is = (w) => targets.includes(path.normalize(w.text));
+  if (seg.words[0] && is(seg.words[0])) return true;
+  return seg.words.some(
+    (w, k) =>
+      !w.quoted &&
+      (SHELL_NAME.test(fold(baseName(w.text))) || w.text === "." || w.text === "source" || INTERPRETERS.test(fold(baseName(w.text)))) &&
+      seg.words.slice(k + 1).some(is),
+  );
+}
+
+/** `git commit -F -` and `gh ... --body-file -` read their input as data. */
+function readsStdinAsData(seg) {
+  if (seg.name !== "git" && seg.name !== "gh") return false;
+  const w = seg.words.map((x) => x.text);
+  return w.some((t, k) => (/^(?:-F|--file|--body-file|--notes-file)$/.test(t) && w[k + 1] === "-") || /^--(?:file|body-file|notes-file)=-$/.test(t));
+}
+
+/**
+ * A read-only tool run plainly: no variable assignment (`PAGER=rm`), no git `-c`, and none of the
+ * options that make a reader run or write something (`rg --pre`, `man -P`, `--ext-diff`, `--output`, `-o`).
+ */
+export function knownSafe(seg, fold) {
+  const name = seg.name ?? "";
+  if (seg.words.some((w) => ASSIGNMENT.test(w.text))) return false;
+  if (seg.words.some((w) => /^--(?:pre|pre-glob|pager|ext-diff|output|exec-path|upload-pack)(?:=|$)/.test(w.text))) return false;
+  if (name === "man" && seg.words.some((w) => /^-[A-Za-z]*P/.test(w.text))) return false;
+  if ((name === "less" || name === "more") && seg.words.some((w) => /^-[A-Za-z]*[oO]/.test(w.text))) return false;
+  if (name === "git") {
+    const at = seg.words.findIndex((w) => !w.quoted && fold(baseName(w.text)) === "git");
+    const args = seg.words.slice(at + 1);
+    const { i } = gitOptions(args);
+    return !args.slice(0, i).some((a) => a.text === "-c") && READ_ONLY_GIT.has(fold(args[i]?.text ?? ""));
+  }
+  return READ_ONLY.has(name);
+}
+
+const VAR_REF = /\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/g;
+const IFS_REF = /\$(?:\{IFS\}|IFS(?!\w))(?:\$[0-9])?/g;
+const MAX_VAR_LENGTH = 1024;
+// Total characters variable substitution may produce in one decision, shared by nested strings.
+const MAX_EXPANSION = 65_536;
+const ASSIGNING = new Set(["export", "declare", "typeset", "readonly", "local"]);
+const ASSIGN_WORD = /^([A-Za-z_]\w*)(\+?)=/;
+// Commands that set the variables named by their bare arguments.
+const SETTERS = new Set(["read", "getopts", "mapfile", "readarray", "unset", "printf", "select", "for"]);
+
+/** `$NAME` / `${NAME}` replaced by the value assigned earlier in the line; `$IFS` / `${IFS}` become a space. */
+function expandVars(text, vars, budget) {
+  const spend = (v) => {
+    budget.left -= v.length;
+    return budget.left < 0 ? "" : v;
+  };
+  return text.replace(IFS_REF, () => spend(" ")).replace(VAR_REF, (m, a, b) => {
+    const v = vars.get(a ?? b);
+    return v === undefined ? m : spend(v);
+  });
+}
+
+// Keywords after which a command runs only on some paths.
+const BRANCH_KEYWORDS = new Set(["then", "else", "elif", "do"]);
+const BRACE_GROUP = /(?<![$\\])\{([^{}]*)\}/g;
+const MAX_BRACE_WORDS = 64;
+
+// The first `{a,b}` group of a word, found without backtracking: `[^{}]*` cannot cross another brace.
+function commaGroup(t) {
+  for (const m of t.matchAll(BRACE_GROUP)) if (m[1].includes(",")) return m;
+  return undefined;
+}
+
+/**
+ * Brace expansion of a word with an unquoted `{` (`{r,}m` is `rm` and `m`). A `{x..y}` range stands for
+ * anything, so it becomes a `*` glob (and the word is a glob). A word that would expand past the cap spends
+ * the whole budget.
+ */
+function braceWords(w, budget) {
+  if (!w.brace || ASSIGN_WORD.test(w.text)) return [w];
+  const text = w.text.replace(BRACE_GROUP, (m, g) => (g.includes("..") ? "*" : m));
+  const ranged = text !== w.text;
+  let calls = 0;
+  const expand = (t) => {
+    const m = commaGroup(t);
+    if (!m || ++calls > MAX_BRACE_WORDS) return [t];
+    return m[1].split(",").flatMap((alt) => expand(t.slice(0, m.index) + alt + t.slice(m.index + m[0].length)));
+  };
+  const out = expand(text);
+  if (calls > MAX_BRACE_WORDS) {
+    budget.left = -1;
+    return [w];
+  }
+  if (out.length === 1 && !ranged) return [w];
+  return out.map((t) => (ranged ? { ...w, text: t, glob: true } : { ...w, text: t }));
+}
+
+// A value that no longer fits is not cut (the dropped part would go unchecked): the whole line counts as too complex.
+// Only text that grew through `$` expansion is capped: literal text is bounded by the command itself.
+const fits = (value, budget, expanded) => {
+  if (expanded && value.length > MAX_VAR_LENGTH) budget.left = -1;
+  return value;
+};
+
+/**
+ * Records `NAME=value` segments (also behind `export`) in `vars` and substitutes known variables into the
+ * words and redirect targets of every other segment, splitting a word that expanded to several. A value
+ * built at run time (`$(...)`, backticks), appended to (`+=`) or set by `getopts`, `mapfile`... is forgotten,
+ * so `$NAME` stays unexpanded and the rules for variables of unknown value apply. `for NAME in a b` and
+ * `read NAME <<< text` (also `while read NAME; do ...; done <<< text`, passed as `loopInput`) set NAME to
+ * every value it can take; an assignment that runs only on some paths (`a && X=1 || X=2`, `then X=1`) adds
+ * its value to the earlier ones instead of replacing them. A value that grew through `$` expansion past
+ * MAX_VAR_LENGTH spends the budget; literal text is kept whole.
+ * Words with an unquoted `{` are brace-expanded first. Returns false once the expansion budget is spent.
+ */
+function applyVars(seg, vars, budget, conditional = false, loopInput = undefined) {
+  let from = 0;
+  while (from < seg.words.length && KEYWORDS.has(seg.words[from].text)) from++;
+  if (seg.words.slice(0, from).some((w) => BRANCH_KEYWORDS.has(w.text))) conditional = true;
+  const lead = seg.words.slice(from);
+  const rest = lead.length && ASSIGNING.has(lead[0].text) ? lead.slice(1) : lead;
+  if (rest.length && rest.every((w) => ASSIGN_WORD.test(w.text))) {
+    for (const w of rest) {
+      const m = ASSIGN_WORD.exec(w.text);
+      const raw = w.text.slice(m[0].length);
+      const value = expandVars(raw, vars, budget);
+      const grew = raw.includes("$");
+      const old = vars.get(m[1]);
+      if (w.dyn || (m[2] && old === undefined)) vars.delete(m[1]);
+      else if (m[2]) vars.set(m[1], fits(old + value, budget, grew));
+      else if (conditional && old !== undefined && old !== value) vars.set(m[1], fits(`${old} ${value}`, budget, grew));
+      else vars.set(m[1], fits(value, budget, grew));
+    }
+    return budget.left >= 0;
+  }
+  seg.words = seg.words.flatMap((w) => braceWords(w, budget));
+  if (budget.left < 0) return false;
+  const at = seg.words.findIndex((w) => !ASSIGN_WORD.test(w.text) && !KEYWORDS.has(w.text));
+  const setter = at >= 0 && SETTERS.has(seg.words[at].text) ? seg.words[at].text : undefined;
+  if (setter)
+    for (const w of seg.words.slice(at + 1)) if (/^[A-Za-z_]\w*$/.test(w.text)) vars.delete(w.text);
+  seg.words = seg.words.flatMap((w) => {
+    if (!w.text.includes("$")) return [w];
+    const text = expandVars(w.text, vars, budget);
+    if (text === w.text || budget.left < 0) return [w];
+    const parts = text.split(/\s+/).filter(Boolean);
+    return (parts.length ? parts : [""]).map((t) => ({ ...w, text: t, fromVar: true, glob: w.glob || /[*?[]/.test(t) }));
+  });
+  for (const r of seg.redirs) r.target = expandVars(r.target, vars, budget);
+  for (const r of seg.inputs) r.target = expandVars(r.target, vars, budget);
+  const names = seg.words.slice(at + 1).filter((w) => /^[A-Za-z_]\w*$/.test(w.text));
+  if (setter === "for" && seg.words[at + 2]?.text === "in") {
+    const items = seg.words.slice(at + 3);
+    if (!items.some((w) => w.dyn || w.text.includes("$"))) vars.set(seg.words[at + 1].text, fits(items.map((w) => w.text).join(" "), budget, items.some((w) => w.fromVar)));
+  } else if (setter === "read") {
+    const here = seg.inputs.find((x) => x.op === "<<<") ?? (loopInput ? { target: expandVars(loopInput.target, vars, budget), dyn: loopInput.dyn } : undefined);
+    if (here && !here.dyn && !here.target.includes("$")) for (const n of names) vars.set(n.text, fits(here.target, budget, false));
+  }
+  return budget.left >= 0;
+}
+
+/** For each `while` / `until` segment, the here-string on the `done` that closes it (`while read X; do ...; done <<< text`). */
+function loopInputs(segments) {
+  const out = new Map();
+  const open = [];
+  segments.forEach((seg, idx) => {
+    const first = seg.words.find((w) => w.text !== "do" && w.text !== "then")?.text;
+    if (first === "while" || first === "until" || first === "for" || first === "select") open.push(idx);
+    else if (seg.words[0]?.text === "done") {
+      const head = open.pop();
+      const here = seg.inputs.find((x) => x.op === "<<<");
+      if (head !== undefined && here) out.set(head, here);
+    }
+  });
+  return out;
+}
+
+/**
+ * The commands and redirects of a shell command line, each with the directories it may run in.
+ * `bases` are absolute and grow linearly: the project root, the chain of every `cd` / `pushd` target
+ * assuming each succeeds, and every target resolved against the root alone (a `cd` can fail).
+ * `tight` is the directory after the latest `cd` chained with `&&` or `;` (a `cd x || cmd` keeps it).
+ * `tooComplex` is set past MAX_CDS directory changes or MAX_COMMAND_LENGTH characters.
+ * @param {string} cmd
+ * @param {string} root
+ * @param {(t: string) => string} [expand] applied to every path word (home, case folding)
+ * @param {(t: string) => string} [fold] applied to command names
+ * @param {{ vars: Map<string, string>, budget: { left: number } }} [outer] variables assigned before this string
+ *   runs (`X=a; bash -c 'rm $X'`) and the substitution budget shared with the strings around it
+ */
+export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer = { vars: new Map(), budget: { left: MAX_EXPANSION } }) {
+  const vars = new Map(outer.vars);
+  const { budget } = outer;
+  const commands = [];
+  const redirects = [];
+  const segments = [];
+  if (cmd.length > MAX_COMMAND_LENGTH || budget.left < 0) return { commands, redirects, segments, nested: [], vars, budget, tooComplex: true };
+  const parsed = shellSegments(cmd);
+  if (parsed.complex) return { commands, redirects, segments, nested: [], vars, budget, tooComplex: true };
+  let chain = root;
+  let bases = [root];
+  let tight = [root];
+  let cds = 0;
+  let pipeStart = 0;
+  let prevSep = "";
+  const loops = loopInputs(parsed.segments);
+  for (const [n, seg] of parsed.segments.entries()) {
+    const conditional = prevSep === "&&" || prevSep === "||";
+    prevSep = seg.sep;
+    if (!applyVars(seg, vars, budget, conditional, loops.get(n))) return { commands, redirects, segments, nested: parsed.nested, vars, budget, tooComplex: true };
+    for (const r of seg.redirs) redirects.push({ op: r.op, target: r.target, bases });
+    const found = commandsOf(seg.words, fold);
+    const bodies = seg.heredocs.map((h) => h.body);
+    segments.push({ words: seg.words, redirs: seg.redirs, inputs: seg.inputs, procSub: seg.procSub, pipeStart, bases, tight, name: found[0]?.name, sep: seg.sep, bodies });
+    if (seg.sep !== "|") pipeStart = segments.length;
+    for (const c of found) {
+      commands.push({ ...c, bases, tight });
+      if (c.name !== "cd" && c.name !== "pushd") continue;
+      const dir = splitArgs(c.args).operands[0];
+      if (!dir || dir.text === "-") continue;
+      if (++cds > MAX_CDS) return { commands, redirects, segments, nested: parsed.nested, vars, budget, tooComplex: true };
+      chain = path.resolve(chain, expand(dir.text));
+      bases = [...new Set([...bases, chain, path.resolve(root, expand(dir.text))])];
+      if (seg.sep === "&&" || seg.sep === ";") tight = [chain];
+    }
+  }
+  const checked = new Set();
+  for (const [idx, seg] of segments.entries()) {
+    seg.scriptBodies = [];
+    seg.codeBodies = [];
+    if (!seg.bodies.length) continue;
+    // A heredoc body is data only for a known sink: cat/tee/read-only tools (piped only into read-only
+    // tools or tee), `git commit -F -`, `gh ... --body-file -`. Any other consumer runs it as a script.
+    const pipe = [];
+    for (let j = idx; segments[j]?.sep === "|" && segments[j + 1]; j++) pipe.push(segments[j + 1]);
+    const sink =
+      (knownSafe(seg, fold) || seg.name === "tee" || readsStdinAsData(seg)) &&
+      pipe.every((x) => knownSafe(x, fold) || x.name === "tee");
+    if (sink) {
+      // A sink that writes a file which a later command in the same line runs: the body is that script.
+      const targets = writtenTargets(seg, fold);
+      const runner = targets.length ? segments.slice(idx + 1).find((x) => runs(x, targets, fold)) : undefined;
+      if (!runner) continue;
+      for (const t of targets) checked.add(t);
+      seg.scriptBodies = seg.bodies;
+      if (runner.words.some((w) => !w.quoted && INTERPRETERS.test(fold(baseName(w.text))))) seg.codeBodies = seg.bodies;
+      continue;
+    }
+    seg.scriptBodies = seg.bodies;
+    const interp = [seg, ...pipe].some((x) => x.words.some((w) => !w.quoted && INTERPRETERS.test(fold(baseName(w.text)))));
+    if (interp) seg.codeBodies = seg.bodies;
+  }
+  return { commands, redirects, segments, nested: parsed.nested, checked, vars, budget, tooComplex: false };
+}
+
+=== tsconfig.base.json (544 bytes) ===
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "lib": ["ES2024"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  }
+}
+
+=== turbo.json (237 bytes) ===
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "tasks": {
+    "build": { "dependsOn": ["^build"], "outputs": ["dist/**"] },
+    "typecheck": { "dependsOn": ["^typecheck"] },
+    "dev": { "cache": false, "persistent": true }
+  }
+}
+
+=== vitest.config.ts (174 bytes) ===
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    projects: ["packages/*", "apps/*", "scripts"],
+    passWithNoTests: true,
+  },
+});
+
