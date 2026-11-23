@@ -1,8 +1,8 @@
 import {
-  type Closure,
   COMPONENT_NAMES,
   type ComponentName,
   isComponentName,
+  type ResolutionContext,
 } from "./components.ts";
 
 /**
@@ -99,7 +99,7 @@ export const checkBlocks = (text: string): BlockError[] => parse(text).errors;
 export const hasDirectiveLines = (text: string): boolean =>
   text.split("\n").some((l) => DIRECTIVE.test(l));
 
-const holds = (frame: Frame, closure: Closure): boolean => {
+const holds = (frame: Frame, { closure }: ResolutionContext): boolean => {
   const all = frame.terms.every(
     ({ names, negate }) => names.some((n) => closure.has(n)) !== negate,
   );
@@ -107,11 +107,11 @@ const holds = (frame: Frame, closure: Closure): boolean => {
 };
 
 /**
- * Resolves the blocks for `closure`. In JSON files, when removed lines are followed by a line
+ * Resolves the blocks for `context`. In JSON files, when removed lines are followed by a line
  * that closes an object or array, the comma ending the last kept line before them is dropped, so
  * templates need no per-entry comma blocks. The fix-up is line-based and never reads string values.
  */
-export function resolveBlocks(text: string, closure: Closure, file = ""): string {
+export function resolveBlocks(text: string, context: ResolutionContext, file = ""): string {
   if (!hasDirectiveLines(text)) return text;
   const { lines, errors } = parse(text);
   if (errors.length) {
@@ -122,7 +122,7 @@ export function resolveBlocks(text: string, closure: Closure, file = ""): string
   const kept: string[] = [];
   let droppedSinceKept = false;
   for (const { text: line, frames } of lines) {
-    if (!frames.every((f) => holds(f, closure))) {
+    if (!frames.every((f) => holds(f, context))) {
       droppedSinceKept = true;
       continue;
     }

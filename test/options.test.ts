@@ -342,6 +342,11 @@ describe("resolveOptions: selection (Decisions 1, 3, 6, 9, 10)", () => {
   });
   const ALL = ["api", "web", "worker"];
 
+  it("carries a Runtime, which is node for now", async () => {
+    const { options } = await resolve(["proj"]);
+    expect(options.runtime).toBe("node");
+  });
+
   it("selects everything by default", async () => {
     const { options } = await resolve(["proj"]);
     expect(options.selection).toEqual({

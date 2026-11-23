@@ -52,6 +52,23 @@ export function closureOf(selection: Selection): Closure {
 
 export const FULL_CLOSURE: Closure = closureOf(FULL_SELECTION);
 
+/** The Runtime a generated repo targets (ADR-0005). Only `node` is used until `--runtime` lands. */
+export type Runtime = "node" | "cloudflare";
+export const DEFAULT_RUNTIME: Runtime = "node";
+
+/** What block resolution, file inclusion and ownership checks read: the Closure and the Runtime. */
+export interface ResolutionContext {
+  closure: Closure;
+  runtime: Runtime;
+}
+
+export const contextOf = (
+  selection: Selection,
+  runtime: Runtime = DEFAULT_RUNTIME,
+): ResolutionContext => ({ closure: closureOf(selection), runtime });
+
+export const FULL_CONTEXT: ResolutionContext = { closure: FULL_CLOSURE, runtime: DEFAULT_RUNTIME };
+
 /** Components outside the Closure, which become `deferred`. */
 export const absentFrom = (closure: Closure): ComponentName[] =>
   COMPONENT_NAMES.filter((n) => !closure.has(n));
@@ -89,5 +106,5 @@ export function componentsNeededBy(dest: string): ComponentName[] {
   return needed;
 }
 
-export const isGenerated = (dest: string, closure: Closure): boolean =>
+export const isGenerated = (dest: string, { closure }: ResolutionContext): boolean =>
   componentsNeededBy(dest).every((c) => closure.has(c));

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   closureOf,
   componentsNeededBy,
+  contextOf,
   FULL_CLOSURE,
+  FULL_CONTEXT,
   FULL_SELECTION,
   isGenerated,
   selectionOf,
@@ -11,6 +13,15 @@ import {
 const names = (apps: string[], packages: string[] = []) => [
   ...closureOf({ apps: apps as never, packages: packages as never }),
 ];
+
+describe("resolution context", () => {
+  it("carries the Closure and a Runtime that defaults to node", () => {
+    const sel = { apps: ["api"], packages: [] } as const;
+    expect(contextOf(sel)).toEqual({ closure: closureOf(sel), runtime: "node" });
+    expect(contextOf(sel, "cloudflare").runtime).toBe("cloudflare");
+    expect(FULL_CONTEXT).toEqual({ closure: FULL_CLOSURE, runtime: "node" });
+  });
+});
 
 describe("Closure", () => {
   it("is everything for the default Selection", () => {
@@ -58,7 +69,7 @@ describe("file ownership", () => {
   });
 
   it("keeps worktree machinery out of a Closure without db", () => {
-    const closure = closureOf({ apps: ["web"], packages: [] });
+    const closure = contextOf({ apps: ["web"], packages: [] });
     for (const f of [
       "compose.yaml",
       ".worktreeinclude",
