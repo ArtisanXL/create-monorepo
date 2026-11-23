@@ -2449,4 +2449,19 @@ describe("guard decision: hardening follow-ups (#41)", () => {
       ],
     );
   });
+
+  describe("fifth review (autoload, fpath, mapfile -C)", () => {
+    cases(
+      [
+        "FPATH=.; autoload -Uz printf; X=$(printf safe); rm -rf $X",
+        "fpath=(.); autoload -Uz printf; X=$(printf safe); rm -rf $X",
+        'FPATH=. zsh -c "autoload printf; rm -rf \\$(printf safe)"',
+        "autoload -Uz printf; X=$(printf safe); rm -rf $X",
+        "mapfile -c 1 -C 'source ./f.sh' a < /etc/hostname; X=$(printf safe); rm -rf $X",
+        'readarray -c 1 -C "source ./f.sh" a < /etc/hostname; X=$(printf safe); rm -rf $X',
+        "cd src && mapfile -c 1 -C 'cd ..;:' a < /etc/hostname && rm -rf .",
+      ],
+      ["cd src && rm -rf ."],
+    );
+  });
 });

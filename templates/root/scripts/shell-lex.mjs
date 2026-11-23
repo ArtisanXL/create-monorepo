@@ -633,7 +633,7 @@ const SHADOW_DEF = /(?:^|[\s;&|(])\\?(?:function\s+(?:printf|echo|pwd|command|bu
 
 // Words that define or load code the guard cannot read. Any one of them in a segment (also behind `time`, `command -p`,
 // `noglob`, `-`, a backslash or quotes) makes the line shadowed and switches `cd` narrowing off. `.` counts only as a command.
-const CODE_LOADERS = /^(?:alias|unalias|enable|eval|source|trap|functions\b.*)$/;
+const CODE_LOADERS = /^(?:alias|unalias|enable|eval|source|trap|autoload|mapfile|readarray|(?:functions|fpath|FPATH)\b.*)$/;
 const COMMAND_PREFIXES = new Set(["builtin", "command", "time", "noglob", "nocorrect", "-", "exec"]);
 
 /** The word of a segment that names the command (after assignments, keywords, prefixes such as `time` and their flags). */

@@ -2480,7 +2480,7 @@ export function decide({ tool, input, contract, root, home = "~", claudeMdText, 
   return message === undefined ? { allow: true } : { allow: false, message };
 }
 
-=== scripts/shell-lex.mjs (43950 bytes) ===
+=== scripts/shell-lex.mjs (43993 bytes) ===
 // The shell lexer and command segmenter behind the guard: splits a command line into simple commands,
 // redirects, heredocs and nested command strings, and works out where each runs. It knows nothing about
 // the architecture contract. Imported by guard-rules.mjs.
@@ -3116,7 +3116,7 @@ const SHADOW_DEF = /(?:^|[\s;&|(])\\?(?:function\s+(?:printf|echo|pwd|command|bu
 
 // Words that define or load code the guard cannot read. Any one of them in a segment (also behind `time`, `command -p`,
 // `noglob`, `-`, a backslash or quotes) makes the line shadowed and switches `cd` narrowing off. `.` counts only as a command.
-const CODE_LOADERS = /^(?:alias|unalias|enable|eval|source|trap|functions\b.*)$/;
+const CODE_LOADERS = /^(?:alias|unalias|enable|eval|source|trap|autoload|mapfile|readarray|(?:functions|fpath|FPATH)\b.*)$/;
 const COMMAND_PREFIXES = new Set(["builtin", "command", "time", "noglob", "nocorrect", "-", "exec"]);
 
 /** The word of a segment that names the command (after assignments, keywords, prefixes such as `time` and their flags). */
