@@ -22,7 +22,6 @@ export function adapterContract(name: PmName) {
     });
 
     it("puts every catalog entry into the catalog file", async () => {
-      const templates = await listTemplateFiles();
       const names = [...(await catalogPackages()), "@types/node"];
       const versions = new Map(names.map((n, i) => [n, `1.${i}.0`]));
       const g = await gather(
