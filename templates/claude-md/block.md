@@ -27,6 +27,9 @@ Chat with the user in the user's language. Everything else — code, comments, d
 @endif
 @endif
 - `__RUN__ arch`: architecture check only.
+@if cloudflare api|web|worker
+- `__FILTER__ __SCOPE__/<app> deploy:dry-run`: validate an App's Worker bundle. **Never deploy.** Deploying, creating queues and Hyperdrive configs, and putting secrets are done by humans; the guard blocks them (`docs/adr/0005-runtime-cloudflare-workers.md`).
+@endif
 @if db
 @if api|web|worker
 - `__RUN__ worktree:setup` / `worktree:info`: per-worktree `.env` + database (Paseo runs setup automatically; see `paseo.json`). Never hard-code ports; services get `$PASEO_PORT`.
