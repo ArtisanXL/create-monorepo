@@ -640,7 +640,7 @@ if (errors.length) {
 }
 console.log(`✓ Architecture check passed (${Object.keys(contract.packages).length} packages)`);
 
-=== scripts/arch-contract.mjs (5196 bytes) ===
+=== scripts/arch-contract.mjs (5257 bytes) ===
 // The single interpreter of architecture.json. Dependency-free (Node built-ins only); imported by
 // the guard hook, arch-check and the scaffolder. Under scripts/, so it is protected like them.
 import { createHash } from "node:crypto";
@@ -678,6 +678,7 @@ export function contractFrom(json) {
     protectedPaths: /** @type {string[]} */ (json.protected_paths ?? []),
     exceptions: /** @type {string[]} */ (json.agent_writable_exceptions ?? []),
     testAllow: /** @type {string[]} */ (json.test_allow ?? []),
+    runtime: /** @type {string} */ (json.runtime ?? "node"),
     packageManager: /** @type {string | undefined} */ (json.package_manager),
     claudeBlock: /** @type {BlockMarkers | undefined} */ (json.claude_md_block),
   };
@@ -941,7 +942,7 @@ export function check(snapshot) {
   return errors;
 }
 
-=== scripts/guard-rules.mjs (53219 bytes) ===
+=== scripts/guard-rules.mjs (56161 bytes) ===
 // The guard hook's decision, free of I/O: no stdin, env, filesystem or exit. The first matching
 // rule wins, so each message stays the same as it always was. Imported by .claude/hooks/guard.mjs.
 import path from "node:path";
@@ -1669,6 +1670,68 @@ function runtimeTextRule(env, cmd, parsed) {
   return undefined;
 }
 
+// Wrangler changes the Cloudflare account, so agents never run its mutating commands, in any invocation form.
+const WRANGLER_VALUE_FLAGS = new Set(["-c", "--config", "-e", "--env", "--cwd", "--env-file"]);
+const WRANGLER_MUTATING = {
+  versions: ["upload", "deploy"],
+  secret: ["put", "delete"],
+  queues: ["create", "delete"],
+  hyperdrive: ["create", "delete", "update"],
+};
+const WRANGLER_MSG =
+  "Mutating wrangler commands (deploy, versions upload|deploy, rollback, login, secret put|delete, queues create|delete|consumer add|remove, hyperdrive create|delete|update) change the Cloudflare account; only humans run them. `wrangler deploy --dry-run` is allowed.";
+const DEPLOY_SCRIPT_MSG =
+  "The deploy script runs `wrangler deploy` against the Cloudflare account; only humans deploy. Use `wrangler deploy --dry-run` to check a build.";
+
+const RUNNERS = ["pnpm", "npm", "yarn", "bun"];
+const isWrangler =(text) => /^wrangler(?:@[^/]*)?$/.test(baseName(text));
+
+/** The wrangler arguments of a simple command, or undefined when it does not run wrangler. */
+function wranglerArgs(c) {
+  if (isWrangler(c.name)) return c.args;
+  if (!RUNNERS.includes(c.name)) return undefined;
+  const k = c.args.findIndex((a) => ["exec", "dlx", "x"].includes(a.text));
+  if (k < 0) return undefined;
+  let j = k + 1;
+  while (j < c.args.length && c.args[j].text.startsWith("-")) j++;
+  return c.args[j] && isWrangler(c.args[j].text) ? c.args.slice(j + 1) : undefined;
+}
+
+function wranglerRule(c) {
+  const args = wranglerArgs(c);
+  if (!args) return undefined;
+  const pos = [];
+  let dry = false;
+  for (let i = 0; i < args.length; i++) {
+    const t = args[i].text;
+    const m = /^--dry-run(?:=(.*))?$/s.exec(t);
+    if (m) dry = !/^(?:false|0)$/.test(m[1] ?? (/^(?:false|0)$/.test(args[i + 1]?.text ?? "") ? "false" : "true"));
+    else if (WRANGLER_VALUE_FLAGS.has(t)) i++;
+    else if (!t.startsWith("-")) pos.push(t);
+  }
+  const [verb, sub, third] = pos;
+  const hit =
+    (verb === "deploy" && !dry) ||
+    verb === "rollback" ||
+    verb === "login" ||
+    WRANGLER_MUTATING[verb]?.includes(sub) ||
+    (verb === "queues" && sub === "consumer" && ["add", "remove"].includes(third));
+  return hit ? WRANGLER_MSG : undefined;
+}
+
+/** `<pm> run deploy`, `turbo run deploy`, `yarn deploy`: the repo's own deploy script. */
+function deployScriptRule(c) {
+  const args = c.args.map((a) => a.text);
+  const end = args.indexOf("--");
+  const own = end < 0 ? args : args.slice(0, end);
+  if ([...RUNNERS, "turbo"].includes(c.name)) {
+    const k = own.findIndex((a) => a === "run" || a === "run-script");
+    if (k >= 0 && own.slice(k + 1).includes("deploy")) return DEPLOY_SCRIPT_MSG;
+  }
+  if ((c.name === "yarn" || c.name === "bun") && own.find((a) => !a.startsWith("-")) === "deploy") return DEPLOY_SCRIPT_MSG;
+  return undefined;
+}
+
 function directRule(ctx, cmd, parsed) {
   const { contract, root, f, expand, budget } = ctx;
   if (parsed.tooComplex) return MSG.complex;
@@ -1752,7 +1815,11 @@ function directRule(ctx, cmd, parsed) {
       const target = long ? (long[1] ?? c.args[k + 1]?.text) : short ? (short[1] || c.args[k + 1]?.text) : undefined;
       if (target) addAll(writeRels, relsOf([target], c.bases));
     });
-    const msg = removeRule(env, c) ?? bulkRule(env, c);
+    const msg =
+      removeRule(env, c) ??
+      bulkRule(env, c) ??
+      wranglerRule(c) ??
+      (contract.runtime === "cloudflare" ? deployScriptRule(c) : undefined);
     if (msg) return msg;
     if (DELETERS.has(c.name) && printfRef && c.args.some((a) => printfRef.test(a.text))) return MSG.printfVar;
   }
