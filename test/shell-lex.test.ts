@@ -72,4 +72,12 @@ describe("shell lexer", () => {
     expect(words("[ -n $Z ] && X=a || X=b; rm $X")[3]).toEqual(["rm", "a", "b"]);
     expect(words("X=a; X=b; rm $X")[2]).toEqual(["rm", "b"]);
   });
+
+  it("reads a pattern group after the command name as part of the word", () => {
+    const r = targetsOf("rm -rf d@(ocs) (a|b)x && (cd s; ls)", "/proj").segments;
+    expect(r[0].words.map((w: { text: string }) => w.text)).toEqual(["rm", "-rf", "d*", "*x"]);
+    expect(r[0].words.slice(2).every((w: { glob?: boolean }) => w.glob)).toBe(true);
+    // a command-position `(` is still a subshell
+    expect(r.slice(1).map((s) => s.words.map((w: { text: string }) => w.text))).toEqual([["cd", "s"], ["ls"]]);
+  });
 });

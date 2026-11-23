@@ -196,6 +196,11 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
     nested.push(cmd.slice(i + 2, stop));
     return stop;
   };
+  // After the command name (a word that is not a keyword or assignment); `function f` still defines, not runs.
+  const inArgs = () => {
+    const lead = words.find((w) => !KEYWORDS.has(w.text) && !ASSIGNMENT.test(w.text));
+    return lead !== undefined && lead.text !== "function";
+  };
   let i = from;
   for (; i < cmd.length; i++) {
     const c = cmd[i];
@@ -278,6 +283,23 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
       const e = closeArith(cmd, i + 2);
       nested.push(cmd.slice(i + 2, e));
       i = e + 1;
+    } else if (c === "(" && !pending && cmd[i - 1] !== "<" && cmd[i - 1] !== ">" && !cur?.text.endsWith("$") && inArgs() && !(cur && /^[A-Za-z_]\w*\+?=$/.test(cur.text))) {
+      // A `(` after the command name is a pattern group (`d@(ocs)`, `!(src)`, `+(d)ocs`, zsh `(d|x)ocs`, `*(/)`), not a subshell.
+      // It stands for `*` in the word, so `d@(ocs)` is the glob `d@*`; a zsh `(#i)` flag makes the rest of the word `*`.
+      let d = 0;
+      let j = i;
+      for (; j < cmd.length; j++) {
+        if (cmd[j] === "\\") j++;
+        else if (cmd[j] === "(") d++;
+        else if (cmd[j] === ")" && --d === 0) break;
+      }
+      const flags = cmd[i + 1] === "#";
+      const w = grow();
+      // The extglob operator (`@(`, `!(`, `+(`, `*(`, `?(`) is syntax, not part of the name.
+      w.text = `${w.text.replace(/[@!+*?]$/, "")}*`;
+      w.glob = true;
+      if (flags) w.swallow = true;
+      i = Math.min(j, cmd.length);
     } else if (c === "(") {
       if (cur?.text.endsWith("$")) cur.dyn = true;
       depth++;
@@ -322,7 +344,10 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
       }
       pending = { op, amp };
     } else {
-      grow().text += c;
+      grow();
+      if (cur.swallow) continue;
+      cur.text += c;
+      if (c === "^" && cur.text.length === 1 && inArgs()) cur.glob = true;
       if (c === "{") cur.brace = true;
       if (c === "*" || c === "?" || c === "[") cur.glob = true;
     }

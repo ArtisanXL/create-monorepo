@@ -1593,7 +1593,7 @@ export function check(snapshot) {
   return errors;
 }
 
-=== scripts/guard-rules.mjs (45980 bytes) ===
+=== scripts/guard-rules.mjs (46431 bytes) ===
 // The guard hook's decision, free of I/O: no stdin, env, filesystem or exit. The first matching
 // rule wins, so each message stays the same as it always was. Imported by .claude/hooks/guard.mjs.
 import path from "node:path";
@@ -1953,6 +1953,8 @@ const GLOB = /[*?[]/;
 
 /** Whether a shell glob (each `*` / `?` / `[..]` stays inside one path segment) could match a protected path, or, when `folders`, a folder holding one. */
 function shellGlobHits(contract, rel, folders) {
+  // zsh `^x` (everything but x) matches like `*`.
+  if (rel.includes("^")) rel = rel.split("/").map((g) => (g.startsWith("^") ? "*" : g)).join("/");
   if (!GLOB.test(rel)) return false;
   if (contract.exceptions.some((e) => rel.startsWith(e))) return false;
   const segs = rel.split("/");
@@ -2208,7 +2210,11 @@ function runtimeTextRule(env, cmd, parsed) {
   const REDIRECT_TO = />[>|]?[ \t]*["']?([^\s"'<>|;&()\\]+)/g;
   // Adjacent empty quotes are dropped too (`'r''m'` runs rm), so both spellings are checked.
   const squashed = cmd.replace(/(?:''|"")+/g, "");
-  for (const text of squashed === cmd ? [cmd] : [cmd, squashed]) {
+  // Words decoded by the lexer (`$'rm\x20x'` is `rm x`), which the raw text spells differently.
+  const decoded = parsed.segments.flatMap((s) => [...s.words.map((w) => w.text), ...s.inputs.map((x) => x.target)]).join(" ");
+  const texts = squashed === cmd ? [cmd] : [cmd, squashed];
+  if (strong && decoded !== cmd) texts.push(decoded);
+  for (const text of texts) {
     const tokens = [...text.matchAll(/[^\s"'<>|;&()\\]+/g)].flatMap((m) => (m[0].startsWith("of=") ? [m[0], m[0].slice(3)] : [m[0]]));
     const targets = [...text.matchAll(REDIRECT_TO)].map((m) => m[1]);
     const protectedIn = (words) => env.relsOf(words, [env.root]).some((r) => isProtectedOrDir(contract, r));
@@ -2375,7 +2381,7 @@ export function decide({ tool, input, contract, root, home = "~", claudeMdText, 
   return message === undefined ? { allow: true } : { allow: false, message };
 }
 
-=== scripts/shell-lex.mjs (27792 bytes) ===
+=== scripts/shell-lex.mjs (29130 bytes) ===
 // The shell lexer and command segmenter behind the guard: splits a command line into simple commands,
 // redirects, heredocs and nested command strings, and works out where each runs. It knows nothing about
 // the architecture contract. Imported by guard-rules.mjs.
@@ -2574,6 +2580,11 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
     nested.push(cmd.slice(i + 2, stop));
     return stop;
   };
+  // After the command name (a word that is not a keyword or assignment); `function f` still defines, not runs.
+  const inArgs = () => {
+    const lead = words.find((w) => !KEYWORDS.has(w.text) && !ASSIGNMENT.test(w.text));
+    return lead !== undefined && lead.text !== "function";
+  };
   let i = from;
   for (; i < cmd.length; i++) {
     const c = cmd[i];
@@ -2656,6 +2667,23 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
       const e = closeArith(cmd, i + 2);
       nested.push(cmd.slice(i + 2, e));
       i = e + 1;
+    } else if (c === "(" && !pending && cmd[i - 1] !== "<" && cmd[i - 1] !== ">" && !cur?.text.endsWith("$") && inArgs() && !(cur && /^[A-Za-z_]\w*\+?=$/.test(cur.text))) {
+      // A `(` after the command name is a pattern group (`d@(ocs)`, `!(src)`, `+(d)ocs`, zsh `(d|x)ocs`, `*(/)`), not a subshell.
+      // It stands for `*` in the word, so `d@(ocs)` is the glob `d@*`; a zsh `(#i)` flag makes the rest of the word `*`.
+      let d = 0;
+      let j = i;
+      for (; j < cmd.length; j++) {
+        if (cmd[j] === "\\") j++;
+        else if (cmd[j] === "(") d++;
+        else if (cmd[j] === ")" && --d === 0) break;
+      }
+      const flags = cmd[i + 1] === "#";
+      const w = grow();
+      // The extglob operator (`@(`, `!(`, `+(`, `*(`, `?(`) is syntax, not part of the name.
+      w.text = `${w.text.replace(/[@!+*?]$/, "")}*`;
+      w.glob = true;
+      if (flags) w.swallow = true;
+      i = Math.min(j, cmd.length);
     } else if (c === "(") {
       if (cur?.text.endsWith("$")) cur.dyn = true;
       depth++;
@@ -2700,7 +2728,10 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
       }
       pending = { op, amp };
     } else {
-      grow().text += c;
+      grow();
+      if (cur.swallow) continue;
+      cur.text += c;
+      if (c === "^" && cur.text.length === 1 && inArgs()) cur.glob = true;
       if (c === "{") cur.brace = true;
       if (c === "*" || c === "?" || c === "[") cur.glob = true;
     }

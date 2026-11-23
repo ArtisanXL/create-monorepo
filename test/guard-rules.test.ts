@@ -1819,4 +1819,25 @@ describe("guard decision: hardening follow-ups (#41)", () => {
       expect(under("rm -rf ~/other")).toEqual({ allow: true });
     });
   });
+
+  describe("4. lexer: pattern groups and decoded text", () => {
+    cases(
+      [
+        // bash extglob
+        "rm -rf d@(ocs)",
+        "rm -rf !(src)",
+        "rm -rf +(d)ocs",
+        "rm -rf *(/)",
+        // zsh patterns
+        "rm -rf (d|x)ocs",
+        "rm arch(i|x)tecture.json",
+        "rm -rf ^src",
+        "rm -rf (#i)DOCS",
+        // ANSI-C text run by a shell
+        "echo $'rm\\x20architecture.json' | sh",
+        "bash <<< $'rm\\x20architecture.json'",
+      ],
+      ["(cd src && rm -rf x)", "rm -rf src/@(a|b)", "echo (x)", "echo $'a\\tb'", "echo $'a\\tb' | sh", "f() { echo hi; }; f", "X=(a b); echo $X", "diff <(sort a) <(sort b)"],
+    );
+  });
 });

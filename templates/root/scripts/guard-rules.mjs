@@ -357,6 +357,8 @@ const GLOB = /[*?[]/;
 
 /** Whether a shell glob (each `*` / `?` / `[..]` stays inside one path segment) could match a protected path, or, when `folders`, a folder holding one. */
 function shellGlobHits(contract, rel, folders) {
+  // zsh `^x` (everything but x) matches like `*`.
+  if (rel.includes("^")) rel = rel.split("/").map((g) => (g.startsWith("^") ? "*" : g)).join("/");
   if (!GLOB.test(rel)) return false;
   if (contract.exceptions.some((e) => rel.startsWith(e))) return false;
   const segs = rel.split("/");
@@ -612,7 +614,11 @@ function runtimeTextRule(env, cmd, parsed) {
   const REDIRECT_TO = />[>|]?[ \t]*["']?([^\s"'<>|;&()\\]+)/g;
   // Adjacent empty quotes are dropped too (`'r''m'` runs rm), so both spellings are checked.
   const squashed = cmd.replace(/(?:''|"")+/g, "");
-  for (const text of squashed === cmd ? [cmd] : [cmd, squashed]) {
+  // Words decoded by the lexer (`$'rm\x20x'` is `rm x`), which the raw text spells differently.
+  const decoded = parsed.segments.flatMap((s) => [...s.words.map((w) => w.text), ...s.inputs.map((x) => x.target)]).join(" ");
+  const texts = squashed === cmd ? [cmd] : [cmd, squashed];
+  if (strong && decoded !== cmd) texts.push(decoded);
+  for (const text of texts) {
     const tokens = [...text.matchAll(/[^\s"'<>|;&()\\]+/g)].flatMap((m) => (m[0].startsWith("of=") ? [m[0], m[0].slice(3)] : [m[0]]));
     const targets = [...text.matchAll(REDIRECT_TO)].map((m) => m[1]);
     const protectedIn = (words) => env.relsOf(words, [env.root]).some((r) => isProtectedOrDir(contract, r));
