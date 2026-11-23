@@ -162,8 +162,9 @@ const MSG = {
 };
 
 /** git clean/checkout/restore/rm/mv aimed at protected paths (also behind `sudo -u x git ...`). */
-// HEAD and revisions relative to it (`HEAD~2`, `HEAD^`, `@{u}`, `HEAD@{1}`, `ORIG_HEAD`): resetting to them stays in the current history.
-const HEAD_RELATIVE = /^(?:HEAD|@)?(?:~\d*|\^\d*|@\{[^}]*\})*$|^ORIG_HEAD$/;
+// HEAD and ancestors of it (`HEAD~2`, `HEAD^`, `HEAD@{0}`, `ORIG_HEAD`): resetting to them stays in the current history.
+// `@{u}` (upstream) and `HEAD@{1}` (reflog) can point anywhere, like `origin/main`, so they are not here.
+const HEAD_RELATIVE = /^(?:HEAD|@)?(?:~\d*|\^\d*)*$|^(?:HEAD)?@\{0\}$|^ORIG_HEAD$/;
 const INCLUDE_KEY = /^include(?:if\..+)?\.path$/i;
 // Config keys that name a program or file git runs or reads.
 const COMMAND_KEY = /pager|editor|ssh|askpass|fsmonitor|external|textconv|command|driver|clean|smudge|process|helper|program|hookspath|alias|include|exec/i;
@@ -209,10 +210,18 @@ function globHitsProtected(contract, rel) {
 // (`HEAD@{0}` is the current commit).
 const HEAD_ONLY = /^(?:HEAD|@)?$/;
 const CURRENT = /^(?:HEAD|@)@?(?:\{0\})?$/;
+// A 4-6 character abbreviation counts only with a digit and a letter (`abc123`): `cafe` and `1234` may be branch names.
+const SHORT_HEX = /^(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{4,6}$/i;
 const isRevision = (t) =>
-  !t.startsWith(":") && !CURRENT.test(t) && !/^@\{-\d+\}$/.test(t) && /^[0-9a-f]{7,40}$|^ORIG_HEAD|^FETCH_HEAD|^refs\/|[~^]|@\{/i.test(t);
-// Whole-tree pathspecs: `.`, `:/`, `*`, `:(top)`.
-const WHOLE_TREE = /^(?:\.\/?|:\/\.?|\*|:\(top\)[.*]?)$/;
+  !t.startsWith(":") && !CURRENT.test(t) && !/^@\{-\d+\}$/.test(t) && (SHORT_HEX.test(t) || /^[0-9a-f]{7,40}$|^ORIG_HEAD|^FETCH_HEAD|^refs\/|[~^]|@\{/i.test(t));
+// Whole-tree pathspecs that do not depend on the directory: `:/`, `*`, `:(top)`. `.` and `./` are decided on the resolved path.
+const WHOLE_TREE = /^(?::\/\.?|\*|:\(top\)[.*]?)$/;
+// The revisions `--source=X` / `-s X` name on a git restore line.
+const restoreSources = (tail) =>
+  tail.flatMap((a, k) => {
+    const m = /^--source=(.*)$/s.exec(a.text) ?? /^-s(.+)$/s.exec(a.text);
+    return m ? [m[1]] : a.text === "--source" || a.text === "-s" ? [tail[k + 1]?.text ?? ""] : [];
+  });
 
 /**
  * Whether the line moves HEAD or the index to another revision (`git reset <rev>` other than `--soft`, `git read-tree <rev>`):
@@ -259,7 +268,7 @@ function pathspec(t) {
   return { path: m[3] === "" ? "." : m[3], top: words.includes("top") || m[2] === "/", magic: true, icase: words.includes("icase") };
 }
 
-function gitRule(env, words, bases, parsed) {
+function gitRule(env, words, bases, tight, parsed) {
   const { contract, relsOf, expand } = env;
   const at = words.findIndex((w) => !w.quoted && env.fold(baseName(w.text)) === "git");
   if (at < 0) return undefined;
@@ -294,11 +303,13 @@ function gitRule(env, words, bases, parsed) {
   }
   if (!["clean", "checkout", "restore", "rm", "mv"].includes(sub ?? "")) return undefined;
   const gb = [...bases, ...dirs.map((d) => path.resolve(env.root, expand(d)))];
+  // Where the command really runs: the latest `cd` that must have succeeded, or the `-C` folders.
+  const tb = dirs.length ? dirs.map((d) => path.resolve(env.root, expand(d))) : tight;
   const g = splitArgs(args.slice(i + 1));
   if (relsOf(g.operands, gb).some((r) => isProtectedOrDir(contract, r) || holdsProtected(contract, r))) return MSG.git;
   // A whole-tree revert from a revision rewrites protected files too: `checkout <rev> -- .`, `restore --source=<rev> .`.
   // Decided on the resolved path, so `src/..` and `./` are the project root too.
-  const isRoot = (text, top) => relsOf([text], top ? [env.root] : gb, true).includes("");
+  const isRoot = (text, top) => relsOf([text], top ? [env.root] : tb, true).includes("");
   const dots = g.operands.filter((o) => WHOLE_TREE.test(o.text) || (!o.text.startsWith(":") && isRoot(o.text, false)));
   // A whole-tree restore reads the index, which an earlier `git reset <rev>` on the line may have rewound.
   const force = sub === "checkout" && g.flags.some((x) => /^-[A-Za-z]*f|^--force$/.test(x)) && g.operands.every((o) => HEAD_ONLY.test(o.text));
@@ -308,9 +319,15 @@ function gitRule(env, words, bases, parsed) {
   // whole tree; a magic pathspec with no path or `.` is the whole tree too; `icase` compares in lower case.
   const tail = args.slice(i + 1);
   const dashes = tail.findIndex((a) => a.text === "--");
-  const fromRevision = sub === "restore" ? g.flags.some((x) => /^(?:--source|-s)/.test(x)) : dashes >= 0 && tail.slice(0, dashes).some((a) => !a.text.startsWith("-"));
+  // The revision is bare HEAD / `@` (the current commit) for `checkout HEAD -- .` and `restore --source=HEAD .`: no rewind.
+  const named = (t) => !t.startsWith("-") && !CURRENT.test(t);
+  const fromSource = sub === "restore" && restoreSources(tail).some(named);
+  // Without `--`, git reads the first of two or more operands as the revision, unless it is a pathspec or a glob.
+  const first = g.operands[0]?.text ?? "";
+  const bareRev = sub === "checkout" && dashes < 0 && g.operands.length >= 2 && named(first) && !first.startsWith(":") && !GLOB.test(first);
+  const fromRevision = sub === "restore" ? fromSource : bareRev || (dashes >= 0 && tail.slice(0, dashes).some((a) => named(a.text)));
   if ((sub === "checkout" || sub === "restore") && (fromRevision || rewinds(env, parsed))) {
-    const specs = (dashes >= 0 ? tail.slice(dashes + 1) : g.operands).map((o) => pathspec(o.text));
+    const specs = (dashes >= 0 ? tail.slice(dashes + 1) : bareRev ? g.operands.slice(1) : g.operands).map((o) => pathspec(o.text));
     if (specs.length && specs.every((x) => x?.exclude)) return MSG.rewind;
     for (const spec of specs) {
       if (!spec || spec.exclude) continue;
@@ -321,8 +338,7 @@ function gitRule(env, words, bases, parsed) {
     }
   }
   const fromRev =
-    (sub === "checkout" && g.operands.length > dots.length) ||
-    (sub === "restore" && g.flags.some((x) => /^(?:--source|-s)/.test(x)));
+    (sub === "checkout" && g.operands.filter((o) => named(o.text)).length > dots.length) || fromSource;
   if (dots.length && fromRev) return MSG.git;
   // A glob after a revision restores every path it matches: `checkout HEAD~5 -- '*'`, `restore -s rev '*.json'`.
   const glob = (o) => /[*?[]/.test(o.text);
@@ -330,8 +346,8 @@ function gitRule(env, words, bases, parsed) {
   const dd = rest.findIndex((a) => a.text === "--");
   const hasRev =
     sub === "restore"
-      ? g.flags.some((x) => /^(?:--source|-s)/.test(x))
-      : sub === "checkout" && (dd >= 0 ? rest.slice(0, dd).some((a) => !a.text.startsWith("-")) : g.operands.some((o) => !glob(o)));
+      ? fromSource
+      : sub === "checkout" && (dd >= 0 ? rest.slice(0, dd).some((a) => named(a.text)) : g.operands.some((o) => !glob(o) && named(o.text)));
   if (hasRev && g.operands.filter(glob).some((o) => relsOf([o], gb).some((r) => globHitsProtected(contract, r)))) return MSG.git;
   return undefined;
 }
@@ -644,7 +660,7 @@ function directRule(ctx, cmd, parsed) {
 
   for (const [idx, s] of parsed.segments.entries()) {
     const msg =
-      gitRule(env, s.words, s.bases, parsed) ??
+      gitRule(env, s.words, s.bases, s.tight, parsed) ??
       oneLinerRule(env, s.words, s.bases) ??
       (mentionsProtected(env, s.codeBodies, s.bases) ? MSG.oneLiner : undefined) ??
       fallbackRule(env, parsed, idx, writeRels);

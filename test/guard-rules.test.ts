@@ -1194,6 +1194,10 @@ describe("guard decision: remaining limits (#34)", () => {
       "git reset --hard feature/x~2",
       "git reset --hard abc1234",
       "git reset -q --hard main",
+      // #41: upstream and reflog revisions can point anywhere
+      "git reset --hard @{u}",
+      "git reset --hard @{upstream}",
+      "git reset --hard HEAD@{1}",
     ])("blocks %s", (cmd) => {
       expect(blocked(bash(cmd)), cmd).toBeDefined();
     });
@@ -1207,10 +1211,7 @@ describe("guard decision: remaining limits (#34)", () => {
       "git reset --hard HEAD^",
       "git reset --hard HEAD^^",
       "git reset --hard @~2",
-      "git reset --hard @{u}",
-      "git reset --hard @{upstream}",
       "git reset --hard ORIG_HEAD",
-      "git reset --hard HEAD@{1}",
       "git reset --soft HEAD~1",
       "git reset HEAD~1",
       "git reset HEAD file.ts",
@@ -1717,5 +1718,65 @@ describe("guard decision: hardening follow-ups (#41)", () => {
       expect(ms).toBeLessThan(1000);
     });
     cases(["X=$(printf docs); rm -rf $X", "X=$(printf a); Y=$(printf b); rm -rf ${Y}"], ["X=$(printf a); rm a.txt"]);
+  });
+
+  describe("2. git", () => {
+    describe("bare HEAD is not a rewind (relaxed)", () => {
+      cases(
+        ["git checkout HEAD~1 -- .", "git reset abc1234 && git checkout HEAD -- .", "git checkout HEAD -- architecture.json", "git restore --source=HEAD~1 .", "git restore -s main ."],
+        [
+          "git checkout HEAD -- .",
+          "git checkout HEAD .",
+          "git checkout @ -- .",
+          "git checkout HEAD@{0} -- .",
+          "git restore --source=HEAD .",
+          "git restore -s @ .",
+          "git checkout HEAD -- ':!src'",
+        ],
+      );
+    });
+
+    describe("cd into a folder narrows a whole-tree restore (relaxed)", () => {
+      cases(
+        [
+          "cd docs && git checkout main -- .",
+          "cd src && git checkout main -- ..",
+          "cd src && git checkout main -- :/",
+          "git checkout main -- .",
+          "cd src; git checkout main -- ..",
+        ],
+        ["cd src && git checkout main -- .", "cd src && git restore -s main .", "cd src; git checkout main -- .", "git -C src checkout main -- ."],
+      );
+    });
+
+    describe("an exclusion pathspec without -- (blocked)", () => {
+      cases(
+        ["git checkout main ':!src'", "git checkout HEAD~3 ':(exclude)src'"],
+        ["git checkout ':!src/x.ts' src", "git checkout main src/x.ts", "git checkout abc1234 src/x.ts"],
+      );
+    });
+
+    describe("upstream and reflog revisions (blocked)", () => {
+      cases(
+        ["git reset --keep @{u}", "git reset --hard HEAD@{1}", "git reset --hard @{upstream}", "git reset @{u} && git checkout -- ."],
+        ["git reset --hard HEAD@{0}", "git reset --keep HEAD~1", "git reset --hard HEAD^", "git reset --hard ORIG_HEAD"],
+      );
+    });
+
+    describe("short hex revisions (blocked, heuristic)", () => {
+      cases(
+        ["git checkout abc123", "git checkout ab12", "git switch --detach abc123", "git switch abc123"],
+        ["git checkout cafe", "git checkout 1234", "git checkout feat-1"],
+      );
+    });
+
+    it("known limits: all-letter or all-digit short names and rewinds across calls", () => {
+      // `face` / `decade` / `1234` may be branch names; telling them apart needs repo state.
+      for (const cmd of ["git checkout face", "git checkout decade", "git checkout 123456"]) expect(bash(cmd), cmd).toEqual({ allow: true });
+      // decide() is pure and sees one call; the reset and the whole-tree checkout are each allowed alone.
+      // Carrying state across calls would put I/O into the hook, and blocking every `checkout -- .` breaks "discard my changes".
+      expect(bash("git reset abc1234")).toEqual({ allow: true });
+      expect(bash("git checkout -- .")).toEqual({ allow: true });
+    });
   });
 });
