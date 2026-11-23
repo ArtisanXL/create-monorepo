@@ -21,6 +21,7 @@ interface Config {
   };
   triggers?: { crons?: string[] };
   services?: { binding: string; service: string }[];
+  dev?: { inspector_port?: number };
 }
 
 /** `wrangler deploy --dry-run` accepts mismatched names, so this reads the configs together. */
@@ -117,5 +118,23 @@ describe("Cloudflare binding consistency", () => {
       JSON.stringify(paseo).match(/node scripts\/cloudflare-dev\.mjs -- [^"]+/g) ?? [];
     expect(commands.some((c) => c.includes("@acme/api dev"))).toBe(true);
     expect(commands.some((c) => c.includes("@acme/web dev"))).toBe(true);
+  });
+
+  it("gives every Worker its own debugger port, so three started at once never probe the same one", async () => {
+    const { configs, read } = await cloudflareRepo({
+      apps: ["api", "web", "worker"],
+      packages: [],
+    });
+    // wrangler (api, worker) and the Vite plugin (web) each probe for a free port from 9229 when
+    // none is set; started together they pick the same one and the loser dies with "Address already
+    // in use" (socket "direct:1:default").
+    const ports = [
+      configs.api?.dev?.inspector_port,
+      configs.worker?.dev?.inspector_port,
+      Number((await read("apps/web/vite.config.ts")).match(/\|\| (\d+);/)?.[1]),
+    ];
+    for (const port of ports) expect(port).toBeGreaterThan(9229);
+    expect(new Set(ports).size).toBe(3);
+    expect(await read("apps/web/vite.config.ts")).toContain("inspectorPort })");
   });
 });
