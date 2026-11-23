@@ -9,7 +9,7 @@ import {
   isProtectedOrDir,
   packageOf,
 } from "./arch-contract.mjs";
-import { ASSIGNMENT, INTERPRETERS, KEYWORDS, SHELL_NAME, SUBST, baseName, gitOptions, knownSafe, splitArgs, staticOutput, targetsOf } from "./shell-lex.mjs";
+import { ASSIGNMENT, INTERPRETERS, KEYWORDS, SHELL_NAME, SUBST, baseName, gitOptions, knownSafe, literalDir, pwdWord, splitArgs, staticOutput, targetsOf } from "./shell-lex.mjs";
 
 const toPosix = (p) => p.split(path.sep).join("/");
 
@@ -136,6 +136,9 @@ const MSG = {
   protected: "Command touches a protected path; only humans may change it.",
   git: "Command touches a protected path via git; only humans may change it.",
   folder: "Command would delete or move a folder that contains protected paths; only humans may change them.",
+  folderChange: "Command would change a folder that contains protected paths (permissions, ownership); only humans may change them.",
+  ancestorChange: "Command would change the project root or a folder above it (permissions, ownership), which covers protected paths; only humans may do that.",
+  globWrite: "A glob in this write could match protected paths (or a folder inside one); name the files explicitly, and quote a name that really contains `*`.",
   ancestor: "Command would delete or move the project root or a folder above it, which covers protected paths; only humans may do that.",
   oneLiner:
     "Command touches a protected path through interpreter code; only humans may change it. Code that only reads a protected file is blocked too: read it with cat instead.",
@@ -236,11 +239,15 @@ function rewinds(env, parsed) {
     const args = s.words.slice(at + 1);
     const { i } = gitOptions(args);
     const sub = args[i]?.text;
-    if (sub !== "reset" && sub !== "read-tree") return false;
     const rest = args.slice(i + 1);
+    // Moving HEAD or a branch by hand: a restore from HEAD afterwards reads the new commit.
+    if (sub === "update-ref" || sub === "symbolic-ref")
+      return !rest.some((a) => /^-[A-Za-z]*d/.test(a.text)) && rest.some((a) => !a.text.startsWith("-") && /^(?:HEAD|@|refs\/heads\/.*)$/.test(a.text));
+    if (sub !== "reset" && sub !== "read-tree") return false;
     const dd = rest.findIndex((a) => a.text === "--");
     const before = dd < 0 ? rest : rest.slice(0, dd);
-    if (before.some((a) => a.text === "--soft" || a.text === "-n")) return false;
+    // `reset --soft <rev>` moves HEAD too, so a restore from HEAD afterwards rewinds. `read-tree -n` changes nothing.
+    if (sub === "read-tree" && before.some((a) => a.text === "-n")) return false;
     const first = before.find((a) => !a.text.startsWith("-"));
     return first !== undefined && !HEAD_RELATIVE.test(first.text);
   });
@@ -251,10 +258,25 @@ function rewinds(env, parsed) {
 function checksOutRevision(g, rest) {
   const isRev = (o) => isRevision(o.text);
   if (rest.some((a) => a.text === "--") && rest.slice(rest.findIndex((a) => a.text === "--") + 1).length) return false;
-  const revs = g.operands.filter(isRev);
-  const creates = g.flags.some((x) => /^-[A-Za-z]*[bB]$|^--orphan$/.test(x));
+  // The name after -b / -B / --orphan is a new branch, not a revision (`git checkout -b abc123`).
+  const operands = withoutName(rest, /^-[A-Za-z]*[bB]$|^--orphan$/);
+  const revs = operands.filter(isRev);
   if (g.flags.includes("--detach") && g.operands.some((o) => !HEAD_ONLY.test(o.text))) return true;
-  return revs.length > 0 && g.operands.length - revs.length <= (creates ? 1 : 0);
+  return revs.length > 0 && operands.length === revs.length;
+}
+
+/** The operands of git arguments without the value of the options matching `re` (the name of a branch being created). */
+function withoutName(args, re) {
+  const out = [];
+  let skip = false;
+  let dashes = false;
+  for (const a of args) {
+    if (!dashes && a.text === "--") dashes = true;
+    else if (skip) skip = false;
+    else if (!dashes && re.test(a.text)) skip = true;
+    else if (dashes || a.text.length < 2 || !a.text.startsWith("-")) out.push(a);
+  }
+  return out;
 }
 
 /**
@@ -286,7 +308,9 @@ function gitRule(env, words, bases, tight, parsed) {
   }
   if (sub === "reset") {
     const r = splitArgs(args.slice(i + 1));
-    return r.flags.some((x) => /^--(?:hard|keep|merge)$/.test(x)) && r.operands.some((o) => !HEAD_RELATIVE.test(o.text)) ? MSG.reset : undefined;
+    const hard = r.flags.some((x) => /^--(?:hard|keep|merge)$/.test(x));
+    // `reset --soft <rev> && reset --hard` ends at <rev> as well.
+    return hard && (r.operands.some((o) => !HEAD_RELATIVE.test(o.text)) || rewinds(env, parsed)) ? MSG.reset : undefined;
   }
   if (sub === "stash") return rewinds(env, parsed) ? MSG.rewind : undefined;
   if (sub === "read-tree") {
@@ -296,21 +320,23 @@ function gitRule(env, words, bases, tight, parsed) {
   if (sub === "switch") {
     const r = splitArgs(args.slice(i + 1));
     const detach = r.flags.some((x) => /^(?:--detach|-d)$/.test(x)) && r.operands.some((o) => !HEAD_ONLY.test(o.text));
-    return detach || r.operands.some((o) => isRevision(o.text)) ? MSG.rewind : undefined;
+    return detach || withoutName(args.slice(i + 1), /^(?:-[A-Za-z]*[cC]|--create|--force-create|--orphan)$/).some((o) => isRevision(o.text)) ? MSG.rewind : undefined;
   }
   if (sub === "checkout-index") {
     const r = splitArgs(args.slice(i + 1));
     return rewinds(env, parsed) && r.flags.some((x) => /^-[A-Za-z]*a|^--all$/.test(x)) ? MSG.rewind : undefined;
   }
   if (!["clean", "checkout", "restore", "rm", "mv"].includes(sub ?? "")) return undefined;
-  const gb = [...bases, ...dirs.map((d) => path.resolve(env.root, expand(d)))];
-  // Where the command really runs: the latest `cd` that must have succeeded, or the `-C` folders.
-  const tb = dirs.length ? dirs.map((d) => path.resolve(env.root, expand(d))) : tight;
+  // Where the command really runs: where the line's `cd` chain got it, then each `-C` in turn (`-C src -C ..` is the root).
+  const dirNames = dirs.map((d) => env.pwd(d));
+  const tb = dirs.length ? (dirNames.every(literalDir) ? tight.map((t) => dirNames.reduce((at, d) => path.resolve(at, expand(d)), t)) : [env.root]) : tight;
+  const gb = [...bases, ...dirs.map((d) => path.resolve(env.root, expand(d))), ...tb];
   const g = splitArgs(args.slice(i + 1));
   if (relsOf(g.operands, gb).some((r) => isProtectedOrDir(contract, r) || holdsProtected(contract, r))) return MSG.git;
   // A whole-tree revert from a revision rewrites protected files too: `checkout <rev> -- .`, `restore --source=<rev> .`.
   // Decided on the resolved path, so `src/..` and `./` are the project root too.
-  const isRoot = (text, top) => relsOf([text], top ? [env.root] : tb, true).includes("");
+  // Only a bare `.` / `./` is decided on where the command really runs; `..` and `src/..` count against every folder it may be in.
+  const isRoot = (text, top) => relsOf([text], top ? [env.root] : /^\.\/?$/.test(text) ? tb : gb, true).includes("");
   const dots = g.operands.filter((o) => WHOLE_TREE.test(o.text) || (!o.text.startsWith(":") && isRoot(o.text, false)));
   // A whole-tree restore reads the index, which an earlier `git reset <rev>` on the line may have rewound.
   const force = sub === "checkout" && g.flags.some((x) => /^-[A-Za-z]*f|^--force$/.test(x)) && g.operands.every((o) => HEAD_ONLY.test(o.text));
@@ -390,13 +416,15 @@ function removeRule(env, c) {
   // A substitution of printf / echo whose output cannot be known names a delete target the guard cannot see.
   if (sources.some((w) => w.printf)) return MSG.printfVar;
   const holds = env.relsOf(sources, c.bases).some((r) => holdsProtected(env.contract, r));
-  if (holds || (c.name === "rm" && env.relsOf(sources, c.tight, true).includes(""))) return MSG.folder;
+  // chmod / chown / chgrp -R change files instead of removing them, and the message says so.
+  const removes = DELETERS.has(c.name);
+  if (holds || (c.name === "rm" && env.relsOf(sources, c.tight, true).includes(""))) return removes ? MSG.folder : MSG.folderChange;
   // The project root sits inside a source: `rm -rf ..`, `rm -rf /`, `rm -rf ~`.
-  if (env.coversRoot(sources, c.tight)) return MSG.ancestor;
+  if (env.coversRoot(sources, c.tight)) return removes ? MSG.ancestor : MSG.ancestorChange;
   // A glob (`rm -rf d*`) is resolved against the directory the command really runs in, not every `cd` that might have failed.
   // Only unquoted metacharacters glob; a quoted `'*'` is a literal name.
   const recursiveRm = c.name !== "rm" || flags.some((x) => /^-[A-Za-z]*[rR]|^--recursive$/.test(x));
-  return env.relsOf(sources.map(wildText).filter((t) => t !== undefined), c.tight).some((r) => shellGlobHits(env.contract, r, recursiveRm)) ? MSG.glob : undefined;
+  return env.relsOf(sources.map(wildText).filter((t) => t !== undefined), c.tight).some((r) => shellGlobHits(env.contract, r, recursiveRm)) ? (removes ? MSG.glob : MSG.globWrite) : undefined;
 }
 
 /**
@@ -408,9 +436,8 @@ function wildText(w) {
   const t = w.text
     .replace(/\$\{[A-Za-z_]\w*:-([^}]*)\}/g, "$1")
     .replace(new RegExp(`\\$\\{[A-Za-z_]\\w*\\}|\\$[A-Za-z_]\\w*|${SUBST}`, "g"), (m, at, str) => (/[\w.*?[-]/.test(str[at + m.length] ?? "") ? "*" : m));
-  // zsh `^x` (everything but x) is `*`.
-  const u = w.glob && t.includes("^") ? t.split("/").map((g) => (g.startsWith("^") ? "*" : g)).join("/") : t;
-  return (w.glob || t !== w.text) && GLOB.test(u) ? u : undefined;
+  // (a zsh `^x` makes the word a glob too; shellGlobHits reads it as `*`)
+  return w.glob || (t !== w.text && GLOB.test(t)) ? t : undefined;
 }
 
 /** The words of a `find` command before its first option: where it starts searching. */
@@ -462,7 +489,7 @@ function printfNames(cmd) {
   if (!/printf|echo/.test(cmd)) return [];
   const out = [];
   // printf, also behind `command` / `builtin` / a path, and `echo -e` with an escape.
-  for (const m of cmd.matchAll(/(?:^|[\s;&|(])([A-Za-z_]\w*)\+?=["']?(?:\$\(|`)\s*(?:(?:command|builtin)\s+|\S*\/)?(?:printf\b|echo\s+-[A-Za-z]*e\b[^)`]*\\)|\bprintf\s+-v\s*([A-Za-z_]\w*)/g)) out.push(m[1] ?? m[2]);
+  for (const m of cmd.matchAll(/(?:^|[\s;&|(])([A-Za-z_]\w*)\+?=["']?(?:\$\(|`)\s*(?:(?:command|builtin)\s+|(?:[^\s/(`]*\/)+)?(?:printf\b|echo\s+-[A-Za-z]*e\b[^)`]*\\)|\bprintf\s+-v\s*([A-Za-z_]\w*)/g)) out.push(m[1] ?? m[2]);
   return out;
 }
 
@@ -556,9 +583,9 @@ function fallbackRule(env, parsed, idx, writeRels) {
   let fed = s.words.some((w) => !w.quoted && word(w) === "xargs") ? [...(prev ? [...prev.words, ...bodyWords(prev)] : []), ...bodyWords(s)] : [];
   // `printf 'architecture.json\0' | xargs -0 rm`: the words xargs gets are what printf / echo prints.
   if (fed.length && prev && (prev.name === "printf" || prev.name === "echo")) {
-    const value = staticOutput(prev.words.slice(prev.words.findIndex((w) => /^(?:command|builtin|printf|echo)$/.test(baseName(w.text)))));
+    const value = staticOutput(prev.words.slice(prev.words.findIndex((w) => /^(?:command|builtin|printf|echo)$/.test(baseName(w.text)))), parsed.shadowed);
     if (value !== undefined) fed = [...value.split(/[\0\s]+/).filter(Boolean), ...bodyWords(s)];
-    else if (DELETERS.has(wname) && (prev.name === "printf" || prev.words.some((w) => /^-[A-Za-z]*e/.test(w.text)))) return MSG.formatted;
+    else if (DELETERS.has(wname) && isFormatter(prev)) return MSG.formatted;
   }
   // Any word may be a target (a dd `of=` is unwrapped); only the words after the write command are checked as packages.
   const targets = [...fed, ...s.words].map((w) => (typeof w !== "string" && w.text.startsWith("of=") ? w.text.slice(3) : w));
@@ -574,6 +601,9 @@ function fallbackRule(env, parsed, idx, writeRels) {
   addAll(writeRels, relsOf(after.filter((w) => !w.text.startsWith("-")), s.bases));
   return undefined;
 }
+
+/** A segment of printf, or of echo with -e: its output is spelled out only at run time. */
+const isFormatter = (seg) => seg.name === "printf" || (seg.name === "echo" && seg.words.some((w) => /^-[A-Za-z]*e/.test(w.text)));
 
 const inPlace = (name, flags) =>
   (name === "sed" && flags.some((x) => /^-[A-Za-z]*i|^--in-place/.test(x))) ||
@@ -701,7 +731,7 @@ function directRule(ctx, cmd, parsed) {
   // Every lookup spends from the shared budget; once it is gone nothing is resolved and the call is blocked.
   // `$PWD`, `${PWD}` and `~+` are the working directory, so they resolve like `.` (unless the line assigns PWD itself).
   const pwdSet = parsed.vars.has("PWD") || parsed.segments.some((s) => s.words.some((w) => /^PWD\+?=/.test(w.text)));
-  const pwd = (t) => (pwdSet ? t : t.replace(/^(?:\$PWD|\$\{PWD\}|~\+)(?=\/|$)/, "."));
+  const pwd = (t) => (pwdSet ? t : pwdWord(t));
   const spend = (n) => {
     budget.left -= n;
     if (budget.over || budget.left < 0) budget.over = true;
@@ -727,7 +757,7 @@ function directRule(ctx, cmd, parsed) {
       });
     });
   };
-  const env = { contract, root, expand, fold: f, relsOf, coversRoot };
+  const env = { contract, root, expand, fold: f, relsOf, coversRoot, pwd };
   const claudeMd = f("CLAUDE.md");
 
   // One regex for every printf-built variable name on the line, built once per decision.
@@ -765,7 +795,7 @@ function directRule(ctx, cmd, parsed) {
         const into = c.args.findIndex((a) => /^(?:-t|--target-directory)$/.test(a.text));
         const dir = into >= 0 ? c.args[into + 1] : c.args.find((a) => a.text.startsWith("--target-directory="));
         const written = ["cp", "ln", "install"].includes(c.name) ? (dir ? [dir] : operands.slice(-1)) : operands;
-        if (relsOf(written.map(wildText).filter((t) => t !== undefined), c.tight).some((r) => shellGlobHits(contract, r, false))) return MSG.glob;
+        if (relsOf(written.map(wildText).filter((t) => t !== undefined), c.tight).some((r) => shellGlobHits(contract, r, false))) return MSG.globWrite;
       }
     }
     if (c.name === "dd")
@@ -797,7 +827,8 @@ function directRule(ctx, cmd, parsed) {
       const install = new RegExp(
         `(^|[;&|(])\\s*${wrappers}${pm}(\\s*($|[;&|)])|\\s+(install|i|add|ci|update|up|upgrade)\\b)`,
       );
-      if (cmd.split("\n").some((l) => install.test(l)))
+      // (a line without the name cannot match; the regex is slow on long lines)
+      if (cmd.split("\n").some((l) => l.includes(pm) && install.test(l)))
         return `This project uses ${chosenPm} (architecture.json > package_manager); "${pm}" installs would create a second lockfile. Use ${chosenPm} instead.`;
     }
   }
@@ -843,7 +874,7 @@ export function decide({ tool, input, contract, root, home = "~", claudeMdText, 
   const ti = input ?? {};
   const ci = CASE_INSENSITIVE.has(platform);
   const f = ci ? lower : (s) => s;
-  const expand = (t) => f(t.replace(/^~(?=\/|$)/, home));
+  const expand = (t) => f(t.replace(/^(?:~|\$HOME|\$\{HOME\})(?=\/|$)/, home));
   const ctx = { contract: ci ? foldContract(contract) : contract, root: f(root), f, expand, budget: { left: WORK_BUDGET, over: false } };
   let message;
   if (["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(tool))
