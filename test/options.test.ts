@@ -10,9 +10,13 @@ import {
 } from "../src/options.ts";
 import { PM_NAMES } from "../src/pm/index.ts";
 
-const fsProbe: FsProbe = { exists: async () => false, isNonEmptyDir: async () => false };
+const fsProbe: FsProbe = {
+  exists: async () => false,
+  isNonEmptyDir: async () => false,
+  readText: async () => undefined,
+};
 
-type Answer = string | boolean | typeof CANCEL;
+type Answer = string | boolean | string[] | typeof CANCEL;
 
 /** Scripted prompter: pops answers in order; falls back to the default. */
 function fakePrompter(answers: Answer[] = []) {
@@ -30,6 +34,9 @@ function fakePrompter(answers: Answer[] = []) {
     },
     async confirm(message, defaultValue) {
       return next(message, defaultValue) as boolean | typeof CANCEL;
+    },
+    async multiselect(message, _choices, initial) {
+      return next(message, [...initial]) as string[] | typeof CANCEL;
     },
   };
   return { prompter, asked };
@@ -58,7 +65,18 @@ const failure = (argv: string[], env: Record<string, string> = {}, tty = false) 
 describe("resolveOptions: prompting", () => {
   it("does not prompt when all flags are given on a TTY", async () => {
     const { options, asked } = await resolve(
-      ["proj", "--scope", "@acme", "--db-prefix", "acme", "--pm", "pnpm", "--no-install"],
+      [
+        "proj",
+        "--apps",
+        "api,web,worker",
+        "--scope",
+        "@acme",
+        "--db-prefix",
+        "acme",
+        "--pm",
+        "pnpm",
+        "--no-install",
+      ],
       {},
       true,
     );
@@ -86,12 +104,13 @@ describe("resolveOptions: prompting", () => {
   it("prompts for every value on an interactive TTY with no flags", async () => {
     const { asked, options } = await resolve([], {}, true, [
       "my-dir",
+      ["api", "web", "worker"],
       "@shop",
       "shop_db",
       "pnpm",
       false,
     ]);
-    expect(asked).toHaveLength(5);
+    expect(asked).toHaveLength(6);
     expect(options).toMatchObject({
       scope: "@shop",
       dbPrefix: "shop_db",
@@ -102,7 +121,7 @@ describe("resolveOptions: prompting", () => {
   });
 
   it("prompts only for values the flags did not provide", async () => {
-    const { asked, options } = await resolve(["proj", "--pm", "pnpm", "--no-install"], {}, true, [
+    const { asked, options } = await resolve(["proj", "--apps", "api,web,worker", "--pm", "pnpm", "--no-install"], {}, true, [
       "@x",
       "my_db",
     ]);
@@ -124,24 +143,24 @@ describe("resolveOptions: prompting", () => {
   });
 
   it("re-asks the scope on invalid input", async () => {
-    const { options, asked } = await resolve(["proj"], {}, true, ["nope", "@ok"]);
+    const { options, asked } = await resolve(["proj", "--apps", "api,web,worker"], {}, true, ["nope", "@ok"]);
     expect(options.scope).toBe("@ok");
     expect(asked.filter((m) => m === "Package scope")).toHaveLength(2);
   });
 
   it("re-asks the db prefix on invalid input", async () => {
-    const { options, asked } = await resolve(["proj", "--scope", "@a"], {}, true, ["9Bad", "good"]);
+    const { options, asked } = await resolve(["proj", "--scope", "@a", "--apps", "api,web,worker"], {}, true, ["9Bad", "good"]);
     expect(options.dbPrefix).toBe("good");
     expect(asked.filter((m) => m === "Database prefix")).toHaveLength(2);
   });
 });
 
 describe("resolveOptions: existing target directory", () => {
-  const nonEmpty: FsProbe = { exists: async () => true, isNonEmptyDir: async () => true };
+  const nonEmpty: FsProbe = { ...fsProbe, exists: async () => true, isNonEmptyDir: async () => true };
 
   it("asks for confirmation when the directory is non-empty and proceeds on yes", async () => {
     const { options, asked } = await resolve(["proj", "--scope", "@a"], {}, true, [true], nonEmpty);
-    expect(asked).toHaveLength(4); // confirm, db prefix, pm, install
+    expect(asked).toHaveLength(5); // confirm, apps, db prefix, pm, install
     expect(asked[0]).toMatch(/only missing files/i);
     expect(options.scope).toBe("@a");
   });
@@ -168,15 +187,15 @@ describe("resolveOptions: existing target directory", () => {
 });
 
 describe("resolveOptions: cancel", () => {
-  it.each([0, 1, 2, 3, 4])("cancel at prompt #%i throws CancelledError", async (index) => {
-    const answers: Answer[] = ["dir", "@s", "s_db", "pnpm", true];
+  it.each([0, 1, 2, 3, 4, 5])("cancel at prompt #%i throws CancelledError", async (index) => {
+    const answers: Answer[] = ["dir", ["api", "web", "worker"], "@s", "s_db", "pnpm", true];
     answers[index] = CANCEL;
     const error = await resolve([], {}, true, answers).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(CancelledError);
   });
 
   it("cancel at the existing-directory confirmation throws CancelledError", async () => {
-    const nonEmpty: FsProbe = { exists: async () => true, isNonEmptyDir: async () => true };
+    const nonEmpty: FsProbe = { ...fsProbe, exists: async () => true, isNonEmptyDir: async () => true };
     const error = await resolve(["proj"], {}, true, [CANCEL], nonEmpty).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(CancelledError);
   });

@@ -1,6 +1,8 @@
 import { readdir, readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveBlocks } from "./blocks.ts";
+import { FULL_CLOSURE } from "./components.ts";
 
 export const TEMPLATES_DIR = fileURLToPath(new URL("../templates/", import.meta.url));
 
@@ -83,6 +85,12 @@ export function catalogPackagesOf(files: Iterable<{ dest: string; text: string }
   return [...names].sort();
 }
 
+/** The catalog of a full (default Selection) repo; narrower Selections use a subset. */
 export async function catalogPackages(templatesDir = TEMPLATES_DIR): Promise<string[]> {
-  return catalogPackagesOf(await listTemplateFiles(templatesDir));
+  return catalogPackagesOf(
+    (await listTemplateFiles(templatesDir)).map(({ dest, text }) => ({
+      dest,
+      text: resolveBlocks(text, FULL_CLOSURE, dest),
+    })),
+  );
 }

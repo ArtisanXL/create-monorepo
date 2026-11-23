@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { resolveBlocks } from "../../src/blocks.ts";
+import { FULL_CLOSURE } from "../../src/components.ts";
 import { claudeBlockHash, contractFrom } from "../../templates/root/scripts/arch-contract.mjs";
 
 export const BLOCK_BODY =
@@ -7,9 +9,10 @@ export const CLAUDE_MD = `# Mine\n\n${BLOCK_BODY}\n\nafter\n`;
 
 /** The template architecture.json with its `__TOKENS__` filled in, as a plain contract object. */
 export function templateContract(over: { packageManager?: string } = {}) {
-  const raw = readFileSync(
-    new URL("../../templates/root/architecture.json", import.meta.url),
-    "utf8",
+  const raw = resolveBlocks(
+    readFileSync(new URL("../../templates/root/architecture.json", import.meta.url), "utf8"),
+    FULL_CLOSURE,
+    "architecture.json",
   )
     .replace("__SCOPE__", "@acme")
     .replace("__PM__", over.packageManager ?? "pnpm")

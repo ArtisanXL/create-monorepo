@@ -1,4 +1,4 @@
-import { access, readdir } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
 import * as clack from "@clack/prompts";
 import { CANCEL, type FsProbe, type Prompter } from "./options.ts";
 
@@ -22,6 +22,15 @@ export const clackPrompter: Prompter = {
     });
     return clack.isCancel(answer) ? CANCEL : answer;
   },
+  async multiselect(message, choices, initial) {
+    const answer = await clack.multiselect({
+      message,
+      options: choices.map((value) => ({ value })),
+      initialValues: [...initial],
+      required: false,
+    });
+    return clack.isCancel(answer) ? CANCEL : answer;
+  },
   async confirm(message, defaultValue) {
     const answer = await clack.confirm({ message, initialValue: defaultValue });
     return clack.isCancel(answer) ? CANCEL : answer;
@@ -29,6 +38,14 @@ export const clackPrompter: Prompter = {
 };
 
 export const nodeFsProbe: FsProbe = {
+  readText: (path) =>
+    readFile(path, "utf8").then(
+      (text) => text,
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+        throw error;
+      },
+    ),
   exists: (path) =>
     access(path).then(
       () => true,

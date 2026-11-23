@@ -19,7 +19,11 @@ const NEXT_STEPS = `Next steps:
   .github/CODEOWNERS             # assign owners for architecture files
   git add -A && git commit -m "chore: scaffold"`;
 
-const probe: FsProbe = { exists: async () => false, isNonEmptyDir: async () => false };
+const probe: FsProbe = {
+  exists: async () => false,
+  isNonEmptyDir: async () => false,
+  readText: async () => undefined,
+};
 
 function harness(over: Partial<RunIo> = {}) {
   let stdout = "";
@@ -29,7 +33,7 @@ function harness(over: Partial<RunIo> = {}) {
     asked.push(message);
     return CANCEL;
   };
-  const prompter: Prompter = { text: ask, select: ask, confirm: ask };
+  const prompter: Prompter = { text: ask, select: ask, confirm: ask, multiselect: ask };
   const io: RunIo = {
     argv: [dir, "--no-install", "-y"],
     env: {},
