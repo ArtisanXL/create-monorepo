@@ -42,6 +42,17 @@ describe("contractFrom", () => {
   });
 });
 
+describe("runtime", () => {
+  it("reads as node when the contract has no runtime", () => {
+    expect(contractFrom({}).runtime).toBe("node");
+    expect(contract.runtime).toBe("node");
+  });
+
+  it("reads the declared runtime", () => {
+    expect(contractFrom({ runtime: "cloudflare" }).runtime).toBe("cloudflare");
+  });
+});
+
 describe("protected paths", () => {
   it("matches exact files and folder prefixes", () => {
     expect(isProtected(contract, "architecture.json")).toBe(true);

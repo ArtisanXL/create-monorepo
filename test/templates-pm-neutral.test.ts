@@ -21,6 +21,7 @@ const allTemplates = async () => [
 
 const GUARD_RULES = "root/scripts/guard-rules.mjs";
 const GUARD_ALLOWED = new Set([
+  'const RUNNERS = ["pnpm", "npm", "yarn", "bun"];',
   '    for (const pm of ["pnpm", "npm", "yarn", "bun"].filter((x) => x !== chosenPm)) {',
   "  // Flags and their values may sit between the PM and the verb (`pnpm --filter x add`, `pnpm -w add`).",
   "  if (/\\b(pnpm|npm|yarn|bun)\\b[^|;&\\n]*\\s(add|install|i|update|up)\\b/.test(cmd)) {",
