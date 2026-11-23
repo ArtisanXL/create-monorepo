@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createAdapter, PM_NAMES, type PmName } from "../../src/pm/index.ts";
 import { gather, plan, type TargetView } from "../../src/scaffold.ts";
-import { catalogPackagesOf, listTemplateFiles } from "../../src/templates.ts";
+import { catalogPackages, listTemplateFiles } from "../../src/templates.ts";
 
 export const TOKEN_RE = /__[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*__/;
 
@@ -23,7 +23,7 @@ export function adapterContract(name: PmName) {
 
     it("puts every catalog entry into the catalog file", async () => {
       const templates = await listTemplateFiles();
-      const names = [...catalogPackagesOf(templates), "@types/node"];
+      const names = [...(await catalogPackages()), "@types/node"];
       const versions = new Map(names.map((n, i) => [n, `1.${i}.0`]));
       const g = await gather(
         { target: "/nowhere", scope: "@acme", dbPrefix: "acme", install: false, nodeMajor: 24 },
