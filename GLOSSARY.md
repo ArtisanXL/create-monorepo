@@ -35,3 +35,13 @@ _Avoid_: resolved selection, expanded set
 A Component or dependency the generated repo knows about but does not contain until a trigger
 is met and an ADR is accepted. Built-in Components left out of the Closure become Deferred.
 _Avoid_: disabled, excluded, optional
+
+**Runtime**:
+The environment the generated repo's Apps run in: `node` or `cloudflare`. One Runtime per
+generated repo; the default is `node`.
+_Avoid_: platform, target, edge
+
+**Cloudflare Worker**:
+Cloudflare's unit of deployment, always written in full. A bare "worker" means only the `worker`
+App, which on the `cloudflare` Runtime is itself deployed as a Cloudflare Worker.
+_Avoid_: Worker (alone), edge function

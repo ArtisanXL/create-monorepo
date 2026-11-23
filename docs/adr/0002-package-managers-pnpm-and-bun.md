@@ -1,6 +1,6 @@
 # 2. Support pnpm and bun only; runtime stays Node
 
-Status: accepted (2026-11-16)
+Status: accepted (2026-11-16); runtime clause to be partially superseded by ADR-0005 (proposed)
 
 ## Context
 
