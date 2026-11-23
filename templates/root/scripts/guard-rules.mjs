@@ -297,7 +297,9 @@ function gitRule(env, words, bases, parsed) {
   const g = splitArgs(args.slice(i + 1));
   if (relsOf(g.operands, gb).some((r) => isProtectedOrDir(contract, r) || holdsProtected(contract, r))) return MSG.git;
   // A whole-tree revert from a revision rewrites protected files too: `checkout <rev> -- .`, `restore --source=<rev> .`.
-  const dots = g.operands.filter((o) => WHOLE_TREE.test(o.text));
+  // Decided on the resolved path, so `src/..` and `./` are the project root too.
+  const isRoot = (text, top) => relsOf([text], top ? [env.root] : gb, true).includes("");
+  const dots = g.operands.filter((o) => WHOLE_TREE.test(o.text) || (!o.text.startsWith(":") && isRoot(o.text, false)));
   // A whole-tree restore reads the index, which an earlier `git reset <rev>` on the line may have rewound.
   const force = sub === "checkout" && g.flags.some((x) => /^-[A-Za-z]*f|^--force$/.test(x)) && g.operands.every((o) => HEAD_ONLY.test(o.text));
   if ((dots.length || force) && rewinds(env, parsed)) return MSG.rewind;
@@ -312,7 +314,7 @@ function gitRule(env, words, bases, parsed) {
     if (specs.length && specs.every((x) => x?.exclude)) return MSG.rewind;
     for (const spec of specs) {
       if (!spec || spec.exclude) continue;
-      if (spec.magic && spec.path === ".") return MSG.rewind;
+      if (spec.magic && isRoot(spec.path, spec.top)) return MSG.rewind;
       const c = spec.icase ? foldContract(contract) : contract;
       const rels = relsOf([spec.icase ? lower(spec.path) : spec.path], spec.top ? [env.root] : gb).map((r) => (spec.icase ? lower(r) : r));
       if (rels.some((r) => (GLOB.test(r) ? globHitsProtected(c, r) : spec.magic && (isProtectedOrDir(c, r) || holdsProtected(c, r))))) return MSG.rewind;
