@@ -416,3 +416,55 @@ describe("api as a Cloudflare Worker (ADR-0005)", () => {
     expect(await repo.read("apps/api/package.json")).not.toContain("wrangler");
   });
 });
+
+describe("standalone web as a static-assets Cloudflare Worker (ADR-0005)", () => {
+  const node = () => generate(WEB, "node");
+  const cf = () => generate(WEB, "cloudflare");
+
+  it("generates an assets-only wrangler.jsonc in SPA mode, with no Worker code or bindings", async () => {
+    const repo = await cf();
+    const wrangler = await repo.read("apps/web/wrangler.jsonc");
+    expect(wrangler).toContain(`"compatibility_date": "${COMPATIBILITY_DATE}"`);
+    expect(wrangler).toContain('"not_found_handling": "single-page-application"');
+    for (const k of ["main", "hyperdrive", "services", "binding", "nodejs_compat"]) {
+      expect(wrangler, k).not.toContain(`"${k}"`);
+    }
+    const files = await repo.files();
+    expect(files.filter((f) => f.startsWith("apps/web/src/"))).toEqual(["apps/web/src/main.tsx"]);
+    expect(await (await node()).files()).not.toContain("apps/web/wrangler.jsonc");
+  });
+
+  it("runs dev on the Cloudflare Vite plugin, resolved through the catalog", async () => {
+    const repo = await cf();
+    expect(await repo.read("apps/web/vite.config.ts")).toMatch(/@cloudflare\/vite-plugin/);
+    // vitest loads this config; persisted state would leave empty folders the arch check rejects.
+    expect(await repo.read("apps/web/vite.config.ts")).toContain("persistState: false");
+    expect(await (await node()).read("apps/web/vite.config.ts")).not.toMatch(/cloudflare/);
+    const pkg = await repo.json("apps/web/package.json");
+    expect(pkg.scripts.dev).toBe("vite");
+    expect(pkg.devDependencies["@cloudflare/vite-plugin"]).toBe("catalog:");
+    expect(pkg.devDependencies.wrangler).toBe("catalog:");
+    const ws = await repo.read("pnpm-workspace.yaml");
+    expect(ws).toMatch(/^ {2}"@cloudflare\/vite-plugin": /m);
+    expect(ws).toMatch(/^ {2}"wrangler": /m);
+    expect(ws).toContain("  workerd: true\n");
+  });
+
+  it("ignores wrangler's local state so biome and the arch check skip it", async () => {
+    expect(await (await cf()).read(".gitignore")).toMatch(/^\.wrangler$/m);
+    expect(await (await node()).read(".gitignore")).not.toContain(".wrangler");
+  });
+
+  it("has build, deploy and dry-run scripts, and the dry-run in the generated CI", async () => {
+    const repo = await cf();
+    const pkg = await repo.json("apps/web/package.json");
+    expect(pkg.scripts.build).toBe("vite build");
+    expect(pkg.scripts.deploy).toBe("vite build && wrangler deploy");
+    expect(pkg.scripts["deploy:dry-run"]).toBe("wrangler deploy --dry-run");
+    expect(await repo.read(".github/workflows/ci.yml")).toContain("@acme/web deploy:dry-run");
+    const nodePkg = await (await node()).json("apps/web/package.json");
+    expect(nodePkg.scripts["deploy:dry-run"]).toBeUndefined();
+    expect(JSON.stringify(nodePkg)).not.toMatch(/wrangler|cloudflare/);
+    expect(await (await node()).read(".github/workflows/ci.yml")).not.toContain("dry-run");
+  });
+});

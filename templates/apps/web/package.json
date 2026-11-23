@@ -7,6 +7,10 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+@if cloudflare
+    "deploy": "vite build && wrangler deploy",
+    "deploy:dry-run": "wrangler deploy --dry-run",
+@endif
     "typecheck": "tsc -p ."
   },
   "dependencies": {
@@ -20,6 +24,10 @@
     "react-dom": "catalog:"
   },
   "devDependencies": {
+@if cloudflare
+    "@cloudflare/vite-plugin": "catalog:",
+    "wrangler": "catalog:",
+@endif
 @if api
     "__SCOPE__/api": "workspace:*",
 @endif
