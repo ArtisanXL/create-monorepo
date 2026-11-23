@@ -14,7 +14,12 @@
 @if api
     "api": {
       "type": "service",
+@if node
       "command": "PORT=$PASEO_PORT __FILTER__ __SCOPE__/api dev"
+@endif
+@if cloudflare
+      "command": "node scripts/cloudflare-dev.mjs -- __FILTER__ __SCOPE__/api dev --ip 127.0.0.1 --port $PASEO_PORT"
+@endif
     },
 @endif
 @if web
