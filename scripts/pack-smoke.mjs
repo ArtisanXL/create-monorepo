@@ -14,7 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { closureOf, FULL_SELECTION, isGenerated } from "../src/components.ts";
+import { contextOf, FULL_SELECTION, isGenerated } from "../src/components.ts";
 import { listTemplateFiles } from "../src/templates.ts";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -67,9 +67,9 @@ try {
     return target;
   };
   const checkFiles = (target, selection) => {
-    const closure = closureOf(selection);
+    const context = contextOf(selection);
     const files = [
-      ...expected.filter((f) => isGenerated(f, closure)),
+      ...expected.filter((f) => isGenerated(f, context)),
       "pnpm-workspace.yaml",
       "CLAUDE.md",
     ];
