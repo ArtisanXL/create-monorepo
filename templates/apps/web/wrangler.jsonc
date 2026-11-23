@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "__DB_PREFIX__-web",
+  "name": "__NAME_PREFIX__-web",
 @if api
   "main": "src/worker.ts",
 @endif
@@ -8,7 +8,7 @@
 @if api
   // Same origin as the Vite proxy gives in dev: the Worker runs first for /api/* and forwards it to
   // the api Worker. Everything else is served from assets (SPA).
-  "services": [{ "binding": "API", "service": "__DB_PREFIX__-api" }],
+  "services": [{ "binding": "API", "service": "__NAME_PREFIX__-api" }],
   "assets": {
     "not_found_handling": "single-page-application",
     "binding": "ASSETS",

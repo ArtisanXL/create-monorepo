@@ -20,11 +20,16 @@ interface Config {
     consumers?: { queue: string }[];
   };
   triggers?: { crons?: string[] };
+  services?: { binding: string; service: string }[];
 }
 
 /** `wrangler deploy --dry-run` accepts mismatched names, so this reads the configs together. */
-async function cloudflareRepo(selection: Selection) {
-  const { dir, cleanup } = await scaffoldFixture({ selection, runtime: "cloudflare" });
+async function cloudflareRepo(selection: Selection, dbPrefix?: string) {
+  const { dir, cleanup } = await scaffoldFixture({
+    selection,
+    runtime: "cloudflare",
+    ...(dbPrefix ? { dbPrefix } : {}),
+  });
   cleanups.push(cleanup);
   const read = (rel: string) => readFile(join(dir, rel), "utf8");
   const configs: Record<string, Config> = {};
@@ -83,5 +88,34 @@ describe("Cloudflare binding consistency", () => {
     const crons = [...job.matchAll(/cron: "([^"]+)"/g)].map((m) => m[1]).sort();
     expect(crons.length).toBeGreaterThan(0);
     expect([...(configs.worker?.triggers?.crons ?? [])].sort()).toEqual(crons);
+  });
+
+  it("binds web to the api Worker by name, and keeps Worker and queue names free of underscores, for a prefix with one", async () => {
+    const { configs } = await cloudflareRepo(
+      { apps: ["api", "web", "worker"], packages: [] },
+      "my_app",
+    );
+    expect(configs.api?.name).toBe("my-app-api");
+    expect(configs.web?.services?.map((s) => s.service)).toEqual([configs.api?.name]);
+    const names = [
+      configs.api?.name,
+      configs.web?.name,
+      configs.worker?.name,
+      ...(configs.web?.services ?? []).map((s) => s.service),
+      ...(configs.worker?.queues?.producers ?? []).map((q) => q.queue),
+      ...(configs.worker?.queues?.consumers ?? []).map((q) => q.queue),
+    ];
+    expect(names.filter(Boolean)).toHaveLength(6);
+    for (const name of names) expect(name, String(name)).toMatch(/^my-app-[a-z-]+$/);
+    expect(new Set([configs.api?.name, configs.web?.name, configs.worker?.name]).size).toBe(3);
+  });
+
+  it("runs the api and web dev servers of one worktree through the same registry wrapper", async () => {
+    const { read } = await cloudflareRepo({ apps: ["api", "web"], packages: [] });
+    const paseo = JSON.parse(await read("paseo.json"));
+    const commands: string[] =
+      JSON.stringify(paseo).match(/node scripts\/cloudflare-dev\.mjs -- [^"]+/g) ?? [];
+    expect(commands.some((c) => c.includes("@acme/api dev"))).toBe(true);
+    expect(commands.some((c) => c.includes("@acme/web dev"))).toBe(true);
   });
 });
