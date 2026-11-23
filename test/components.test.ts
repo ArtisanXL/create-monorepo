@@ -148,13 +148,23 @@ describe("Runtime support", () => {
     expect(isGenerated("scripts/cloudflare-dev.mjs", none)).toBe(false);
   });
 
-  it("rejects cloudflare with web in the Closure, as not yet supported", () => {
-    for (const app of ["web"] as const) {
-      for (const apps of [[app], ["api", app]] as const) {
-        expect(
-          runtimeSupportError(closureOf({ apps: [...apps], packages: [] }), "cloudflare"),
-        ).toMatch(new RegExp(`not yet supported with ${app}\\b`));
-      }
+  it("accepts cloudflare with standalone web, alone or with packages", () => {
+    expect(runtimeSupportError(closureOf({ apps: ["web"], packages: [] }), "cloudflare")).toBe(
+      undefined,
+    );
+    expect(
+      runtimeSupportError(closureOf({ apps: ["web"], packages: ["domain"] }), "cloudflare"),
+    ).toBe(undefined);
+  });
+
+  it("rejects cloudflare with web together with api, as not yet supported", () => {
+    for (const apps of [
+      ["api", "web"],
+      ["api", "web", "worker"],
+    ] as const) {
+      expect(
+        runtimeSupportError(closureOf({ apps: [...apps], packages: [] }), "cloudflare"),
+      ).toMatch(/not yet supported with web\b/);
     }
   });
 });

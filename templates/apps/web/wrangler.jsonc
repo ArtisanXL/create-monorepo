@@ -1,0 +1,9 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "__DB_PREFIX__-web",
+  "compatibility_date": "__COMPATIBILITY_DATE__",
+  // Assets only: no Worker code, no bindings. Unknown paths fall back to index.html (SPA).
+  "assets": {
+    "not_found_handling": "single-page-application"
+  }
+}

@@ -137,6 +137,7 @@ export const RUNTIME_OWNED_FILES: Readonly<Record<string, Runtime>> = {
   "apps/api/src/cloudflare.ts": "cloudflare",
   "apps/api/src/server.ts": "node",
   "apps/api/tsdown.config.ts": "node",
+  "apps/web/wrangler.jsonc": "cloudflare",
   "apps/api/.dev.vars.example": "cloudflare",
   "apps/worker/wrangler.jsonc": "cloudflare",
   "apps/worker/src/cloudflare.ts": "cloudflare",
@@ -172,8 +173,17 @@ export const isGenerated = (
   (!NEEDS_AN_APP.has(dest) || APP_NAMES.some((a) => closure.has(a))) &&
   (runtimeOwned[dest] ?? runtime) === runtime;
 
-/** Apps that already run on Cloudflare; a later ticket adds `web`. */
-const CLOUDFLARE_APPS: readonly AppName[] = ["api", "worker"];
+/**
+ * Apps that already run on Cloudflare; a later ticket adds the api-connected `web`.
+ * Standalone `web` (without `api`) is supported: an assets-only Worker with no bindings.
+ */
+const CLOUDFLARE_APPS: readonly AppName[] = ["api", "web", "worker"];
+
+/** Apps in `closure` that cannot run on Cloudflare yet; `web` only counts alongside `api`. */
+const unsupportedOnCloudflare = (closure: Closure): AppName[] =>
+  APP_NAMES.filter(
+    (n) => closure.has(n) && (!CLOUDFLARE_APPS.includes(n) || (n === "web" && closure.has("api"))),
+  );
 
 /**
  * Why `runtime` cannot generate `closure` yet, or undefined when the combination is supported.
@@ -181,7 +191,7 @@ const CLOUDFLARE_APPS: readonly AppName[] = ["api", "worker"];
  */
 export function runtimeSupportError(closure: Closure, runtime: Runtime): string | undefined {
   if (runtime === "node") return undefined;
-  const unsupported = APP_NAMES.filter((n) => closure.has(n) && !CLOUDFLARE_APPS.includes(n));
+  const unsupported = unsupportedOnCloudflare(closure);
   if (unsupported.length === 0) return undefined;
-  return `--runtime ${runtime} is not yet supported with ${unsupported.join(", ")}: those Apps are not available on ${runtime} yet. Use --apps ${CLOUDFLARE_APPS.join(",")} or none, or --runtime node.`;
+  return `--runtime ${runtime} is not yet supported with ${unsupported.join(", ")}: those Apps are not available on ${runtime} yet. Use --apps api or web (not both) or none, or --runtime node.`;
 }
