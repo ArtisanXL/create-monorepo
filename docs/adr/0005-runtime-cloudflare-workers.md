@@ -29,22 +29,29 @@ loop.
   `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE` is derived from `DATABASE_URL`, so
   each worktree still gets its own database.
 - **`worker` App:** it becomes a Cloudflare Worker with a `queue()` handler (Cloudflare Queues)
-  and a `scheduled()` handler (Cron Triggers). The `jobs` shape (`{ name, cron?, handle(db) }`)
+  and a `scheduled()` handler (Cron Triggers). It produces to its own queue and consumes from it.
+  `api` has no producer binding, matching node, where `api` does not enqueue. The `jobs` shape (`{ name, cron?, handle(db) }`)
   stays. The generated repo's ADR-0003 keeps its number but records "job queue: Cloudflare Queues".
 - **`web` App:** it is its own Cloudflare Worker that serves static assets in SPA mode. In the
   api-connected form, `/api/*` goes first to a small forwarder that calls the `api` Cloudflare
   Worker through a **service binding**, giving the same origin the Vite proxy gives locally. `api`
   and `web` remain separate Cloudflare Workers, so Component boundaries hold.
 - **Dev:** `api` and `worker` use `wrangler dev`. `web` uses `@cloudflare/vite-plugin`.
-  `paseo.json` keeps assigning ports and env per worktree.
+  `paseo.json` keeps assigning ports and env per worktree. Two more values are set per worktree:
+  - the Hyperdrive local connection string, exported from `DATABASE_URL` (the root `.env` is not
+    in wrangler's working directory)
+  - a worktree-unique `CLOUDFLARE_DEV_REGISTRY_PATH`, so that a service binding or a queue never
+    reaches another worktree's Cloudflare Worker
 - **Env:** the `loadEnv(source)` signature stays. Its source is `process.env` on Node and the
   binding `env` on Cloudflare. Every `wrangler.jsonc` sets `nodejs_compat` (postgres.js needs it)
   and a `compatibility_date` that is a constant in the generator, bumped per release. It is not
   the scaffold date, which keeps goldens deterministic and avoids dates newer than the installed
   workerd.
 - **Tests:** one root Vitest config on Node, as today. `@cloudflare/vitest-pool-workers` is
-  Deferred. App tsconfigs use `wrangler types` output instead of `@types/node`, so Node-only APIs
-  fail typecheck.
+  Deferred. Workers runtime types come from `wrangler types`. That file is generated before
+  typecheck, gitignored and kept out of goldens, because its header carries the workerd version.
+  `nodejs_compat` still needs `@types/node`, so Node-only APIs are caught by the e2e
+  dry-run/boot, not by typecheck.
 - **Deploy:** generated repos get `wrangler.jsonc`, `dev`/`build`/`deploy` scripts and
   `.dev.vars.example`. Generated CI runs only `wrangler deploy --dry-run`. Deploying, creating
   queues and Hyperdrive configs, and putting secrets are left to humans. The guard hook blocks
@@ -66,7 +73,8 @@ loop.
   `src/cloudflare.ts` entry exist only for cloudflare, `tsdown.config.ts` and `src/server.ts` only
   for node. No path ever has two writers (ADR-0003).
 - **Generated ADRs:** the generated repo gets a cloudflare-only ADR-0005 "runtime: Cloudflare
-  Workers". Node repos keep the gap, since ADR numbers are stable. The package-boundaries ADR is
+  Workers". On cloudflare, the job-queue ADR is written under a Cloudflare Queues file name, and
+  `architecture.json` points to that file. Node repos keep the gap, since ADR numbers are stable. The package-boundaries ADR is
   narrowed with blocks. In `architecture.json`, `role` texts and the `deps` of `deferred` entries
   follow the Runtime.
 
