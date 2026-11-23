@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolveBlocks } from "../../src/blocks.ts";
-import { FULL_CLOSURE } from "../../src/components.ts";
+import { FULL_CONTEXT } from "../../src/components.ts";
 import { claudeBlockHash, contractFrom } from "../../templates/root/scripts/arch-contract.mjs";
 
 export const BLOCK_BODY =
@@ -11,7 +11,7 @@ export const CLAUDE_MD = `# Mine\n\n${BLOCK_BODY}\n\nafter\n`;
 export function templateContract(over: { packageManager?: string } = {}) {
   const raw = resolveBlocks(
     readFileSync(new URL("../../templates/root/architecture.json", import.meta.url), "utf8"),
-    FULL_CLOSURE,
+    FULL_CONTEXT,
     "architecture.json",
   )
     .replace("__SCOPE__", "@acme")

@@ -4,12 +4,14 @@ import {
   APP_NAMES,
   type AppName,
   closureOf,
+  DEFAULT_RUNTIME,
   FULL_SELECTION,
   isAppName,
   isComponentName,
   isPackageName,
   PACKAGE_NAMES,
   type PackageName,
+  type Runtime,
   type Selection,
   sameClosure,
   selectionOf,
@@ -74,9 +76,10 @@ export interface FsProbe {
   readText(path: string): Promise<string | undefined>;
 }
 
-export type ResolvedOptions = Omit<Options, "nodeMajor" | "selection"> & {
+export type ResolvedOptions = Omit<Options, "nodeMajor" | "selection" | "runtime"> & {
   pm: PmName;
   selection: Selection;
+  runtime: Runtime;
 };
 
 const DEFAULT_SCOPE = "@app";
@@ -278,7 +281,7 @@ export async function resolveOptions(
   if (install && interactive)
     install = uncancel(await prompter.confirm("Install dependencies?", true));
 
-  return { target: targetPath, scope, dbPrefix, pm, install, selection };
+  return { target: targetPath, scope, dbPrefix, pm, install, selection, runtime: DEFAULT_RUNTIME };
 }
 
 /**
