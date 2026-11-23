@@ -741,20 +741,30 @@ const DEPLOY_SCRIPT_MSG =
 const RUNNERS = ["pnpm", "npm", "yarn", "bun"];
 const isWrangler =(text) => /^wrangler(?:@[^/]*)?$/.test(baseName(text));
 
-/** The wrangler arguments of a simple command, or undefined when it does not run wrangler. */
-function wranglerArgs(c) {
-  if (isWrangler(c.name)) return c.args;
-  if (!RUNNERS.includes(c.name)) return undefined;
-  const k = c.args.findIndex((a) => ["exec", "dlx", "x"].includes(a.text));
-  if (k < 0) return undefined;
-  let j = k + 1;
-  while (j < c.args.length && c.args[j].text.startsWith("-")) j++;
-  return c.args[j] && isWrangler(c.args[j].text) ? c.args.slice(j + 1) : undefined;
+const LAUNCHERS = ["npx", "pnpx", "bunx"];
+
+/**
+ * The wrangler arguments of a simple command: one list per way it can run wrangler, empty when it does not.
+ * Under a package runner or launcher (`pnpm exec --filter x wrangler`, `npx -p wrangler wrangler`, `pnpm wrangler`,
+ * `bun run wrangler`) flags may take values, so rather than guess which token is the tool, every `wrangler` token
+ * is tried and the command is judged by the worst one (it errs toward blocking).
+ */
+function wranglerArgLists(c) {
+  // The lexer drops a wrapper's flags but not their values, so `npx -p wrangler@4 wrangler deploy` is named `wrangler@4`.
+  const direct = isWrangler(c.name);
+  if (!direct && !RUNNERS.includes(c.name) && !LAUNCHERS.includes(c.name)) return [];
+  const lists = direct ? [c.args] : [];
+  c.args.forEach((a, k) => {
+    if (isWrangler(a.text)) lists.push(c.args.slice(k + 1));
+  });
+  return lists;
 }
 
 function wranglerRule(c) {
-  const args = wranglerArgs(c);
-  if (!args) return undefined;
+  return wranglerArgLists(c).some(wranglerHit) ? WRANGLER_MSG : undefined;
+}
+
+function wranglerHit(args) {
   const pos = [];
   let dry = false;
   for (let i = 0; i < args.length; i++) {
@@ -771,7 +781,7 @@ function wranglerRule(c) {
     verb === "login" ||
     WRANGLER_MUTATING[verb]?.includes(sub) ||
     (verb === "queues" && sub === "consumer" && ["add", "remove"].includes(third));
-  return hit ? WRANGLER_MSG : undefined;
+  return Boolean(hit);
 }
 
 /** `<pm> run deploy`, `turbo run deploy`, `yarn deploy`: the repo's own deploy script. */

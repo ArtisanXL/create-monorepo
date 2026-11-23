@@ -2478,6 +2478,20 @@ describe("guard decision: wrangler (every Runtime)", () => {
     `bun x wrangler ${rest}`,
     `./node_modules/.bin/wrangler ${rest}`,
     `cd apps/api && pnpm exec wrangler ${rest}`,
+    `pnpm exec --filter x wrangler ${rest}`,
+    `pnpm exec -C apps/api wrangler ${rest}`,
+    `pnpm dlx --package wrangler@4 wrangler ${rest}`,
+    `pnpm dlx -p wrangler wrangler ${rest}`,
+    `npx --package wrangler wrangler ${rest}`,
+    `npx -p wrangler@4 wrangler ${rest}`,
+    `pnpm wrangler ${rest}`,
+    `pnpm --filter @acme/api wrangler ${rest}`,
+    `pnpm run wrangler ${rest}`,
+    `pnpx wrangler ${rest}`,
+    `yarn wrangler ${rest}`,
+    `yarn run wrangler ${rest}`,
+    `bun wrangler ${rest}`,
+    `bun run wrangler ${rest}`,
   ];
   const mutating = [
     "deploy",
@@ -2524,6 +2538,25 @@ describe("guard decision: wrangler (every Runtime)", () => {
     "echo wrangler deploy",
   ])("allows %s", (cmd) => {
     expect(bash(cmd)).toEqual({ allow: true });
+  });
+
+  it("blocks a deploy behind any flag-with-value of an exec-like runner", () => {
+    for (const cmd of ["pnpm exec --filter x wrangler deploy", "pnpm --filter x exec --filter y wrangler deploy"]) {
+      expect(blocked(bash(cmd)), cmd).toContain("wrangler");
+    }
+  });
+
+  it("allows the shorthand and flag-value forms for non-mutating wrangler commands", () => {
+    for (const cmd of [
+      "pnpm exec --filter x wrangler dev",
+      "pnpm wrangler types",
+      "yarn wrangler whoami",
+      "pnpx wrangler dev",
+      "bun run wrangler dev",
+      "pnpm exec --filter x vitest deploy",
+    ]) {
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+    }
   });
 
   it("applies under the node Runtime too", () => {
