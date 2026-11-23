@@ -1,7 +1,7 @@
 # Golden output
 
 `<adapter>.golden.txt` pins the full scaffold output of the default Selection (everything) for one package-manager adapter;
-`<adapter>.<selection>.golden.txt` pins a narrower Selection (`apps-api`, `apps-web`, `apps-none-domain-contracts`)
+`<adapter>.<selection>.golden.txt` pins a narrower Selection (`apps-api`, `apps-web`, `apps-none-domain-contracts`) or a non-default Runtime (`cloudflare` is the default Selection on cloudflare, `cloudflare-apps-web` standalone web)
 (sorted paths, each as a `=== <path> (<n> bytes) ===` header followed by the file verbatim and a newline separator; modes excluded; the byte count makes a missing or extra final newline visible).
 `test/golden.test.ts` fails on any byte change, added file or removed file.
 

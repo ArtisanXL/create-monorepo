@@ -35,7 +35,7 @@ create-monorepo <target-dir> [--apps api,web,worker|none] [--packages domain,con
 | `--packages` | none extra | Extra packages to add to the Closure (`domain`, `contracts`, `db`, `core`); packages can be added, never removed from it. |
 | `--scope` | `@<dir-name>` in the wizard, `@app` otherwise | npm scope of the workspace packages. |
 | `--db-prefix` | derived from the scope | Postgres database name prefix (`^[a-z][a-z0-9_]{0,29}$`, no `_wt`). An error without `db` in the Closure. |
-| `--runtime` | asked in the wizard after the package manager, else `node` | Runtime of the generated repo. `cloudflare` is recorded in `architecture.json`, and for now works with packages only (`--apps none`). |
+| `--runtime` | asked in the wizard after the package manager, else `node` | Runtime of the generated repo. `cloudflare` generates Cloudflare Workers Apps (any Selection) and is recorded in `architecture.json`; see ADR-0005. |
 | `--pm` | detected from how you ran it, else `pnpm` | Package manager. `0.1.x` supports `pnpm` only. |
 | `--no-install` | install on | Skip install, formatting and `verify`. |
 | `-y`, `--yes` | off | Accept defaults for everything not given; never prompt. |

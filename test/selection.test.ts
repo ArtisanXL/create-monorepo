@@ -10,7 +10,6 @@ import {
   JOB_QUEUE_ADR,
   RUNTIMES,
   type Runtime,
-  runtimeSupportError,
   type Selection,
 } from "../src/components.ts";
 import { scaffoldFixture } from "./support/fixture.ts";
@@ -62,11 +61,9 @@ const SELECTIONS: [string, Selection][] = [
   ["web + domain", { apps: ["web"], packages: ["domain"] } satisfies Selection],
 ];
 
-// The invariant sweep: every Selection x Runtime, restricted to the allowed combinations.
+// The invariant sweep: every Selection x Runtime.
 const SWEEP = SELECTIONS.flatMap(([name, selection]) =>
-  RUNTIMES.filter((r) => runtimeSupportError(closureOf(selection), r) === undefined).map(
-    (runtime) => [`${name} on ${runtime}`, selection, runtime] as const,
-  ),
+  RUNTIMES.map((runtime) => [`${name} on ${runtime}`, selection, runtime] as const),
 );
 
 describe.each(SWEEP)("generated repo for %s", (_name, selection, runtime) => {

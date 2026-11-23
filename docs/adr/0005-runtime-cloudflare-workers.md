@@ -1,6 +1,6 @@
 # 5. Selectable Runtime: Node and Cloudflare Workers
 
-Status: proposed
+Status: accepted (2026-11-23)
 
 Partially supersedes ADR-0002 ("runtime stays Node").
 
