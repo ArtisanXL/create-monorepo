@@ -15,9 +15,11 @@ loop.
 ## Decision
 
 - A generated repo has exactly one **Runtime**: `node` (default) or `cloudflare`, chosen with
-  `--runtime node|cloudflare` or a wizard prompt after the package manager. It is recorded as
-  `"runtime"` in `architecture.json`. A repo with no `runtime` field is `node`. On a target that
-  already has `architecture.json`, a conflicting `--runtime` is an error. The default output stays
+  `--runtime node|cloudflare` or a wizard prompt after the package manager. Only `cloudflare` is
+  recorded, as `"runtime"` in `architecture.json`. A repo with no `runtime` field is `node`. On a
+  target that already has `architecture.json`, a conflicting `--runtime` is an error, and a re-run
+  with no `--runtime` keeps the recorded Runtime. The node output changes only in
+  `guard-rules.mjs` and `arch-contract.mjs`, which gain the rules below. Every other node file is
   byte-identical.
 - The Runtime is independent of the package manager and the Selection. bun + cloudflare is valid.
   A packages-only Selection accepts `--runtime` and records it, but writes no Cloudflare files.
@@ -46,8 +48,18 @@ loop.
 - **Deploy:** generated repos get `wrangler.jsonc`, `dev`/`build`/`deploy` scripts and
   `.dev.vars.example`. Generated CI runs only `wrangler deploy --dry-run`. Deploying, creating
   queues and Hyperdrive configs, and putting secrets are left to humans. The guard hook blocks
-  agents from `wrangler deploy` (except `--dry-run`), `wrangler secret put|delete`,
-  `wrangler queues create|delete`, `wrangler hyperdrive create|delete` and `wrangler login`.
+  agents in two tiers:
+  - **Always, under every Runtime.** These are mutating wrangler commands, however they are
+    invoked (bare, `npx`, `pnpm exec`, `pnpm dlx`, `bunx`). A node repo has no wrangler, so
+    blocking them costs nothing:
+    - `wrangler deploy` without `--dry-run` (`--dry-run=false` counts as a real deploy)
+    - `wrangler versions upload|deploy`, `wrangler rollback` and `wrangler login`
+    - `wrangler secret put|delete`
+    - `wrangler queues create|delete` and `wrangler queues consumer add|remove`
+    - `wrangler hyperdrive create|delete|update`
+  - **Only when the contract's Runtime is `cloudflare`.** Running the `deploy` script
+    (`pnpm run deploy`, `bun run deploy`, `turbo run deploy`). A node user's own `deploy`
+    script must not be blocked. The contract reads `runtime`, defaulting to `node`.
 - **Templates:** the block language gains Runtime terms (`@if cloudflare`, `@if node`, combinable
   with Component terms). Whole files that exist under only one Runtime are selected by a
   path → Runtime mapping next to `componentsNeededBy`: `wrangler.jsonc` and the
@@ -70,7 +82,15 @@ loop.
 
 ## Consequences
 
-- The golden matrix adds cloudflare + default Selection and cloudflare + `api` only. The pack
-  smoke test runs a real `verify` for cloudflare + default, including
-  `wrangler deploy --dry-run` per App (no account needed).
-- lint-templates must accept Runtime terms in blocks.
+- Goldens add cloudflare + default Selection and cloudflare + standalone `web`. The latter is
+  an assets-only Cloudflare Worker that no other case pins. Every other Selection × Runtime is
+  covered by invariant sweeps rather than goldens.
+- A test reads every generated `wrangler.jsonc` together and checks that the bindings agree with
+  each other. `wrangler deploy --dry-run` accepts mismatched names.
+- CI's e2e job gains a Runtime axis. On cloudflare it runs `verify` and
+  `wrangler deploy --dry-run` per App, then boots each Cloudflare Worker locally and calls it.
+  Pack smoke only checks that the cloudflare files exist, so wrangler and workerd are not
+  downloaded on three OSes.
+- The block checker (and so lint-templates) accepts Runtime terms.
+- Accepted residual risk: no test touches real Hyperdrive or Queues, because deploying is left
+  to humans.
