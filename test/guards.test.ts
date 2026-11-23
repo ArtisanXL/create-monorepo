@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -17,9 +18,14 @@ beforeAll(async () => {
 afterAll(() => cleanup());
 
 /** Runs the generated guard hook as Claude Code would: JSON on stdin, exit 2 blocks. */
-function guard(toolName: string, toolInput: Record<string, unknown>, rawStdin?: string) {
+function guard(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  rawStdin?: string,
+  script = ".claude/hooks/guard.mjs",
+) {
   return new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
-    const child = spawn("node", [".claude/hooks/guard.mjs"], {
+    const child = spawn("node", [script], {
       cwd: dir,
       env: { ...process.env, CLAUDE_PROJECT_DIR: dir },
     });
@@ -138,7 +144,9 @@ describe("generated guard hook", () => {
       () =>
         blocks(
           "export const decide = () => { const a = []; for (;;) a.push(new Array(1e6).fill(a.length)); };",
-          "worker ",
+          // V8's fatal OOM aborts the process: SIGABRT on POSIX, an abort exit code on Windows.
+          // Never the wall-clock timeout, never a plain exit 1.
+          process.platform === "win32" ? "worker exited with code " : "worker killed by SIGABRT",
         ),
       30_000,
     );
@@ -151,6 +159,66 @@ describe("generated guard hook", () => {
 
     it("a decide() that exits with code 1 blocks", () =>
       blocks("export const decide = () => process.exit(1);", "worker exited with code 1"));
+  });
+
+  describe("supervisor handles odd worker outcomes (stub workers in a temp copy)", () => {
+    let stubDir: string;
+    let supervisor: string;
+    beforeAll(async () => {
+      stubDir = await mkdtemp(join(tmpdir(), "guard-stub-"));
+      supervisor = join(stubDir, "guard.mjs");
+      await copyFile(join(dir, ".claude/hooks/guard.mjs"), supervisor);
+    });
+    afterAll(() => rm(stubDir, { recursive: true, force: true }));
+
+    const withWorker = async (source: string | null) => {
+      const worker = join(stubDir, "guard-worker.mjs");
+      await rm(worker, { force: true });
+      if (source !== null) await writeFile(worker, source);
+      return guard("Write", { file_path: "x", content: "x" }, undefined, supervisor);
+    };
+
+    it("a missing worker blocks", async () => {
+      const r = await withWorker(null);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("The guard hook failed (worker exited with code 1");
+    });
+
+    it("more than 1 MB of worker stderr blocks", async () => {
+      const r = await withWorker(
+        'process.stderr.write("x".repeat(2 * 1024 * 1024)); process.exitCode = 2;',
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("The guard hook failed");
+      expect(r.stderr).toContain("ENOBUFS");
+    });
+
+    it("exit 2 with no stderr blocks with a reason", async () => {
+      const r = await withWorker("process.exitCode = 2;");
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("worker blocked the call without giving a reason");
+    });
+
+    it("a long worker message is passed through untruncated", async () => {
+      const r = await withWorker(
+        'process.stderr.write("y".repeat(500_000) + "END\\n"); process.exitCode = 2;',
+      );
+      expect(r.code).toBe(2);
+      expect(r.stderr.endsWith("END\n")).toBe(true);
+      expect(r.stderr.length).toBeGreaterThan(500_000);
+    });
+
+    it("JSON on worker stdout does not change the decision", async () => {
+      const allow = '{"hookSpecificOutput":{"permissionDecision":"allow"}}';
+      const asBlocked = await withWorker(
+        `process.stdout.write(${JSON.stringify(allow)}); process.stderr.write("nope\\n"); process.exitCode = 2;`,
+      );
+      expect(asBlocked).toEqual({ code: 2, stderr: "nope\n" });
+      const asFailed = await withWorker(
+        `process.stdout.write(${JSON.stringify(allow)}); process.exitCode = 1;`,
+      );
+      expect(asFailed.code).toBe(2);
+    });
   });
 
   it.each(PM_NAMES)("records the chosen package manager (%s) in architecture.json", async (pm) => {

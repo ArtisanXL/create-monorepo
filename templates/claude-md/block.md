@@ -1,6 +1,6 @@
 # Project rules
 
-This block is protected by `.claude/hooks/guard.mjs` and `__RUN__ arch`. Anything outside it may be edited freely.
+This block is protected by `.claude/hooks/guard.mjs` and `__RUN__ arch`. Anything outside it may be edited freely. The hook fails closed only on Claude Code v2.1.295+.
 
 ## Language
 Chat with the user in the user's language. Everything else — code, comments, docs, ADRs, commit messages, PR text, log and error messages — is written in English.
