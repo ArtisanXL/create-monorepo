@@ -9,8 +9,11 @@ Sharing one database or fixed ports between them causes collisions.
 ## Decision
 - One shared local Postgres; isolation by name. The main checkout uses `__DB_PREFIX__`, every
   worktree `__DB_PREFIX___wt_<key>` (`<key>` = sanitized folder name + sha1 of the path).
-@if worker
+@if worker node
   pg-boss stores its queue in the same database, so jobs are isolated too.
+@endif
+@if worker cloudflare
+  The worker's local queue lives in this checkout's `.wrangler` state, so jobs are isolated too.
 @endif
 - `scripts/worktree.mjs` (`__RUN__ worktree:setup|teardown|info|gc`) writes `.env` (copied from the
   source checkout, only isolated keys rewritten, placeholder secrets generated), creates the

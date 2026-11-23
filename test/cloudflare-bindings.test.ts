@@ -1,0 +1,87 @@
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { COMPATIBILITY_DATE, HYPERDRIVE_BINDING, type Selection } from "../src/components.ts";
+import { scaffoldFixture } from "./support/fixture.ts";
+
+const cleanups: (() => Promise<void>)[] = [];
+afterEach(async () => {
+  await Promise.all(cleanups.splice(0).map((c) => c()));
+});
+
+interface Config {
+  name: string;
+  main: string;
+  compatibility_date: string;
+  compatibility_flags: string[];
+  hyperdrive?: { binding: string }[];
+  queues?: {
+    producers?: { binding: string; queue: string }[];
+    consumers?: { queue: string }[];
+  };
+  triggers?: { crons?: string[] };
+}
+
+/** `wrangler deploy --dry-run` accepts mismatched names, so this reads the configs together. */
+async function cloudflareRepo(selection: Selection) {
+  const { dir, cleanup } = await scaffoldFixture({ selection, runtime: "cloudflare" });
+  cleanups.push(cleanup);
+  const read = (rel: string) => readFile(join(dir, rel), "utf8");
+  const configs: Record<string, Config> = {};
+  for (const app of await readdir(join(dir, "apps"))) {
+    const text = await read(`apps/${app}/wrangler.jsonc`).catch(() => undefined);
+    if (text === undefined) continue;
+    configs[app] = JSON.parse(text.replace(/^\s*\/\/.*$/gm, ""));
+  }
+  return { read, configs };
+}
+
+const WORKERS: Selection = { apps: ["api", "worker"], packages: [] };
+
+describe("Cloudflare binding consistency", () => {
+  it("gives every config the generator's compatibility date and nodejs_compat", async () => {
+    const { configs } = await cloudflareRepo(WORKERS);
+    expect(Object.keys(configs).sort()).toEqual(["api", "worker"]);
+    for (const [app, config] of Object.entries(configs)) {
+      expect(config.compatibility_date, app).toBe(COMPATIBILITY_DATE);
+      expect(config.compatibility_flags, app).toContain("nodejs_compat");
+    }
+  });
+
+  it("names the Hyperdrive binding the same in every config, entry and env", async () => {
+    const { configs, read } = await cloudflareRepo(WORKERS);
+    for (const [app, config] of Object.entries(configs)) {
+      expect(
+        config.hyperdrive?.map((h) => h.binding),
+        app,
+      ).toEqual([HYPERDRIVE_BINDING]);
+      expect(await read(`apps/${app}/src/env.ts`), app).toContain(HYPERDRIVE_BINDING);
+      expect(await read(`apps/${app}/src/cloudflare.ts`), app).toContain(
+        `${HYPERDRIVE_BINDING}.connectionString`,
+      );
+    }
+    expect(await read("scripts/cloudflare-dev.mjs")).toContain(`"${HYPERDRIVE_BINDING}"`);
+  });
+
+  it("matches the queue producer and consumer names, and reads the producer binding it declares", async () => {
+    const { configs, read } = await cloudflareRepo(WORKERS);
+    const { producers, consumers } = configs.worker?.queues ?? {};
+    expect(producers).toHaveLength(1);
+    expect(consumers).toHaveLength(1);
+    expect(consumers?.[0]?.queue).toBe(producers?.[0]?.queue);
+    expect(producers?.[0]?.queue).toMatch(/^[a-z][a-z0-9-]*$/);
+    const binding = producers?.[0]?.binding as string;
+    expect(await read("apps/worker/src/env.ts")).toContain(binding);
+    expect(await read("apps/worker/src/cloudflare.ts")).toContain(`env.${binding}.`);
+    // The api never produces or consumes, matching node.
+    expect(configs.api?.queues).toBeUndefined();
+  });
+
+  it("schedules a cron for every job that has one, and only those", async () => {
+    const { configs, read } = await cloudflareRepo(WORKERS);
+    const job = await read("apps/worker/src/jobs/healthcheck.ts");
+    const crons = [...job.matchAll(/cron: "([^"]+)"/g)].map((m) => m[1]).sort();
+    expect(crons.length).toBeGreaterThan(0);
+    expect([...(configs.worker?.triggers?.crons ?? [])].sort()).toEqual(crons);
+  });
+});

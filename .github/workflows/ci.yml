@@ -88,11 +88,16 @@ jobs:
           - pm: pnpm
             runtime: node
             scaffold-args: ""
-          # The cloudflare entries scaffold `api` and standalone `web`; later Runtime tickets widen it.
+          # The cloudflare entries scaffold `api`, `api` with `worker`, standalone `web`, and `api` + `web`.
           - pm: pnpm
             runtime: cloudflare
             scaffold-args: "--apps api --runtime cloudflare"
             dry-run-app: api
+          - pm: pnpm
+            runtime: cloudflare
+            scaffold-args: "--apps api,worker --runtime cloudflare"
+            dry-run-app: api
+            has-worker: "true"
           - pm: pnpm
             runtime: cloudflare
             scaffold-args: "--apps web --runtime cloudflare"
@@ -155,4 +160,27 @@ jobs:
             sleep 2
           done
           cat "$RUNNER_TEMP/api-dev.log" "$RUNNER_TEMP/web-dev.log"
+      - name: Build, then dry-run the worker deploy
+        if: matrix.has-worker == 'true'
+        working-directory: ${{ runner.temp }}/generated/apps/worker
+        run: pnpm run build && pnpm exec wrangler deploy --dry-run
+      - name: Boot the worker locally, trigger its cron and check the job ran
+        if: matrix.has-worker == 'true'
+        working-directory: ${{ runner.temp }}/generated
+        run: |
+          echo "DATABASE_URL=postgres://app:app@localhost:5432/app" > .env
+          node scripts/cloudflare-dev.mjs -- pnpm --filter ./apps/worker dev --ip 127.0.0.1 --port 8788 > "$RUNNER_TEMP/worker-dev.log" 2>&1 &
+          # The scheduled endpoint answers once the Worker is up. The cron is the one in wrangler.jsonc.
+          for i in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:8788/cdn-cgi/local/scheduled?cron=*/5+*+*+*+*"; then
+              # The message was only sent; the job ran when the queue() handler logs its result.
+              for j in $(seq 1 30); do
+                if grep -q "healthcheck { status: 'ok', db: 'up' }" "$RUNNER_TEMP/worker-dev.log"; then exit 0; fi
+                sleep 1
+              done
+              break
+            fi
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/worker-dev.log"
           exit 1

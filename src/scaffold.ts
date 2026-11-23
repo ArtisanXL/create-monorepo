@@ -75,6 +75,7 @@ export type PlanAdapter = Omit<PackageManagerAdapter, "version">;
 /** Tokens whose values core derives; adapter tokens live in pm/types.ts. */
 export const CORE_TOKENS = [
   "__DB_PREFIX__",
+  "__NAME_PREFIX__",
   "__SCOPE_RE__",
   "__SCOPE__",
   "__NODE_MAJOR__",
@@ -220,6 +221,7 @@ export function plan(g: Gathered): Plan {
   // without `__CLAUDE_SHA__`, hashed, and only then is the hash added for everything else.
   const baseValues: Values = [
     ["__DB_PREFIX__", dbPrefix],
+    ["__NAME_PREFIX__", dbPrefix.replaceAll("_", "-")],
     ["__SCOPE_RE__", escapeRegex(scope)],
     ["__SCOPE__", scope],
     ["__NODE_MAJOR__", String(nodeMajor)],

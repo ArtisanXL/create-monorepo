@@ -69,6 +69,7 @@ describe("file ownership", () => {
     expect(componentsNeededBy("apps/web/src/lib/api.ts")).toEqual(["web", "api"]);
     expect(componentsNeededBy("compose.yaml")).toEqual(["db"]);
     expect(componentsNeededBy("docs/adr/0003-job-queue-pg-boss.md")).toEqual(["worker"]);
+    expect(componentsNeededBy("docs/adr/0003-job-queue-cloudflare-queues.md")).toEqual(["worker"]);
     expect(componentsNeededBy("turbo.json")).toEqual([]);
   });
 
@@ -129,6 +130,26 @@ describe("Runtime support", () => {
     );
   });
 
+  it("accepts cloudflare with worker, alone or with api", () => {
+    for (const apps of [["worker"], ["api", "worker"]] as const) {
+      expect(runtimeSupportError(closureOf({ apps: [...apps], packages: [] }), "cloudflare")).toBe(
+        undefined,
+      );
+    }
+  });
+
+  it("generates the cloudflare-dev wrapper for api or worker (web alone needs none), and for none without them", () => {
+    for (const apps of [["api"], ["worker"], ["api", "web"], ["web", "worker"]] as const) {
+      const context = contextOf({ apps: [...apps], packages: [] }, "cloudflare");
+      expect(isGenerated("scripts/cloudflare-dev.mjs", context), apps.join()).toBe(true);
+      expect(isGenerated("scripts/cloudflare-dev.test.mjs", context), apps.join()).toBe(true);
+    }
+    const webOnly = contextOf({ apps: ["web"], packages: [] }, "cloudflare");
+    expect(isGenerated("scripts/cloudflare-dev.mjs", webOnly)).toBe(false);
+    const none = contextOf({ apps: [], packages: ["db"] }, "cloudflare");
+    expect(isGenerated("scripts/cloudflare-dev.mjs", none)).toBe(false);
+  });
+
   it("accepts cloudflare with standalone web, alone or with packages", () => {
     expect(runtimeSupportError(closureOf({ apps: ["web"], packages: [] }), "cloudflare")).toBe(
       undefined,
@@ -138,17 +159,16 @@ describe("Runtime support", () => {
     ).toBe(undefined);
   });
 
-  it("accepts cloudflare with web together with api", () => {
-    expect(
-      runtimeSupportError(closureOf({ apps: ["api", "web"], packages: [] }), "cloudflare"),
-    ).toBe(undefined);
-  });
-
-  it("rejects cloudflare with worker as not yet supported", () => {
-    for (const apps of [["worker"], ["api", "worker"]] as const) {
+  it("accepts cloudflare with web together with api, and with worker", () => {
+    for (const apps of [
+      ["api", "web"],
+      ["web", "worker"],
+      ["api", "web", "worker"],
+    ] as const) {
       expect(
         runtimeSupportError(closureOf({ apps: [...apps], packages: [] }), "cloudflare"),
-      ).toMatch(/not yet supported with worker\b/);
+        apps.join(),
+      ).toBe(undefined);
     }
   });
 });

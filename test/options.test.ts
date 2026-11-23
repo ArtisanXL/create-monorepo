@@ -639,6 +639,17 @@ describe("resolveOptions: runtime (ADR-0005)", () => {
     expect(error.message).toMatch(/runtime/);
   });
 
+  it("accepts cloudflare with the worker App", async () => {
+    for (const apps of ["worker", "api,worker"]) {
+      const { options } = await resolve(
+        ["proj", "--apps", apps, "--runtime", "cloudflare"],
+        {},
+        false,
+      );
+      expect(options.runtime).toBe("cloudflare");
+    }
+  });
+
   it("accepts cloudflare with the api App alone", async () => {
     const { options } = await resolve(
       ["proj", "--apps", "api", "--runtime", "cloudflare"],
@@ -646,6 +657,17 @@ describe("resolveOptions: runtime (ADR-0005)", () => {
       false,
     );
     expect(options.runtime).toBe("cloudflare");
+  });
+
+  it("accepts cloudflare with the worker App", async () => {
+    for (const apps of ["worker", "api,worker"]) {
+      const { options } = await resolve(
+        ["proj", "--apps", apps, "--runtime", "cloudflare"],
+        {},
+        false,
+      );
+      expect(options.runtime).toBe("cloudflare");
+    }
   });
 
   it("accepts cloudflare with standalone web", async () => {
@@ -657,23 +679,15 @@ describe("resolveOptions: runtime (ADR-0005)", () => {
     expect(options.runtime).toBe("cloudflare");
   });
 
-  it("accepts cloudflare with web together with api", async () => {
-    const { options } = await resolve(
-      ["proj", "--apps", "api,web", "--runtime", "cloudflare"],
-      {},
-      false,
-    );
-    expect(options.runtime).toBe("cloudflare");
-  });
-
-  it("rejects cloudflare with worker as not yet supported", async () => {
-    for (const apps of ["worker"]) {
-      const error = await failure(["proj", "--apps", apps, "--runtime", "cloudflare"]);
-      expect(error).toBeInstanceOf(OptionsError);
-      expect((error as Error).message).toMatch(/not yet supported/);
+  it("accepts cloudflare with web together with api, and with all three Apps", async () => {
+    for (const apps of ["api,web", "api,web,worker"]) {
+      const { options } = await resolve(
+        ["proj", "--apps", apps, "--runtime", "cloudflare"],
+        {},
+        false,
+      );
+      expect(options.runtime, apps).toBe("cloudflare");
     }
-    const error = await failure(["proj", "--runtime", "cloudflare"]); // default Selection has Apps
-    expect((error as Error).message).toMatch(/not yet supported/);
   });
 
   async function failure0(probe: FsProbe): Promise<Error> {
