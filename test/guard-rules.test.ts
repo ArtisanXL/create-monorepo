@@ -1339,8 +1339,12 @@ describe("guard decision: remaining limits (#34)", () => {
       "git switch some-branch",
       "git reset abc1234",
       "git reset --soft abc1234",
-      // Only rm / mv / recursive chmod resolve globs.
+      // Only rm / mv / shred / unlink / rmdir / recursive chmod resolve globs.
       "truncate -s0 arch*.json",
+      // The git rewind check sees one command line: a reset in one call and the checkout in the next are not connected.
+      "git reset abc1234",
+      // A stash of a rewound index only counts when the reset is on the same line.
+      "git stash -u && git stash drop",
     ])
       expect(bash(cmd), cmd).toEqual({ allow: true });
   });
@@ -1470,6 +1474,7 @@ describe("guard decision: constructed bypasses (#37)", () => {
       [
         "printf 'r%s architecture.json' m | sh",
         "echo -e 'rm architecture.json' | sh",
+        "printf '%s\\n' hello | sh",
         "{r,}m architecture.json",
         "rm {x,architecture.json}",
         'bash <<< "npm install"',
@@ -1481,7 +1486,6 @@ describe("guard decision: constructed bypasses (#37)", () => {
         "chmod -R 755 d*",
       ],
       [
-        "printf '%s\\n' hello | sh",
         "printf '%s\\n' architecture.json | cat",
         "echo -e 'a\\tb'",
         "echo {a,b}.txt",
@@ -1499,5 +1503,103 @@ describe("guard decision: constructed bypasses (#37)", () => {
         "mv src/* /tmp",
       ],
     );
+  });
+
+  describe("review follow-ups (#37)", () => {
+    cases(
+      [
+        // while/until read fed by a here-string on `done`
+        "while read X; do rm $X; done <<< architecture.json",
+        "while read X; do rm -rf $X; done <<< docs",
+        'while read X; do rm -rf "$X"; done <<< docs',
+        "until read X; do rm -rf $X; done <<< docs",
+        "while read X; do $X -rf docs; done <<< rm",
+        'while read X; do $X; done <<< "rm architecture.json"',
+        // brace ranges and character classes
+        "rm {a..z}rchitecture.json",
+        "rm architectur{e..e}.json",
+        "rm -rf [[:alpha:]]ocs",
+        "rm [[:alpha:]]rchitecture.json",
+        "rm {r,}'m' architecture.json",
+        // printf formats and escapes
+        "printf 'rm %s.json' architecture | sh",
+        "printf 'rm architecture.%s' json | sh",
+        "printf 'rm architecture.js%s' on | sh",
+        "echo -e 'rm\\tarchitecture.json' | bash",
+        // shell scripts: -e is errexit, folders, source
+        "bash -e x.sh architecture.json",
+        "sh -e x.sh architecture.json",
+        "bash x.sh docs",
+        "bash x.sh docs/",
+        "source x.sh architecture.json",
+        ". x.sh architecture.json",
+        // git rewinds
+        "git reset abc1234 && git checkout -f",
+        "git reset abc1234 && git checkout -f HEAD",
+        "git reset abc1234 && git checkout -- '*'",
+        "git reset abc1234 && git checkout -- :/",
+        "git reset abc1234 && git checkout -- ':(top)'",
+        "git reset abc1234 && git restore '*'",
+        "git read-tree abc1234 && git checkout-index -a -f",
+        "git reset abc1234 && git stash -u && git stash drop",
+        "git checkout HEAD^",
+        "git checkout feature~2",
+        "git checkout HEAD@{1}",
+        "git checkout FETCH_HEAD",
+        "git checkout refs/heads/main",
+        "git switch -C feat abc1234",
+        "git switch --create feat HEAD~4",
+        // find and delete globs
+        "find d* -delete",
+        "find * -delete",
+        "shred arch*.json",
+        "unlink arch*.json",
+        "rm -rf */dist",
+      ],
+      [
+        "echo {1..100}",
+        "mkdir -p src/{a,b}",
+        "rm -f file{1..3}.txt",
+        "bash -e scripts/x.sh architecture.json",
+        "bash x.sh src",
+        "source x.sh src/a.ts",
+        "git reset -- src/x.ts && git checkout -- .",
+        "git reset HEAD -- src && git checkout .",
+        "git stash -u",
+        "git checkout HEAD@{0}",
+        "git checkout main",
+        "git switch feature",
+        "git checkout -b feat origin/main",
+        "git switch --create feat origin/main",
+        "find src* -delete",
+        "rm -rf 'dist*'",
+        "rm -rf '*'",
+        "find '*' -delete",
+        "shred src/*.tmp",
+      ],
+    );
+
+    it("says why in a message of its own", () => {
+      expect(blocked(bash("find . -name x -delete"))).toContain("start the search in a subfolder");
+      expect(blocked(bash("rm -rf */dist"))).toContain("A glob in this delete or move");
+      expect(blocked(bash("printf 'x%s' y | sh"))).toContain("Text formatted at run time");
+    });
+
+    it("keeps long loop lists and accumulated values whole, or blocks them", () => {
+      const long = Array.from({ length: 60 }, (_, k) => `src/some/long/dir/${k}`).join(" ");
+      expect(bash(`for X in ${long} docs; do rm -rf $X; done`).allow).toBe(false);
+      const chain = Array.from({ length: 60 }, (_, k) => `true && X=src/some/long/dir/${k}`).join(
+        "; ",
+      );
+      expect(bash(`${chain}; true && X=docs; rm -rf $X`).allow).toBe(false);
+      expect(bash(`for X in ${long}; do echo $X; done`).allow).toBe(false);
+    });
+
+    it("lexes a hostile brace word in linear time", () => {
+      const cmd = `echo ${"{a,b}".repeat(5)}{${",".repeat(50_000)}`;
+      const t0 = performance.now();
+      bash(cmd);
+      expect(performance.now() - t0).toBeLessThan(1000);
+    });
   });
 });
