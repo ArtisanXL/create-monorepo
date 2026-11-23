@@ -1,0 +1,52 @@
+name: Guard bypass or false positive
+description: The generated guard hook allows a command it should block, or blocks a command it should allow.
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The guard (`.claude/hooks/guard.mjs` + `scripts/guard-rules.mjs` in a generated repo) keeps
+        AI agents away from protected paths. It is a guardrail, not a security boundary, so bypasses
+        are tracked in public issues. See SECURITY.md for what to report privately instead.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - Bypass (allowed, but changes a protected path)
+        - False positive (blocked, but harmless)
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command or tool input
+      description: The exact Bash command, or the Write/Edit tool input, as the agent sent it.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: effect
+    attributes:
+      label: What it does in a real shell
+      description: Which protected path it deletes, moves, rewrites or rewinds (or why it is harmless). Mention the shell (bash/zsh) and any options it relies on.
+    validations:
+      required: true
+  - type: textarea
+    id: verdict
+    attributes:
+      label: Guard verdict
+      description: What the guard returned (allowed, or the block message).
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: create-monorepo version the repo was generated with
+      placeholder: "0.1.1"
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Is the same command also allowed/blocked on an older version? A suggested fix?

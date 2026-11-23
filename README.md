@@ -1,6 +1,16 @@
 # @artisanxl/create-monorepo
 
+[![npm](https://img.shields.io/npm/v/@artisanxl/create-monorepo)](https://www.npmjs.com/package/@artisanxl/create-monorepo)
+[![CI](https://github.com/ArtisanXL/create-monorepo/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ArtisanXL/create-monorepo/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Generates a guard-railed TypeScript monorepo designed for development with AI agents (Claude Code).
+
+AI coding agents are fast, but they also delete the wrong folder, add an unplanned dependency or
+quietly loosen an architectural rule. The generated repository writes its architecture down as a
+machine-checked contract (`architecture.json`) and enforces it in three places: a Claude Code hook
+that blocks harmful commands before they run, a Stop hook that keeps the agent working until the
+checks pass, and the same checks in pre-commit and CI.
 
 ```bash
 npx @artisanxl/create-monorepo my-app
@@ -71,7 +81,7 @@ pnpm build && pnpm smoke:pack   # build dist/ and smoke-test the packed tarball
 node dist/cli.mjs /tmp/demo -y  # run the local build
 ```
 
-`src/` is the generator, `templates/` holds the generated files with `__PLACEHOLDER__` tokens.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow. `src/` is the generator, `templates/` holds the generated files with `__PLACEHOLDER__` tokens.
 The generated `.mjs` scripts (guard, arch-check, worktree) are linted and tested here. Design
 decisions live in `docs/adr/`.
 
@@ -86,6 +96,16 @@ git tag v0.1.1 && git push origin v0.1.1
 `.github/workflows/release.yml` checks that the tag matches the package version, runs the checks,
 and publishes to npm with provenance via trusted publishing (OIDC; no npm token is stored).
 
+## Contributing
+
+Bug reports, guard bypasses, ideas and pull requests are welcome. Start with
+[CONTRIBUTING.md](CONTRIBUTING.md); it covers the scope of the project, the development setup and
+how changes are reviewed. Everyone taking part is expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
+- Questions and help: [SUPPORT.md](SUPPORT.md)
+- Security vulnerabilities: report privately, see [SECURITY.md](SECURITY.md)
+
 ## License
 
-MIT
+[MIT](LICENSE)
