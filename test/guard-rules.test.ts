@@ -2417,4 +2417,36 @@ describe("guard decision: hardening follow-ups (#41)", () => {
       expect(bash("nvm use && cd apps/web && rm -rf *")).toEqual({ allow: true });
     });
   });
+
+  describe("fourth review (prefixes hide eval, source and alias)", () => {
+    cases(
+      [
+        // shadowing behind a prefix
+        "time source ./f.sh; X=$(printf safe); rm -rf $X",
+        "command -- source ./f.sh; X=$(printf safe); rm -rf $X",
+        "command -p alias printf='echo docs'; X=$(printf safe); rm -rf $X",
+        "noglob source ./f.sh; X=$(printf safe); rm -rf $X",
+        "- source ./f.sh; X=$(printf safe); rm -rf $X",
+        "\\alias printf='echo docs'; X=$(printf safe); rm -rf $X",
+        "builtin alias printf='echo docs'; X=$(printf safe); rm -rf $X",
+        "command -p eval 'printf(){ echo docs; }'; X=$(printf safe); rm -rf $X",
+        // narrowing behind a prefix
+        "cd src && command -p eval 'cd ..' && rm -rf .",
+        "cd src && time eval 'cd ..' && rm -rf .",
+        "cd src && noglob eval 'cd ..' && rm -rf .",
+        "cd src && - eval 'cd ..' && rm -rf .",
+        "cd src && builtin trap 'cd ..' DEBUG && rm -rf .",
+        "cd src && command . ./f && rm -rf .",
+        "cd src && cd +1 && rm -rf .",
+        "cd src && up && git checkout main -- .",
+      ],
+      [
+        "cd src && rm -rf .",
+        "cd src && rm -rf ./x",
+        'X=$(mktemp -d); rm -rf "$X"',
+        "git checkout HEAD -- .",
+        "ls . && rm -rf dist",
+      ],
+    );
+  });
 });

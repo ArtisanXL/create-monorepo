@@ -421,15 +421,14 @@ function narrows(c, text) {
 }
 
 /**
- * Lines on which no `cd` narrows anything: something may change the directory in a way the guard cannot follow. a
+ * Lines on which no `cd` narrows anything: something may change the directory in a way the guard cannot follow. A
  * CDPATH assignment, `ln -s`, `eval`, `source`, `.` or `trap` as a command, a variable as a command, and any function definition.
  */
 function narrowingOff(segments, cmd, fold) {
   if (/(?:^|[\s;&|(])(?:function\s+\S|[\w.:-]+\s*\(\s*\))|--work-tree|--git-dir|GIT_WORK_TREE|GIT_DIR/.test(unquoted(cmd))) return true;
   return segments.some((seg) => {
-    const head = headOf(seg);
     // A command that is a variable (`$x 'cd ..'`) may be anything; eval, source, `.` and trap run code the guard cannot read.
-    if (head && (head.text.startsWith("$") || ["eval", "source", ".", "trap"].includes(head.text))) return true;
+    if (commandWord(seg)?.text.startsWith("$") || loadsCode(seg)) return true;
     return seg.words.some((w, k) => {
       const name = fold(baseName(w.text));
       return /^CDPATH=/.test(w.text) || w.text === "CDPATH" || (name === "ln" && seg.words.slice(k + 1).some((x) => /^-[A-Za-z]*s|^--symbolic/.test(x.text)));
@@ -632,12 +631,18 @@ const unquoted = (cmd) => cmd.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''");
 // A definition of a function named like a builtin the guard evaluates (outside quotes).
 const SHADOW_DEF = /(?:^|[\s;&|(])\\?(?:function\s+(?:printf|echo|pwd|command|builtin)\b|(?:printf|echo|pwd|command|builtin)\s*\(\s*\))/;
 
-/** The first word of a segment that names the command (after assignments, keywords and `builtin` / `command`). */
-function headOf(seg) {
-  let k = seg.words.findIndex((w) => !KEYWORDS.has(w.text) && !ASSIGNMENT.test(w.text));
-  while (k >= 0 && (seg.words[k].text === "builtin" || seg.words[k].text === "command") && seg.words[k + 1]) k++;
-  return k < 0 ? undefined : seg.words[k];
+// Words that define or load code the guard cannot read. Any one of them in a segment (also behind `time`, `command -p`,
+// `noglob`, `-`, a backslash or quotes) makes the line shadowed and switches `cd` narrowing off. `.` counts only as a command.
+const CODE_LOADERS = /^(?:alias|unalias|enable|eval|source|trap|functions\b.*)$/;
+const COMMAND_PREFIXES = new Set(["builtin", "command", "time", "noglob", "nocorrect", "-", "exec"]);
+
+/** The word of a segment that names the command (after assignments, keywords, prefixes such as `time` and their flags). */
+function commandWord(seg) {
+  const lead = seg.words.filter((w) => !KEYWORDS.has(w.text) && !ASSIGNMENT.test(w.text));
+  return lead.find((w) => !COMMAND_PREFIXES.has(w.text) && !w.text.startsWith("-"));
 }
+
+const loadsCode = (seg) => seg.words.some((w) => CODE_LOADERS.test(w.text.replace(/^\\/, ""))) || commandWord(seg)?.text === ".";
 
 /**
  * Whether the line may redefine or load something that changes what printf, echo and pwd do: an alias, `enable`, `eval`,
@@ -645,10 +650,7 @@ function headOf(seg) {
  */
 export function shadows(segments, cmd) {
   if (SHADOW_DEF.test(unquoted(cmd))) return true;
-  return segments.some((seg) => {
-    const head = headOf(seg);
-    return (head && ["alias", "unalias", "enable", "eval", "source", "."].includes(head.text)) || seg.words.some((w) => /^functions\b/.test(w.text));
-  });
+  return segments.some(loadsCode);
 }
 
 /**
