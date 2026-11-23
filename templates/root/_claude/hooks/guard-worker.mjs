@@ -3,11 +3,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
-const deny = (message) => {
-  process.stderr.write(`⛔ ${message}\nRules: CLAUDE.md and architecture.json.\n`);
-  process.exit(2);
-};
+const block = (message) => `⛔ ${message}\nRules: CLAUDE.md and architecture.json.\n`;
 
+// Sets process.exitCode and ends naturally (no process.exit) so a long message is not truncated.
+let message = null;
 try {
   const { loadContract } = await import("../../scripts/arch-contract.mjs");
   const { decide } = await import("../../scripts/guard-rules.mjs");
@@ -24,8 +23,11 @@ try {
     platform: process.platform,
     claudeMdText: existsSync(claudeMd) ? readFileSync(claudeMd, "utf8") : undefined,
   });
-  if (!result.allow) deny(result.message);
+  if (!result.allow) message = block(result.message);
 } catch (error) {
-  deny(`The guard hook failed (${error instanceof Error ? error.message : String(error)}); blocking this call. Ask the user to check .claude/hooks/guard.mjs and architecture.json.`);
+  message = block(`The guard hook failed (${error instanceof Error ? error.message : String(error)}); blocking this call. Ask the user to check .claude/hooks/guard.mjs and architecture.json.`);
 }
-process.exit(0);
+if (message !== null) {
+  process.stderr.write(message);
+  process.exitCode = 2;
+}
