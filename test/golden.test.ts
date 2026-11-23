@@ -46,6 +46,11 @@ const GOLDEN_CASES: {
   { label: "apps-api", selection: { apps: ["api"], packages: [] } },
   { label: "apps-web", selection: { apps: ["web"], packages: [] } },
   {
+    label: "cloudflare-apps-web",
+    selection: { apps: ["web"], packages: [] },
+    runtime: "cloudflare",
+  },
+  {
     label: "apps-none-domain-contracts",
     selection: { apps: [], packages: ["domain", "contracts"] },
   },
