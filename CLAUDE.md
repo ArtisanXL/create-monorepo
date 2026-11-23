@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues live in GitHub Issues for ArtisanXL/ts-monorepo-scaffold (`gh` CLI). See `docs/agents/issue-tracker.md`.
+Issues live in GitHub Issues for ArtisanXL/create-monorepo (`gh` CLI). See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
