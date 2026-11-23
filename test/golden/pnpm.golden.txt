@@ -1593,7 +1593,7 @@ export function check(snapshot) {
   return errors;
 }
 
-=== scripts/guard-rules.mjs (41938 bytes) ===
+=== scripts/guard-rules.mjs (42822 bytes) ===
 // The guard hook's decision, free of I/O: no stdin, env, filesystem or exit. The first matching
 // rule wins, so each message stays the same as it always was. Imported by .claude/hooks/guard.mjs.
 import path from "node:path";
@@ -1843,14 +1843,16 @@ function checksOutRevision(g, rest) {
   return revs.length > 0 && g.operands.length - revs.length <= (creates ? 1 : 0);
 }
 
-/** A glob or `:(magic)` pathspec as a path, and whether it is relative to the project root; undefined for exclusions and plain paths. */
+/**
+ * A pathspec that is a glob or has `:(magic)`: its path, whether it is relative to the project root, and whether it
+ * ignores case. `{ exclude: true }` for an exclusion; undefined for a plain path (those are checked by path).
+ */
 function pathspec(t) {
   const m = /^:(?:\(([^)]*)\)|([/!^]?))(.*)$/s.exec(t);
-  if (!m) return GLOB.test(t) ? { path: t, top: false, magic: false } : undefined;
+  if (!m) return GLOB.test(t) ? { path: t, top: false, magic: false, icase: false } : undefined;
   const words = (m[1] ?? "").split(",");
-  if (words.includes("exclude") || m[2] === "!" || m[2] === "^") return undefined;
-  const path = m[3] === "" ? "." : m[3];
-  return { path, top: words.includes("top") || m[2] === "/", magic: true };
+  if (words.includes("exclude") || m[2] === "!" || m[2] === "^") return { exclude: true };
+  return { path: m[3] === "" ? "." : m[3], top: words.includes("top") || m[2] === "/", magic: true, icase: words.includes("icase") };
 }
 
 function gitRule(env, words, bases, parsed) {
@@ -1896,14 +1898,22 @@ function gitRule(env, words, bases, parsed) {
   const force = sub === "checkout" && g.flags.some((x) => /^-[A-Za-z]*f|^--force$/.test(x)) && g.operands.every((o) => HEAD_ONLY.test(o.text));
   if ((dots.length || force) && rewinds(env, parsed)) return MSG.rewind;
   if (sub === "checkout" && checksOutRevision(g, args.slice(i + 1))) return MSG.rewind;
-  // After a rewind a glob or magic pathspec restores whatever it matches from the rewound index.
-  if ((sub === "checkout" || sub === "restore") && rewinds(env, parsed))
-    for (const o of g.operands) {
-      const spec = pathspec(o.text);
-      if (!spec) continue;
-      const rels = relsOf([spec.path], spec.top ? [env.root] : gb);
-      if (rels.some((r) => (GLOB.test(r) ? globHitsProtected(contract, r) : spec.magic && (isProtectedOrDir(contract, r) || holdsProtected(contract, r))))) return MSG.rewind;
+  // After a rewind (or from a revision) a glob or magic pathspec restores whatever it matches. Only exclusions restore the
+  // whole tree; a magic pathspec with no path or `.` is the whole tree too; `icase` compares in lower case.
+  const tail = args.slice(i + 1);
+  const dashes = tail.findIndex((a) => a.text === "--");
+  const fromRevision = sub === "restore" ? g.flags.some((x) => /^(?:--source|-s)/.test(x)) : dashes >= 0 && tail.slice(0, dashes).some((a) => !a.text.startsWith("-"));
+  if ((sub === "checkout" || sub === "restore") && (fromRevision || rewinds(env, parsed))) {
+    const specs = (dashes >= 0 ? tail.slice(dashes + 1) : g.operands).map((o) => pathspec(o.text));
+    if (specs.length && specs.every((x) => x?.exclude)) return MSG.rewind;
+    for (const spec of specs) {
+      if (!spec || spec.exclude) continue;
+      if (spec.magic && spec.path === ".") return MSG.rewind;
+      const c = spec.icase ? foldContract(contract) : contract;
+      const rels = relsOf([spec.icase ? lower(spec.path) : spec.path], spec.top ? [env.root] : gb).map((r) => (spec.icase ? lower(r) : r));
+      if (rels.some((r) => (GLOB.test(r) ? globHitsProtected(c, r) : spec.magic && (isProtectedOrDir(c, r) || holdsProtected(c, r))))) return MSG.rewind;
     }
+  }
   const fromRev =
     (sub === "checkout" && g.operands.length > dots.length) ||
     (sub === "restore" && g.flags.some((x) => /^(?:--source|-s)/.test(x)));
