@@ -313,3 +313,115 @@ describe("resolveOptions: package manager", () => {
     for (const pm of PM_NAMES) expect((error as Error).message).toContain(pm);
   });
 });
+
+describe("resolveOptions: selection (Decisions 1, 3, 6, 9, 10)", () => {
+  const withArch = (packages: string[]): FsProbe => ({
+    ...fsProbe,
+    readText: async (path) =>
+      path.endsWith("architecture.json")
+        ? JSON.stringify({ packages: Object.fromEntries(packages.map((p) => [p, {}])) })
+        : undefined,
+  });
+  const ALL = ["api", "web", "worker"];
+
+  it("selects everything by default", async () => {
+    const { options } = await resolve(["proj"]);
+    expect(options.selection).toEqual({
+      apps: ALL,
+      packages: ["domain", "contracts", "db", "core"],
+    });
+  });
+
+  it("takes --apps and --packages, with the Closure filling in dependencies", async () => {
+    const { options } = await resolve(["proj", "--apps", "api"]);
+    expect(options.selection.apps).toEqual(["api"]);
+    expect(options.selection.packages).toEqual(["domain", "contracts", "db", "core"]);
+    const lib = await resolve(["proj", "--apps", "none", "--packages", "contracts,domain"]);
+    expect(lib.options.selection).toEqual({ apps: [], packages: ["domain", "contracts"] });
+    const web = await resolve(["proj", "--apps", "web"]);
+    expect(web.options.selection).toEqual({ apps: ["web"], packages: [] });
+  });
+
+  it("rejects unknown names, names for the wrong flag, and an empty Selection", async () => {
+    expect(await failure(["proj", "--apps", "nope"])).toMatchObject({
+      message: expect.stringContaining("Unknown --apps value 'nope'"),
+    });
+    expect(await failure(["proj", "--apps", "db"])).toMatchObject({
+      message: expect.stringContaining("belongs to the other flag"),
+    });
+    expect(await failure(["proj", "--packages", "api"])).toBeInstanceOf(OptionsError);
+    expect(await failure(["proj", "--apps", "none"])).toMatchObject({
+      message: expect.stringContaining("Nothing selected"),
+    });
+  });
+
+  it("errors on --db-prefix without db in the Closure, and skips the prompt", async () => {
+    expect(await failure(["proj", "--apps", "web", "--db-prefix", "x"])).toMatchObject({
+      message: expect.stringContaining("--db-prefix"),
+    });
+    const { asked } = await resolve(["proj", "--apps", "web"], {}, true, [[], "@s", "pnpm", false]);
+    expect(asked).toEqual([
+      "Extra packages (not already required by the apps)",
+      "Package scope",
+      "Package manager",
+      "Install dependencies?",
+    ]);
+    const ok = await resolve(["proj", "--apps", "none", "--packages", "db", "--db-prefix", "x"]);
+    expect(ok.options.dbPrefix).toBe("x");
+  });
+
+  it("reads the Selection from an existing architecture.json", async () => {
+    const probe = withArch(["apps/web"]);
+    const { options, asked } = await resolve(["proj"], {}, true, ["@s", "pnpm", false], probe);
+    expect(options.selection).toEqual({ apps: ["web"], packages: [] });
+    expect(asked).not.toContain("Apps");
+  });
+
+  it("accepts flags that restate the recorded Selection", async () => {
+    const probe = withArch(["packages/domain", "packages/db", "packages/contracts", "packages/core", "apps/api"]);
+    const { options } = await resolve(["proj", "--apps", "api"], {}, false, undefined, probe);
+    expect(options.selection.apps).toEqual(["api"]);
+  });
+
+  it("errors on flags that conflict with it, pointing at the ADR-0002 process", async () => {
+    const error = await resolve(["proj", "--apps", "api"], {}, false, undefined, withArch(["apps/web"])).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(OptionsError);
+    expect((error as Error).message).toMatch(/conflict with the existing architecture\.json.*ADR/s);
+  });
+
+  it("errors when architecture.json cannot be read", async () => {
+    const probe: FsProbe = { ...fsProbe, readText: async () => "{" };
+    expect(await resolve(["proj"], {}, false, undefined, probe).catch((e: unknown) => e)).toBeInstanceOf(
+      OptionsError,
+    );
+  });
+
+  it("asks an app multiselect (all checked), then extra packages outside the Closure", async () => {
+    const calls: { message: string; choices: readonly string[]; initial: readonly string[] }[] = [];
+    const prompter: Prompter = {
+      ...fakePrompter().prompter,
+      multiselect: async (message, choices, initial) => {
+        calls.push({ message, choices, initial });
+        return message === "Apps" ? ["web"] : ["domain"];
+      },
+    };
+    const options = await resolveOptions(
+      parseCli(["proj", "--scope", "@s", "--pm", "pnpm", "--no-install"]),
+      {},
+      true,
+      prompter,
+      fsProbe,
+    );
+    expect(calls[0]).toEqual({ message: "Apps", choices: ["api", "web", "worker"], initial: ["api", "web", "worker"] });
+    expect(calls[1]?.choices).toEqual(["domain", "contracts", "db", "core"]);
+    expect(calls[1]?.initial).toEqual([]);
+    expect(options.selection).toEqual({ apps: ["web"], packages: ["domain"] });
+  });
+
+  it("skips the package multiselect when the apps already require every package", async () => {
+    const { asked } = await resolve(["proj", "--scope", "@s", "--pm", "pnpm", "--no-install"], {}, true, []);
+    expect(asked).toEqual(["Apps", "Database prefix"]);
+  });
+});
