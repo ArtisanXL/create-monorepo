@@ -266,6 +266,14 @@ describe("review fixes: text that follows the Closure", () => {
   });
 });
 
+/** architecture.json minus what legitimately follows the Runtime: the field and `deferred` deps. */
+const withoutRuntimeParts = (text: string) => {
+  const arch = JSON.parse(text);
+  arch.runtime = undefined;
+  for (const d of arch.deferred) d.deps = undefined;
+  return arch;
+};
+
 describe("Runtime axis (ADR-0005)", () => {
   it("packages-only output differs between node and cloudflare only by the runtime line", async () => {
     const node = await generate(LIBRARY, "node");
@@ -275,8 +283,9 @@ describe("Runtime axis (ADR-0005)", () => {
       const a = await node.read(f);
       const b = await cf.read(f);
       if (f === "architecture.json") {
-        expect(b.replace('  "runtime": "cloudflare",\n', "")).toBe(a);
+        // Only the runtime line and the Runtime-specific `deferred` deps differ.
         expect(b).toContain('  "runtime": "cloudflare",\n');
+        expect(withoutRuntimeParts(b)).toEqual(withoutRuntimeParts(a));
       } else {
         expect(b, f).toBe(a);
       }
@@ -290,9 +299,8 @@ describe("Runtime axis (ADR-0005)", () => {
     expect(await cf.files()).toEqual(await node.files());
     for (const f of await node.files()) {
       const [a, b] = [await node.read(f), await cf.read(f)];
-      expect(f === "architecture.json" ? b.replace('  "runtime": "cloudflare",\n', "") : b, f).toBe(
-        a,
-      );
+      if (f === "architecture.json") expect(withoutRuntimeParts(b)).toEqual(withoutRuntimeParts(a));
+      else expect(b, f).toBe(a);
     }
   });
 
