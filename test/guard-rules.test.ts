@@ -506,8 +506,7 @@ describe("guard decision: audit follow-ups (#29)", () => {
   });
 
   it("documents known limits: these are allowed, CI arch-check is the backstop", () => {
-    for (const cmd of ['bash <<< "npm install"', "rm -rf d*"])
-      expect(bash(cmd), cmd).toEqual({ allow: true });
+    // (`bash <<< "npm install"` and `rm -rf d*` were closed by #37.)
     // Windows aliases for the same file are not normalised.
     for (const name of ["architecture.json.", "architecture.json::$DATA"])
       expect(
@@ -763,9 +762,7 @@ describe("guard decision: third audit follow-ups (#29)", () => {
     expect(bash("timeout 5 dd if=a of=/tmp/out")).toEqual({ allow: true });
   });
 
-  it("documents more known limits: allowed, CI arch-check is the backstop", () => {
-    for (const cmd of ['bash <<< "npm install"']) expect(bash(cmd), cmd).toEqual({ allow: true });
-  });
+  // `bash <<< "npm install"` was closed by #37; the remaining limits are listed in "remaining limits" below.
 });
 
 describe("guard decision: fourth audit follow-ups (#29)", () => {
@@ -1013,10 +1010,7 @@ describe("guard decision: seventh audit follow-ups (#29)", () => {
       }
   });
 
-  it("documents more known limits: allowed, CI arch-check is the backstop", () => {
-    // The rest was closed by #34; only printf-built text is still allowed (see "remaining limits" below).
-    expect(bash("printf 'r%s architecture.json' m | sh")).toEqual({ allow: true });
-  });
+  // Everything documented here was closed by #34 and #37; the remaining limits are listed below.
 });
 
 describe("guard decision: remaining limits (#34)", () => {
@@ -1112,12 +1106,14 @@ describe("guard decision: remaining limits (#34)", () => {
       "rsync -a --delete empty/ docs/",
       "rsync -a --delete empty/ docs/adr/",
       "rsync -a src/ docs/adr/",
+      // Searching from the project root covers every protected path (#37), whatever the name test says.
+      "find . -name '*.log' -delete",
     ])("blocks %s", (cmd) => {
       expect(blocked(bash(cmd)), cmd).toBeDefined();
     });
 
     it.each([
-      "find . -name '*.log' -delete",
+      "cd src && find . -name '*.log' -delete",
       "find dist -delete",
       "find packages -name '*.tmp' -exec rm {} ;",
       "find docs -name '*.md'",
@@ -1329,13 +1325,370 @@ describe("guard decision: remaining limits (#34)", () => {
 
   it("documents remaining limits: allowed, CI arch-check is the backstop", () => {
     for (const cmd of [
-      // printf formats text at run time, so the words are never spelled out.
-      "printf 'r%s architecture.json' m | sh",
-      // The last of several conditional assignments wins; the guard cannot tell which branch ran.
-      '[ -n "$Z" ] && X=architecture.json || X=foo; rm $X',
-      // Brace expansion builds the command name from parts.
-      "{r,}m architecture.json",
+      // The list lives in a file the guard never reads; so does the code behind `$(cat x.js)`. Same as `node x.js`.
+      "xargs rm < list",
+      'node -e "$(cat x.js)"',
+      'read -r X <<< "$(cat list)"; rm $X',
+      "for X in $(ls); do rm -rf $X; done",
+      // Interpreter and executable scripts are not given the shell-script treatment: tooling often passes them contract files.
+      "node x.js architecture.json",
+      "python3 -m json.tool architecture.json",
+      "./x.sh architecture.json",
+      // A branch or tag cannot be told from a path or a revision without asking git.
+      "git checkout v1.0",
+      "git switch some-branch",
+      "git reset abc1234",
+      "git reset --soft abc1234",
+      // Only rm / mv / shred / unlink / rmdir / recursive chmod resolve globs.
+      "truncate -s0 arch*.json",
+      // The git rewind check sees one command line: a reset in one call and the checkout in the next are not connected.
+      "git reset abc1234",
+      // A stash of a rewound index only counts when the reset is on the same line.
+      "git stash -u && git stash drop",
     ])
       expect(bash(cmd), cmd).toEqual({ allow: true });
+  });
+});
+
+describe("guard decision: constructed bypasses (#37)", () => {
+  const cases = (blockedCmds: string[], allowedCmds: string[]) => {
+    it.each(blockedCmds)("blocks %s", (cmd) => {
+      expect(blocked(bash(cmd)), cmd).toBeDefined();
+    });
+    it.each(allowedCmds)("allows %s", (cmd) => {
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+    });
+  };
+
+  describe("find from the project root", () => {
+    cases(
+      ["find . -name x -exec rm {} \\;", "find . -name x -delete", "find -delete"],
+      [
+        "find src -name '*.ts'",
+        "find . -name '*.ts' -exec grep foo {} \\;",
+        "cd src && find . -name x -delete",
+        "find packages -name x -exec rm {} \\;",
+      ],
+    );
+  });
+
+  describe("$IFS before a quote", () => {
+    cases(
+      [
+        "rm$IFS'architecture.json'",
+        'rm$IFS"architecture.json"',
+        "rm$IFS$IFS'architecture.json'",
+        "rm$IFS\\architecture.json",
+      ],
+      ["rm$IFS'src/x.txt'", "echo$IFS'hi'"],
+    );
+  });
+
+  describe("loop and read variables", () => {
+    cases(
+      [
+        "while read X; do $X architecture.json; done <<< rm",
+        "X=src; for X in docs; do rm -rf $X; done",
+        "for X in src docs; do rm -rf $X; done",
+        "read X <<< architecture.json; rm $X",
+        "X=src/x.ts; X+=/../../architecture.json; rm $X",
+        "X=docs/x; X+=/..; rm -rf $X",
+        '[ -n "$Z" ] && X=architecture.json || X=foo; rm $X',
+        'if [ -n "$Z" ]; then X=docs; else X=foo; fi; rm -rf $X',
+      ],
+      [
+        "for X in dist build; do rm -rf $X; done",
+        "X=src/x.ts; X+=/..; rm -rf $X",
+        "X=a; X=b; rm $X",
+        '[ -n "$Z" ] && X=a || X=b; rm $X',
+      ],
+    );
+  });
+
+  describe("interpreter text that names a folder", () => {
+    cases(
+      [
+        "echo \"require('fs').rmSync('docs',{recursive:true})\" | node",
+        "echo \"shutil.rmtree('docs')\" | python3",
+        "echo \"require('fs').rmSync('docs/adr',{recursive:true})\" | node",
+      ],
+      [
+        'node -e "console.log(1)"',
+        "echo \"console.log('docs')\" | node",
+        "echo \"fs.writeFileSync('out.txt','see docs')\" | node",
+        "echo \"fs.rmSync('src',{recursive:true})\" | node",
+      ],
+    );
+  });
+
+  describe("git commands that rewrite the tree", () => {
+    cases(
+      [
+        "git reset --keep abc1234",
+        "git reset --merge origin/main",
+        "git checkout abc1234",
+        "git checkout HEAD~3",
+        "git checkout -b feat abc1234",
+        "git checkout --detach main",
+        "git switch --detach abc1234",
+        "git switch -c feat abc1234",
+        "git read-tree -u --reset abc1234",
+        "git read-tree -um abc1234",
+        "git reset abc1234 && git checkout -- .",
+        "git reset abc1234 && git restore .",
+        "git reset abc1234; git checkout-index -a -f",
+      ],
+      [
+        "git reset --keep HEAD~1",
+        "git reset --merge",
+        "git checkout -b feat",
+        "git checkout main",
+        "git checkout main -- src/x.ts",
+        "git checkout abc1234 -- src/x.ts",
+        "git checkout abc1234 src/x.ts",
+        "git switch main",
+        "git switch -c feat",
+        "git switch --detach HEAD",
+        "git read-tree -m HEAD",
+        "git reset HEAD~1 && git checkout -- .",
+        "git checkout -- .",
+      ],
+    );
+  });
+
+  describe("shell scripts handed a protected path", () => {
+    cases(
+      ["bash x.sh architecture.json", "sh ./x.sh biome.json", "bash -x x.sh docs/adr/0001-x.md"],
+      [
+        "bash scripts/x.sh",
+        "bash x.sh",
+        "bash x.sh -f foo",
+        "bash x.sh src/a.ts",
+        "bash scripts/check.sh architecture.json",
+      ],
+    );
+  });
+
+  describe("text formatted at run time, brace expansion, here-string scripts, globs", () => {
+    cases(
+      [
+        "printf 'r%s architecture.json' m | sh",
+        "echo -e 'rm architecture.json' | sh",
+        "printf '%s\\n' hello | sh",
+        "{r,}m architecture.json",
+        "rm {x,architecture.json}",
+        'bash <<< "npm install"',
+        "rm -rf d*",
+        "rm -rf docs/*",
+        "rm *.json",
+        "cd docs && rm -rf *",
+        "mv d* /tmp",
+        "chmod -R 755 d*",
+      ],
+      [
+        "printf '%s\\n' architecture.json | cat",
+        "echo -e 'a\\tb'",
+        "echo {a,b}.txt",
+        "rm -f {a,b}.tmp",
+        "cp x{,.bak}",
+        'git commit -m "x {a,b}"',
+        'bash <<< "pnpm install"',
+        'bash <<< "echo hi"',
+        "rm -rf dist*",
+        "rm -rf node_modules/*",
+        "rm *.log",
+        "rm -rf src/*",
+        "rm -rf docs/adr/proposed/*",
+        "cd src && rm -rf *",
+        "mv src/* /tmp",
+      ],
+    );
+  });
+
+  describe("review follow-ups (#37)", () => {
+    cases(
+      [
+        // while/until read fed by a here-string on `done`
+        "while read X; do rm $X; done <<< architecture.json",
+        "while read X; do rm -rf $X; done <<< docs",
+        'while read X; do rm -rf "$X"; done <<< docs',
+        "until read X; do rm -rf $X; done <<< docs",
+        "while read X; do $X -rf docs; done <<< rm",
+        'while read X; do $X; done <<< "rm architecture.json"',
+        // brace ranges and character classes
+        "rm {a..z}rchitecture.json",
+        "rm architectur{e..e}.json",
+        "rm -rf [[:alpha:]]ocs",
+        "rm [[:alpha:]]rchitecture.json",
+        "rm {r,}'m' architecture.json",
+        // printf formats and escapes
+        "printf 'rm %s.json' architecture | sh",
+        "printf 'rm architecture.%s' json | sh",
+        "printf 'rm architecture.js%s' on | sh",
+        "echo -e 'rm\\tarchitecture.json' | bash",
+        // shell scripts: -e is errexit, folders, source
+        "bash -e x.sh architecture.json",
+        "sh -e x.sh architecture.json",
+        "bash x.sh docs",
+        "bash x.sh docs/",
+        "source x.sh architecture.json",
+        ". x.sh architecture.json",
+        // git rewinds
+        "git reset abc1234 && git checkout -f",
+        "git reset abc1234 && git checkout -f HEAD",
+        "git reset abc1234 && git checkout -- '*'",
+        "git reset abc1234 && git checkout -- :/",
+        "git reset abc1234 && git checkout -- ':(top)'",
+        "git reset abc1234 && git restore '*'",
+        "git read-tree abc1234 && git checkout-index -a -f",
+        "git reset abc1234 && git stash -u && git stash drop",
+        "git checkout HEAD^",
+        "git checkout feature~2",
+        "git checkout HEAD@{1}",
+        "git checkout FETCH_HEAD",
+        "git checkout refs/heads/main",
+        "git switch -C feat abc1234",
+        "git switch --create feat HEAD~4",
+        // find and delete globs
+        "find d* -delete",
+        "find * -delete",
+        "shred arch*.json",
+        "unlink arch*.json",
+        "rm -rf */dist",
+      ],
+      [
+        "echo {1..100}",
+        "mkdir -p src/{a,b}",
+        "rm -f file{1..3}.txt",
+        "bash -e scripts/x.sh architecture.json",
+        "bash x.sh src",
+        "source x.sh src/a.ts",
+        "git reset -- src/x.ts && git checkout -- .",
+        "git reset HEAD -- src && git checkout .",
+        "git stash -u",
+        "git checkout HEAD@{0}",
+        "git checkout main",
+        "git switch feature",
+        "git checkout -b feat origin/main",
+        "git switch --create feat origin/main",
+        "find src* -delete",
+        "rm -rf 'dist*'",
+        "rm -rf '*'",
+        "find '*' -delete",
+        "shred src/*.tmp",
+      ],
+    );
+
+    it("says why in a message of its own", () => {
+      expect(blocked(bash("find . -name x -delete"))).toContain("start the search in a subfolder");
+      expect(blocked(bash("rm -rf */dist"))).toContain("A glob in this delete or move");
+      expect(blocked(bash("printf 'x%s' y | sh"))).toContain("Text formatted at run time");
+    });
+
+    it("keeps long loop lists and accumulated values whole, or blocks them", () => {
+      const long = Array.from({ length: 60 }, (_, k) => `src/some/long/dir/${k}`).join(" ");
+      expect(bash(`for X in ${long} docs; do rm -rf $X; done`).allow).toBe(false);
+      const chain = Array.from({ length: 60 }, (_, k) => `true && X=src/some/long/dir/${k}`).join(
+        "; ",
+      );
+      expect(bash(`${chain}; true && X=docs; rm -rf $X`).allow).toBe(false);
+      expect(bash(`for X in ${long}; do echo $X; done`).allow).toBe(true);
+    });
+
+    it("lexes a hostile brace word in linear time", () => {
+      const cmd = `echo ${"{a,b}".repeat(5)}{${",".repeat(50_000)}`;
+      for (const c of [cmd, `echo {${".".repeat(49_000)}`, `echo ${"{".repeat(20_000)}`]) {
+        const t0 = performance.now();
+        bash(c);
+        expect(performance.now() - t0).toBeLessThan(1000);
+      }
+    });
+  });
+
+  describe("second review (#37)", () => {
+    const pad = "x".repeat(1100);
+    cases(
+      [
+        // globs with a quoted part still glob
+        'rm -rf "d"*',
+        'rm -rf d"o"c*',
+        "rm -rf ''d*",
+        'rm -rf "do"?s',
+        'rm -rf "docs"/*',
+        'rm "architecture".*',
+        'rm -rf "."git*',
+        'mv "d"* /tmp',
+        'find "d"* -delete',
+        'X=d; rm -rf "$X"*',
+        // ranges next to commas, glob as a command
+        "rm -rf {d,x}{o..o}cs",
+        "rm -rf {x,d}o{c..c}s",
+        "{r..r}m architecture.json",
+        // long literal values stay whole
+        `X="${pad} docs"; rm -rf $X`,
+        `X="${pad} architecture.json"; rm $X`,
+        `X="docs ${pad}"; rm -rf $X`,
+        // glob and magic pathspecs after a rewind
+        "git reset abc1234 && git checkout -- '*.json'",
+        "git reset abc1234 && git checkout -- 'scri*'",
+        "git reset abc1234 && git checkout -- './*'",
+        "git reset abc1234 && git checkout -- '**'",
+        "git reset abc1234 && git checkout -- ':(glob)**'",
+        "git reset abc1234 && git checkout -- ':/*'",
+        "git reset abc1234 && git checkout -- ':(top,glob)*'",
+        "git reset abc1234 && git checkout -- d*",
+        "git reset abc1234 && git restore -- '*.json'",
+        "git reset abc1234 && git checkout -- ':(top)architecture.json'",
+        // exclusions only, empty magic paths, icase, and the same without a reset
+        "git reset abc1234 && git checkout -- ':!docs'",
+        "git reset abc1234 && git checkout -- ':(exclude)docs'",
+        "git reset abc1234 && git restore -- ':^src'",
+        "git reset abc1234 && git checkout -- ':(glob)'",
+        "git reset abc1234 && git checkout -- ':(icase)'",
+        "git reset abc1234 && git checkout -- ':(literal).'",
+        "git reset abc1234 && git checkout -- ':(icase)ARCHITECTURE.JSON'",
+        "git reset abc1234 && git checkout -- ':(icase)Docs'",
+        "git checkout HEAD~3 -- ':!src'",
+        "git restore -s HEAD~3 -- ':!src'",
+        "git checkout HEAD~3 -- ':(icase)ARCHITECTURE.JSON'",
+        // whole tree by resolved path
+        "git reset abc1234 && git checkout -- src/..",
+        "git reset abc1234 && git checkout -- ./src/..",
+        "git reset abc1234 && git checkout -- ':./'",
+        "git reset abc1234 && git checkout -- ':(glob)./'",
+        "git reset abc1234 && git checkout -- ':(top)./'",
+        "git reset abc1234 && git checkout -- ':(glob)src/..'",
+        "git checkout main -- src/..",
+        "git checkout main -- ':./'",
+        // printf
+        `printf 'rm architecture.js'"on" | sh`,
+        "X=$(printf 'architecture.%s' json); rm $X",
+        "X=$(printf 'a.%s' txt); rm $X",
+        "printf -v X 'architecture.%s' json; rm $X",
+        'X=$(printf "docs"); rm -rf "$X"',
+      ],
+      [
+        "rm -rf 'd*'",
+        "rm -rf '*'",
+        'rm -rf "*"',
+        "rm -rf 'do'cx",
+        "rm -rf {a,b}{1..3}x",
+        "[ -f architecture.json ] && echo yes",
+        `X="${pad}"; echo $X`,
+        "git reset abc1234 && git checkout -- src/x.ts",
+        "git reset abc1234 && git checkout -- 'src/*.ts'",
+        "git checkout -- ':!src/x.ts' src",
+        "git checkout -- src/x.ts",
+        "git checkout main -- src/x.ts",
+        "git checkout .",
+        "git restore .",
+        "git checkout -- ':(exclude)src'",
+        "git reset abc1234 && git checkout -- ':!src/x.ts' src",
+        "git checkout HEAD~3 -- ':(icase)SRC/X.TS'",
+        "git checkout @{-1}",
+        "git switch @{-1}",
+        "X=$(printf 'a.%s' txt); echo $X architecture.json",
+      ],
+    );
   });
 });

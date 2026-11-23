@@ -160,7 +160,7 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
     if (pending) {
       const p = pending;
       pending = null;
-      if (p.op === "<" || p.op === "<<<") inputs.push({ op: p.op, target: w.text });
+      if (p.op === "<" || p.op === "<<<") inputs.push({ op: p.op, target: w.text, dyn: w.dyn });
       else if (!(p.amp && /^(\d+|-)$/.test(w.text))) redirs.push({ op: p.op, target: w.text });
     } else words.push(w);
   };
@@ -177,6 +177,11 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
   const grow = () => {
     cur ??= { text: "", quoted: false };
     return cur;
+  };
+  // A quote or escape right after `$IFS` ends the variable name (`rm$IFS'x'` is `rm x`): spell it `${IFS}`.
+  const ifsEnd = () => {
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: the shell spelling, not a template
+    if (cur) cur.text = cur.text.replace(/\$IFS$/, "${IFS}");
   };
   // Arithmetic (`$((..))`, `$[..]`) and backticks are scanned for commands; returns the new index.
   const expansion = (i) => {
@@ -196,9 +201,13 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
     const c = cmd[i];
     if (c === "\\") {
       if (cmd[i + 1] === "\n") i++;
-      else if (i + 1 < cmd.length) grow().text += cmd[++i];
+      else if (i + 1 < cmd.length) {
+        ifsEnd();
+        grow().text += cmd[++i];
+      }
     } else if (c === "$" && cmd[i + 1] === "'") {
       const r = ansiC(cmd, i + 2);
+      ifsEnd();
       grow().quoted = true;
       cur.text += r.text;
       i = r.end;
@@ -210,10 +219,12 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
     } else if (c === "'") {
       const e = cmd.indexOf("'", i + 1);
       const stop = e < 0 ? cmd.length : e;
+      ifsEnd();
       grow().quoted = true;
       cur.text += cmd.slice(i + 1, stop);
       i = stop;
     } else if (c === '"') {
+      ifsEnd();
       grow().quoted = true;
       for (i++; i < cmd.length && cmd[i] !== '"'; i++) {
         if (cmd[i] === "\\" && '"\\$`'.includes(cmd[i + 1] ?? "")) i++;
@@ -236,6 +247,7 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
         }
         cur.text += cmd[i];
       }
+      ifsEnd();
     } else if (c === " " || c === "\t" || c === "\r") pushWord();
     else if (c === "#" && cur === null) {
       const e = cmd.indexOf("\n", i);
@@ -309,7 +321,11 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
         i++;
       }
       pending = { op, amp };
-    } else grow().text += c;
+    } else {
+      grow().text += c;
+      if (c === "{") cur.brace = true;
+      if (c === "*" || c === "?" || c === "[") cur.glob = true;
+    }
   }
   end("");
   return { segments, nested, end: i };
@@ -438,38 +454,119 @@ function expandVars(text, vars, budget) {
   });
 }
 
+// Keywords after which a command runs only on some paths.
+const BRANCH_KEYWORDS = new Set(["then", "else", "elif", "do"]);
+const BRACE_GROUP = /(?<![$\\])\{([^{}]*)\}/g;
+const MAX_BRACE_WORDS = 64;
+
+// The first `{a,b}` group of a word, found without backtracking: `[^{}]*` cannot cross another brace.
+function commaGroup(t) {
+  for (const m of t.matchAll(BRACE_GROUP)) if (m[1].includes(",")) return m;
+  return undefined;
+}
+
+/**
+ * Brace expansion of a word with an unquoted `{` (`{r,}m` is `rm` and `m`). A `{x..y}` range stands for
+ * anything, so it becomes a `*` glob (and the word is a glob). A word that would expand past the cap spends
+ * the whole budget.
+ */
+function braceWords(w, budget) {
+  if (!w.brace || ASSIGN_WORD.test(w.text)) return [w];
+  const text = w.text.replace(BRACE_GROUP, (m, g) => (g.includes("..") ? "*" : m));
+  const ranged = text !== w.text;
+  let calls = 0;
+  const expand = (t) => {
+    const m = commaGroup(t);
+    if (!m || ++calls > MAX_BRACE_WORDS) return [t];
+    return m[1].split(",").flatMap((alt) => expand(t.slice(0, m.index) + alt + t.slice(m.index + m[0].length)));
+  };
+  const out = expand(text);
+  if (calls > MAX_BRACE_WORDS) {
+    budget.left = -1;
+    return [w];
+  }
+  if (out.length === 1 && !ranged) return [w];
+  return out.map((t) => (ranged ? { ...w, text: t, glob: true } : { ...w, text: t }));
+}
+
+// A value that no longer fits is not cut (the dropped part would go unchecked): the whole line counts as too complex.
+// Only text that grew through `$` expansion is capped: literal text is bounded by the command itself.
+const fits = (value, budget, expanded) => {
+  if (expanded && value.length > MAX_VAR_LENGTH) budget.left = -1;
+  return value;
+};
+
 /**
  * Records `NAME=value` segments (also behind `export`) in `vars` and substitutes known variables into the
  * words and redirect targets of every other segment, splitting a word that expanded to several. A value
- * built at run time (`$(...)`, backticks), appended to (`+=`) or set by `read`, `getopts`, `for`... is
- * forgotten, so `$NAME` stays unexpanded and the rules for variables of unknown value apply.
- * Returns false once the expansion budget is spent.
+ * built at run time (`$(...)`, backticks), appended to (`+=`) or set by `getopts`, `mapfile`... is forgotten,
+ * so `$NAME` stays unexpanded and the rules for variables of unknown value apply. `for NAME in a b` and
+ * `read NAME <<< text` (also `while read NAME; do ...; done <<< text`, passed as `loopInput`) set NAME to
+ * every value it can take; an assignment that runs only on some paths (`a && X=1 || X=2`, `then X=1`) adds
+ * its value to the earlier ones instead of replacing them. A value that grew through `$` expansion past
+ * MAX_VAR_LENGTH spends the budget; literal text is kept whole.
+ * Words with an unquoted `{` are brace-expanded first. Returns false once the expansion budget is spent.
  */
-function applyVars(seg, vars, budget) {
-  const first = seg.words[0]?.text;
-  const rest = first !== undefined && ASSIGNING.has(first) ? seg.words.slice(1) : seg.words;
+function applyVars(seg, vars, budget, conditional = false, loopInput = undefined) {
+  let from = 0;
+  while (from < seg.words.length && KEYWORDS.has(seg.words[from].text)) from++;
+  if (seg.words.slice(0, from).some((w) => BRANCH_KEYWORDS.has(w.text))) conditional = true;
+  const lead = seg.words.slice(from);
+  const rest = lead.length && ASSIGNING.has(lead[0].text) ? lead.slice(1) : lead;
   if (rest.length && rest.every((w) => ASSIGN_WORD.test(w.text))) {
     for (const w of rest) {
       const m = ASSIGN_WORD.exec(w.text);
-      const value = expandVars(w.text.slice(m[0].length), vars, budget);
-      if (w.dyn || (m[2] && !vars.has(m[1]))) vars.delete(m[1]);
-      else vars.set(m[1], ((m[2] ? vars.get(m[1]) : "") + value).slice(0, MAX_VAR_LENGTH));
+      const raw = w.text.slice(m[0].length);
+      const value = expandVars(raw, vars, budget);
+      const grew = raw.includes("$");
+      const old = vars.get(m[1]);
+      if (w.dyn || (m[2] && old === undefined)) vars.delete(m[1]);
+      else if (m[2]) vars.set(m[1], fits(old + value, budget, grew));
+      else if (conditional && old !== undefined && old !== value) vars.set(m[1], fits(`${old} ${value}`, budget, grew));
+      else vars.set(m[1], fits(value, budget, grew));
     }
     return budget.left >= 0;
   }
+  seg.words = seg.words.flatMap((w) => braceWords(w, budget));
+  if (budget.left < 0) return false;
   const at = seg.words.findIndex((w) => !ASSIGN_WORD.test(w.text) && !KEYWORDS.has(w.text));
-  if (at >= 0 && SETTERS.has(seg.words[at].text))
+  const setter = at >= 0 && SETTERS.has(seg.words[at].text) ? seg.words[at].text : undefined;
+  if (setter)
     for (const w of seg.words.slice(at + 1)) if (/^[A-Za-z_]\w*$/.test(w.text)) vars.delete(w.text);
   seg.words = seg.words.flatMap((w) => {
     if (!w.text.includes("$")) return [w];
     const text = expandVars(w.text, vars, budget);
     if (text === w.text || budget.left < 0) return [w];
     const parts = text.split(/\s+/).filter(Boolean);
-    return (parts.length ? parts : [""]).map((t) => ({ ...w, text: t, fromVar: true }));
+    return (parts.length ? parts : [""]).map((t) => ({ ...w, text: t, fromVar: true, glob: w.glob || /[*?[]/.test(t) }));
   });
   for (const r of seg.redirs) r.target = expandVars(r.target, vars, budget);
   for (const r of seg.inputs) r.target = expandVars(r.target, vars, budget);
+  const names = seg.words.slice(at + 1).filter((w) => /^[A-Za-z_]\w*$/.test(w.text));
+  if (setter === "for" && seg.words[at + 2]?.text === "in") {
+    const items = seg.words.slice(at + 3);
+    if (!items.some((w) => w.dyn || w.text.includes("$"))) vars.set(seg.words[at + 1].text, fits(items.map((w) => w.text).join(" "), budget, items.some((w) => w.fromVar)));
+  } else if (setter === "read") {
+    const here = seg.inputs.find((x) => x.op === "<<<") ?? (loopInput ? { target: expandVars(loopInput.target, vars, budget), dyn: loopInput.dyn } : undefined);
+    if (here && !here.dyn && !here.target.includes("$")) for (const n of names) vars.set(n.text, fits(here.target, budget, false));
+  }
   return budget.left >= 0;
+}
+
+/** For each `while` / `until` segment, the here-string on the `done` that closes it (`while read X; do ...; done <<< text`). */
+function loopInputs(segments) {
+  const out = new Map();
+  const open = [];
+  segments.forEach((seg, idx) => {
+    const first = seg.words.find((w) => w.text !== "do" && w.text !== "then")?.text;
+    if (first === "while" || first === "until" || first === "for" || first === "select") open.push(idx);
+    else if (seg.words[0]?.text === "done") {
+      const head = open.pop();
+      const here = seg.inputs.find((x) => x.op === "<<<");
+      if (head !== undefined && here) out.set(head, here);
+    }
+  });
+  return out;
 }
 
 /**
@@ -499,8 +596,12 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer =
   let tight = [root];
   let cds = 0;
   let pipeStart = 0;
-  for (const seg of parsed.segments) {
-    if (!applyVars(seg, vars, budget)) return { commands, redirects, segments, nested: parsed.nested, vars, budget, tooComplex: true };
+  let prevSep = "";
+  const loops = loopInputs(parsed.segments);
+  for (const [n, seg] of parsed.segments.entries()) {
+    const conditional = prevSep === "&&" || prevSep === "||";
+    prevSep = seg.sep;
+    if (!applyVars(seg, vars, budget, conditional, loops.get(n))) return { commands, redirects, segments, nested: parsed.nested, vars, budget, tooComplex: true };
     for (const r of seg.redirs) redirects.push({ op: r.op, target: r.target, bases });
     const found = commandsOf(seg.words, fold);
     const bodies = seg.heredocs.map((h) => h.body);

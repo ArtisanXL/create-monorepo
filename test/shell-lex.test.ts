@@ -55,4 +55,21 @@ describe("shell lexer", () => {
     ]);
     expect(targetsOf("X=1", "/proj").vars.get("X")).toBe("1");
   });
+
+  it("ends $IFS at a quote and treats it as a space", () => {
+    expect(words("rm$IFS'a' x")).toEqual([["rm", "a", "x"]]);
+  });
+
+  it("brace-expands unquoted words only, and caps the result", () => {
+    expect(words("echo {r,}m '{a,b}' $Y {a,b}{c,d}")).toEqual([
+      ["echo", "rm", "m", "{a,b}", "$Y", "ac", "ad", "bc", "bd"],
+    ]);
+    expect(targetsOf(`echo ${"{a,b}".repeat(8)}`, "/proj").tooComplex).toBe(true);
+  });
+
+  it("gives a loop variable every value of its list, and keeps the values of a conditional assignment", () => {
+    expect(words("for X in a b; do rm $X; done")[1]).toEqual(["do", "rm", "a", "b"]);
+    expect(words("[ -n $Z ] && X=a || X=b; rm $X")[3]).toEqual(["rm", "a", "b"]);
+    expect(words("X=a; X=b; rm $X")[2]).toEqual(["rm", "b"]);
+  });
 });
