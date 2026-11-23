@@ -32,6 +32,29 @@ describe("resolveBlocks", () => {
     expect(resolveBlocks(text, web, "x.md")).toContain('"a": 1,\n}');
   });
 
+  it("never rewrites string values when dropping a dangling comma", () => {
+    const text =
+      '{\n  "a": "x,}",\n  "b": ["y, ]",\n@if db\n    "c"\n@endif\n  ],\n@if db\n  "d": 1\n@endif\n}\n';
+    const out = resolveBlocks(text, web, "x.json");
+    expect(out).toContain('"a": "x,}",');
+    expect(out).toContain('"y, ]"');
+    expect(JSON.parse(out)).toEqual({ a: "x,}", b: ["y, ]"] });
+    // Nothing is dropped, nothing is touched.
+    expect(JSON.parse(resolveBlocks(text, FULL_CLOSURE, "x.json"))).toMatchObject({ d: 1 });
+  });
+
+  it("supports alternatives with | and negated alternatives", () => {
+    const text = "@if api|worker\nany\n@endif\n@if !api|worker\nnone\n@endif\n";
+    expect(resolveBlocks(text, web)).toBe("none\n");
+    expect(resolveBlocks(text, closureOf({ apps: ["worker"], packages: [] }))).toBe("any\n");
+  });
+
+  it("recognises CRLF directive lines", () => {
+    expect(hasDirectiveLines("a\r\n@endif\r\n")).toBe(true);
+    expect(checkBlocks("@if web\r\nx\r\n")).toHaveLength(1);
+    expect(resolveBlocks("@if web\r\nx\r\n@endif\r\n", web)).toBe("x\r\n");
+  });
+
   it("rejects unbalanced blocks and unknown component names", () => {
     expect(() => resolveBlocks("@if web\nx\n", web, "f")).toThrow(/f:1: @if is never closed/);
     expect(() => resolveBlocks("x\n@endif\n", web, "f")).toThrow(/f:2: @endif without/);

@@ -212,7 +212,7 @@ coverage
 === .nvmrc (3 bytes) ===
 24
 
-=== CLAUDE.md (1736 bytes) ===
+=== CLAUDE.md (1746 bytes) ===
 <!-- scaffold:begin — managed by @artisanxl/create-monorepo -->
 # Project rules
 
@@ -223,7 +223,7 @@ Chat with the user in the user's language. Everything else — code, comments, d
 
 ## Commands
 - `pnpm verify`: architecture, lint, typecheck and tests. **Work is done only when this passes.**
-- `pnpm dev`: all apps.
+- `pnpm dev`: the generated apps.
 - `pnpm arch`: architecture check only.
 - Never hard-code ports; services get `$PASEO_PORT`.
 - `pnpm add <pkg> --filter @acme/<target>`: add a dependency; the version is written to the catalog.
@@ -316,7 +316,7 @@ export default defineConfig({
   plugins: [react()],
 });
 
-=== architecture.json (3696 bytes) ===
+=== architecture.json (3490 bytes) ===
 {
   "$comment": "Single source of truth. Humans only (agent hook + CODEOWNERS). Every change requires an accepted ADR.",
   "scope": "@acme",
@@ -407,12 +407,6 @@ export default defineConfig({
       "path": "apps/e2e",
       "trigger": "When the first critical user flow is complete.",
       "deps": ["@playwright/test", "cypress"]
-    },
-    {
-      "name": "redis-queue",
-      "path": null,
-      "trigger": "When pg-boss hits a measured throughput limit.",
-      "deps": ["bullmq", "bull", "ioredis", "redis"]
     }
   ],
   "protected_paths": [
@@ -420,7 +414,6 @@ export default defineConfig({
     "docs/adr/",
     "scripts/",
     "paseo.json",
-    ".worktreeinclude",
     ".claude/settings.json",
     ".claude/settings.local.json",
     ".claude/hooks/",
@@ -436,7 +429,7 @@ export default defineConfig({
     "$comment": "The scaffold block in CLAUDE.md is protected; everything outside it is free. If a human changes the block, update sha256 (pnpm arch --claude-hash).",
     "begin": "<!-- scaffold:begin",
     "end": "<!-- scaffold:end -->",
-    "sha256": "a3cd65ec3e168ed51998297906065dd7880f180fef6c5b0dbe227c1aa37a2e3c"
+    "sha256": "928d43cca7670dd82d5827752620418ae6c9d4a349e740d00073c157c23c7459"
   }
 }
 

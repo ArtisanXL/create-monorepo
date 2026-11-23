@@ -31,6 +31,7 @@ async function generate(selection: Selection) {
 const API: Selection = { apps: ["api"], packages: [] };
 const WEB: Selection = { apps: ["web"], packages: [] };
 const WORKER: Selection = { apps: ["worker"], packages: [] };
+const FULL: Selection = { apps: ["api", "web", "worker"], packages: [] };
 const LIBRARY: Selection = { apps: [], packages: ["domain", "contracts"] };
 
 const DB_FILES = [
@@ -206,5 +207,42 @@ describe("Decision 8: ADRs and the CLAUDE.md block follow the Closure", () => {
     const lib = await (await generate(LIBRARY)).read("CLAUDE.md");
     expect(lib).toContain("`packages/domain`");
     expect(lib).not.toMatch(/packages\/db|packages\/core|apps\/(api|web|worker)/);
+  });
+});
+
+describe("review fixes: text that follows the Closure", () => {
+  it("ADR-0004 (worktree) keeps the /api proxy sentence for api + web and handles zero apps", async () => {
+    const adr = async (s: Selection) =>
+      (await generate(s)).read("docs/adr/0004-worktree-isolation.md");
+    const both = await adr({ apps: ["api", "web"], packages: [] });
+    expect(both).toContain("proxies `/api` to `API_URL`");
+    expect(both).toContain("defines the apps as services");
+    expect(await adr({ apps: ["api"], packages: [] })).not.toContain("proxies");
+    const dbOnly = await adr({ apps: [], packages: ["db"] });
+    expect(dbOnly).not.toMatch(/services|proxies|pg-boss/);
+    expect(dbOnly).toContain(".worktreeinclude");
+  });
+
+  it("architecture.json drops redis-queue without worker and .worktreeinclude without db", async () => {
+    const api = await (await generate(API)).json("architecture.json");
+    expect(api.deferred.map((d: { name: string }) => d.name)).not.toContain("redis-queue");
+    expect(api.protected_paths).toContain(".worktreeinclude");
+    const lib = await (await generate(LIBRARY)).json("architecture.json");
+    expect(lib.protected_paths).not.toContain(".worktreeinclude");
+    const worker = await (await generate(WORKER)).json("architecture.json");
+    expect(worker.deferred.map((d: { name: string }) => d.name)).toContain("redis-queue");
+  });
+
+  it("the CLAUDE.md block follows the apps in the Closure", async () => {
+    const block = async (s: Selection) => (await generate(s)).read("CLAUDE.md");
+    const lib = await block(LIBRARY);
+    expect(lib).not.toMatch(/`pnpm dev`|PASEO_PORT|apps\./);
+    expect(await block(WEB)).toContain("`pnpm dev`: the generated apps.");
+    expect(await block(WEB)).toContain("Never hard-code ports");
+    const dbOnly = await block({ apps: [], packages: ["db"] });
+    expect(dbOnly).toContain("Postgres: `docker compose up -d`.");
+    expect(dbOnly).toContain("worktree:setup");
+    expect(dbOnly).not.toContain("PASEO_PORT");
+    expect(await block(FULL)).toContain("`pnpm dev`: all apps. Postgres via");
   });
 });

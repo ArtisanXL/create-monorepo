@@ -217,7 +217,7 @@ coverage
 === .worktreeinclude (5 bytes) ===
 .env
 
-=== CLAUDE.md (2282 bytes) ===
+=== CLAUDE.md (2292 bytes) ===
 <!-- scaffold:begin — managed by @artisanxl/create-monorepo -->
 # Project rules
 
@@ -228,7 +228,7 @@ Chat with the user in the user's language. Everything else — code, comments, d
 
 ## Commands
 - `pnpm verify`: architecture, lint, typecheck and tests. **Work is done only when this passes.**
-- `pnpm dev`: all apps. Postgres via `docker compose up -d`.
+- `pnpm dev`: the generated apps. Postgres via `docker compose up -d`.
 - `pnpm arch`: architecture check only.
 - `pnpm worktree:setup` / `worktree:info`: per-worktree `.env` + database (Paseo runs setup automatically; see `paseo.json`). Never hard-code ports; services get `$PASEO_PORT`.
 - `pnpm add <pkg> --filter @acme/<target>`: add a dependency; the version is written to the catalog.
@@ -408,7 +408,7 @@ export default defineConfig({
   noExternal: [/^@acme\//],
 });
 
-=== architecture.json (4104 bytes) ===
+=== architecture.json (3922 bytes) ===
 {
   "$comment": "Single source of truth. Humans only (agent hook + CODEOWNERS). Every change requires an accepted ADR.",
   "scope": "@acme",
@@ -498,12 +498,6 @@ export default defineConfig({
       "path": "apps/e2e",
       "trigger": "When the first critical user flow is complete.",
       "deps": ["@playwright/test", "cypress"]
-    },
-    {
-      "name": "redis-queue",
-      "path": null,
-      "trigger": "When pg-boss hits a measured throughput limit.",
-      "deps": ["bullmq", "bull", "ioredis", "redis"]
     }
   ],
   "protected_paths": [
@@ -527,7 +521,7 @@ export default defineConfig({
     "$comment": "The scaffold block in CLAUDE.md is protected; everything outside it is free. If a human changes the block, update sha256 (pnpm arch --claude-hash).",
     "begin": "<!-- scaffold:begin",
     "end": "<!-- scaffold:end -->",
-    "sha256": "4f656d7a42aca41b167dc20afec747711c8bf9a45efb772e9c8ae6a8ace03087"
+    "sha256": "cdc6eb0c4c5ce3a2f4f2e91b8f8f0969b7c3af5c4c9414f6ce47b3fc9da61011"
   }
 }
 
@@ -622,9 +616,9 @@ Sharing one database or fixed ports between them causes collisions.
   source checkout, only isolated keys rewritten, placeholder secrets generated), creates the
   database, runs migrations, and drops it again on teardown. It never touches the main checkout's
   database; teardown always exits 0.
-- `paseo.json` runs setup/teardown and defines the apps as services. Ports are assigned by Paseo
-  (`servicePorts.range` 4100-4999) and never hard-coded. `.worktreeinclude` copies `.env` into new
-  worktrees.
+- `paseo.json` runs setup/teardown and defines the apps as services. Ports are
+  assigned by Paseo (`servicePorts.range` 4100-4999) and never hard-coded. `.worktreeinclude`
+  copies `.env` into new worktrees.
 - Paseo reads `paseo.json` from the base branch: changes take effect after merging to main.
 
 ## Consequences

@@ -419,6 +419,30 @@ describe("resolveOptions: selection (Decisions 1, 3, 6, 9, 10)", () => {
     expect((error as Error).message).toMatch(/conflict with the existing architecture\.json.*ADR/s);
   });
 
+  it.each([
+    ["an empty packages object", '{"packages":{}}'],
+    ["a packages array", '{"packages":[1,2]}'],
+    ["a null packages", '{"packages":null}'],
+    ["only non-built-in packages", '{"packages":{"packages/auth":{}}}'],
+  ])("rejects a recorded Selection with %s", async (_n, json) => {
+    const probe: FsProbe = { ...fsProbe, readText: async () => json };
+    const error = await resolve(["proj"], {}, false, undefined, probe).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OptionsError);
+    expect((error as Error).message).toMatch(/ADR|0002/);
+  });
+
+  it("rejects a recorded Selection that is not closed, even when flags would complete it", async () => {
+    const probe = withArch(["packages/core"]);
+    for (const argv of [["proj"], ["proj", "--packages", "core"]]) {
+      const error = await resolve(argv, {}, false, undefined, probe).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(OptionsError);
+      expect((error as Error).message).toMatch(
+        /not closed.*db, domain, contracts|not closed.*domain/s,
+      );
+      expect((error as Error).message).toContain("0002");
+    }
+  });
+
   it("errors when architecture.json cannot be read", async () => {
     const probe: FsProbe = { ...fsProbe, readText: async () => "{" };
     expect(
@@ -450,6 +474,28 @@ describe("resolveOptions: selection (Decisions 1, 3, 6, 9, 10)", () => {
     expect(calls[1]?.choices).toEqual(["domain", "contracts", "db", "core"]);
     expect(calls[1]?.initial).toEqual([]);
     expect(options.selection).toEqual({ apps: ["web"], packages: ["domain"] });
+  });
+
+  it("asks the app multiselect again when nothing is selected", async () => {
+    const { asked, options } = await resolve(
+      ["proj", "--scope", "@s", "--pm", "pnpm", "--no-install"],
+      {},
+      true,
+      [[], [], ["web"], []],
+    );
+    expect(asked).toEqual([
+      "Apps",
+      "Extra packages (not already required by the apps)",
+      "Apps (select at least one app or package)",
+      "Extra packages (not already required by the apps)",
+    ]);
+    expect(options.selection).toEqual({ apps: ["web"], packages: [] });
+  });
+
+  it("still errors, instead of asking, when --apps decided an empty Selection", async () => {
+    expect(
+      await failure(["proj", "--apps", "none", "--packages", "none"], {}, true),
+    ).toBeInstanceOf(OptionsError);
   });
 
   it("skips the package multiselect when the apps already require every package", async () => {

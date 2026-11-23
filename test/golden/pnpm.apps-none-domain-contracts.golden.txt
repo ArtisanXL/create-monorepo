@@ -212,7 +212,7 @@ coverage
 === .nvmrc (3 bytes) ===
 24
 
-=== CLAUDE.md (1939 bytes) ===
+=== CLAUDE.md (1862 bytes) ===
 <!-- scaffold:begin — managed by @artisanxl/create-monorepo -->
 # Project rules
 
@@ -223,9 +223,7 @@ Chat with the user in the user's language. Everything else — code, comments, d
 
 ## Commands
 - `pnpm verify`: architecture, lint, typecheck and tests. **Work is done only when this passes.**
-- `pnpm dev`: all apps.
 - `pnpm arch`: architecture check only.
-- Never hard-code ports; services get `$PASEO_PORT`.
 - `pnpm add <pkg> --filter @acme/<target>`: add a dependency; the version is written to the catalog.
 
 ## Where code goes
@@ -246,7 +244,7 @@ Dependency direction and package roles: `architecture.json` and `docs/adr/0001-p
 7. No empty placeholder files/folders (`.gitkeep`, `export {}`). Write code when it is needed.
 <!-- scaffold:end -->
 
-=== architecture.json (3860 bytes) ===
+=== architecture.json (3654 bytes) ===
 {
   "$comment": "Single source of truth. Humans only (agent hook + CODEOWNERS). Every change requires an accepted ADR.",
   "scope": "@acme",
@@ -338,12 +336,6 @@ Dependency direction and package roles: `architecture.json` and `docs/adr/0001-p
       "path": "apps/e2e",
       "trigger": "When the first critical user flow is complete.",
       "deps": ["@playwright/test", "cypress"]
-    },
-    {
-      "name": "redis-queue",
-      "path": null,
-      "trigger": "When pg-boss hits a measured throughput limit.",
-      "deps": ["bullmq", "bull", "ioredis", "redis"]
     }
   ],
   "protected_paths": [
@@ -351,7 +343,6 @@ Dependency direction and package roles: `architecture.json` and `docs/adr/0001-p
     "docs/adr/",
     "scripts/",
     "paseo.json",
-    ".worktreeinclude",
     ".claude/settings.json",
     ".claude/settings.local.json",
     ".claude/hooks/",
@@ -367,7 +358,7 @@ Dependency direction and package roles: `architecture.json` and `docs/adr/0001-p
     "$comment": "The scaffold block in CLAUDE.md is protected; everything outside it is free. If a human changes the block, update sha256 (pnpm arch --claude-hash).",
     "begin": "<!-- scaffold:begin",
     "end": "<!-- scaffold:end -->",
-    "sha256": "dd33a76c1710c73427c4690073f21dd80c47b94ef6301e9e3c76daace0084566"
+    "sha256": "4b0166955b0c1954150bbae740c71ce00b506490203f31d8307d96071f584bd0"
   }
 }
 

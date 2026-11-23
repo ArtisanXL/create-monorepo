@@ -163,19 +163,23 @@
       "trigger": "When the first critical user flow is complete.",
       "deps": ["@playwright/test", "cypress"]
     },
+@if worker
     {
       "name": "redis-queue",
       "path": null,
       "trigger": "When pg-boss hits a measured throughput limit.",
       "deps": ["bullmq", "bull", "ioredis", "redis"]
     }
+@endif
   ],
   "protected_paths": [
     "architecture.json",
     "docs/adr/",
     "scripts/",
     "paseo.json",
+@if db
     ".worktreeinclude",
+@endif
     ".claude/settings.json",
     ".claude/settings.local.json",
     ".claude/hooks/",

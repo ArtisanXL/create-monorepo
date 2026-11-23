@@ -160,24 +160,35 @@ function parseNames<T extends string>(
   return [...new Set(names as T[])];
 }
 
-/** The Selection recorded by a generated repo's architecture.json. */
+/** The Selection recorded by a generated repo's architecture.json; it must be a closed set. */
 function selectionFromArchitecture(text: string): Selection {
-  let packages: Record<string, unknown> | undefined;
-  try {
-    packages = (JSON.parse(text) as { packages?: Record<string, unknown> }).packages;
-  } catch {
-    packages = undefined;
-  }
-  if (!packages || typeof packages !== "object") {
-    throw new OptionsError(
-      "architecture.json exists but its Selection cannot be read (no valid `packages` object). Fix it or scaffold into a new directory.",
+  const unreadable = (why: string) =>
+    new OptionsError(
+      `architecture.json exists but its Selection ${why}. Changing the Selection of an existing repo needs an accepted ADR (docs/adr/0002-deferred-packages.md); fix the file or scaffold into a new directory.`,
     );
+  let packages: unknown;
+  try {
+    packages = (JSON.parse(text) as { packages?: unknown } | null)?.packages;
+  } catch {
+    throw unreadable("cannot be read (invalid JSON)");
+  }
+  if (typeof packages !== "object" || packages === null || Array.isArray(packages)) {
+    throw unreadable("cannot be read (`packages` is not an object)");
   }
   const names = new Set(Object.keys(packages).map((p) => p.split("/")[1] ?? ""));
-  return {
+  const selection: Selection = {
     apps: APP_NAMES.filter((n) => names.has(n)),
     packages: PACKAGE_NAMES.filter((n) => names.has(n)),
   };
+  const recorded = new Set<string>([...selection.apps, ...selection.packages]);
+  if (recorded.size === 0) throw unreadable("is empty (no built-in component is declared)");
+  const missing = [...closureOf(selection)].filter((n) => !recorded.has(n));
+  if (missing.length > 0) {
+    throw unreadable(
+      `is not closed: it declares ${[...recorded].join(", ")} but not their dependencies ${missing.join(", ")}`,
+    );
+  }
+  return selection;
 }
 
 export type ParsedArgs = ReturnType<typeof parse>;
@@ -303,29 +314,41 @@ async function resolveSelection(
     return existing;
   }
 
-  const apps: readonly AppName[] =
-    flagApps ??
-    (interactive
-      ? (uncancel(await prompter.multiselect("Apps", APP_NAMES, APP_NAMES)) as AppName[])
-      : FULL_SELECTION.apps);
-  let packages: readonly PackageName[] = flagPackages ?? [];
-  if (flagPackages === undefined && interactive) {
-    const inClosure = closureOf({ apps, packages: [] });
-    const extra = PACKAGE_NAMES.filter((n) => !inClosure.has(n));
-    if (extra.length > 0) {
-      packages = uncancel(
-        await prompter.multiselect("Extra packages (not already required by the apps)", extra, []),
-      ) as PackageName[];
+  // Interactive and nothing selected: ask again (like askValid), unless the flags decided it.
+  for (let retry = false; ; retry = true) {
+    const apps: readonly AppName[] =
+      flagApps ??
+      (interactive
+        ? (uncancel(
+            await prompter.multiselect(
+              retry ? "Apps (select at least one app or package)" : "Apps",
+              APP_NAMES,
+              APP_NAMES,
+            ),
+          ) as AppName[])
+        : FULL_SELECTION.apps);
+    let packages: readonly PackageName[] = flagPackages ?? [];
+    if (flagPackages === undefined && interactive) {
+      const inClosure = closureOf({ apps, packages: [] });
+      const extra = PACKAGE_NAMES.filter((n) => !inClosure.has(n));
+      if (extra.length > 0) {
+        packages = uncancel(
+          await prompter.multiselect(
+            "Extra packages (not already required by the apps)",
+            extra,
+            [],
+          ),
+        ) as PackageName[];
+      }
+    }
+    const selection: Selection = { apps, packages };
+    if (closureOf(selection).size > 0) return selectionOf(closureOf(selection));
+    if (!interactive || flagApps !== undefined) {
+      throw new OptionsError(
+        "Nothing selected: pick at least one app or package (--apps, --packages).",
+      );
     }
   }
-  // The default Selection is everything; flags narrow only what they name.
-  const selection: Selection = { apps, packages };
-  if (closureOf(selection).size === 0) {
-    throw new OptionsError(
-      "Nothing selected: pick at least one app or package (--apps, --packages).",
-    );
-  }
-  return selectionOf(closureOf(selection));
 }
 
 function parse(argv: readonly string[]) {

@@ -7,16 +7,36 @@ Chat with the user in the user's language. Everything else — code, comments, d
 
 ## Commands
 - `__RUN__ verify`: architecture, lint, typecheck and tests. **Work is done only when this passes.**
+@if api web worker
 @if db
 - `__RUN__ dev`: all apps. Postgres via `docker compose up -d`.
 @else
 - `__RUN__ dev`: all apps.
 @endif
+@else
+@if api|web|worker
+@if db
+- `__RUN__ dev`: the generated apps. Postgres via `docker compose up -d`.
+@else
+- `__RUN__ dev`: the generated apps.
+@endif
+@else
+@if db
+- Postgres: `docker compose up -d`.
+@endif
+@endif
+@endif
 - `__RUN__ arch`: architecture check only.
 @if db
+@if api|web|worker
 - `__RUN__ worktree:setup` / `worktree:info`: per-worktree `.env` + database (Paseo runs setup automatically; see `paseo.json`). Never hard-code ports; services get `$PASEO_PORT`.
 @else
+- `__RUN__ worktree:setup` / `worktree:info`: per-worktree `.env` + database (Paseo runs setup automatically; see `paseo.json`).
+@endif
+@else
+@if api|web|worker
 - Never hard-code ports; services get `$PASEO_PORT`.
+@endif
 @endif
 - `__ADD_DEP__ __SCOPE__/<target>`: add a dependency; the version is written to the catalog.
 
