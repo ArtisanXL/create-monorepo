@@ -622,7 +622,9 @@ describe("guard decision: re-audit follow-ups (#29)", () => {
     it("tracks cd bases and tight directories", () => {
       const { commands } = parse("cd a && cd ../b; ls");
       expect(commands[2]?.bases).toEqual(["/proj", "/proj/a", "/proj/b", "/b"]);
-      expect(commands[2]?.tight).toEqual(["/proj/b"]);
+      // `;` runs the next command even when a `cd` failed, so it does not narrow
+      expect(commands[2]?.tight).toEqual(["/proj"]);
+      expect(parse("cd a && cd ../b && ls").commands[2]?.tight).toEqual(["/proj/b"]);
       expect(parse("cd a || ls").commands[1]?.tight).toEqual(["/proj"]);
     });
     it("returns substitutions inside double quotes as nested commands", () => {
@@ -1025,8 +1027,6 @@ describe("guard decision: remaining limits (#34)", () => {
       `echo "open(F, '>architecture.json')" | perl`,
       `node <<< "fs.renameSync('architecture.json', 'x')"`,
       `echo "fs.openSync('architecture.json', 'w')" | node`,
-      `python3 -c "$(echo 'import os; os.remove("architecture.json")')"`,
-      `node -e "$(echo "fs.rmSync('docs/adr/0001-package-boundaries.md')")"`,
     ])("blocks %s", (cmd) => {
       expect(blocked(bash(cmd)), cmd).toContain("runs text built at run time");
     });
@@ -1123,7 +1123,6 @@ describe("guard decision: remaining limits (#34)", () => {
       "rsync -a src/ docs/",
       "echo dist | xargs rm -rf",
       "echo docs | xargs ls",
-      "find docs -name '*.md' | xargs rm",
     ])("allows %s", (cmd) => {
       expect(bash(cmd), cmd).toEqual({ allow: true });
     });
@@ -1194,6 +1193,10 @@ describe("guard decision: remaining limits (#34)", () => {
       "git reset --hard feature/x~2",
       "git reset --hard abc1234",
       "git reset -q --hard main",
+      // #41: upstream and reflog revisions can point anywhere
+      "git reset --hard @{u}",
+      "git reset --hard @{upstream}",
+      "git reset --hard HEAD@{1}",
     ])("blocks %s", (cmd) => {
       expect(blocked(bash(cmd)), cmd).toBeDefined();
     });
@@ -1207,10 +1210,7 @@ describe("guard decision: remaining limits (#34)", () => {
       "git reset --hard HEAD^",
       "git reset --hard HEAD^^",
       "git reset --hard @~2",
-      "git reset --hard @{u}",
-      "git reset --hard @{upstream}",
       "git reset --hard ORIG_HEAD",
-      "git reset --hard HEAD@{1}",
       "git reset --soft HEAD~1",
       "git reset HEAD~1",
       "git reset HEAD file.ts",
@@ -1339,8 +1339,6 @@ describe("guard decision: remaining limits (#34)", () => {
       "git switch some-branch",
       "git reset abc1234",
       "git reset --soft abc1234",
-      // Only rm / mv / shred / unlink / rmdir / recursive chmod resolve globs.
-      "truncate -s0 arch*.json",
       // The git rewind check sees one command line: a reset in one call and the checkout in the next are not connected.
       "git reset abc1234",
       // A stash of a rewound index only counts when the reset is on the same line.
@@ -1663,7 +1661,6 @@ describe("guard decision: constructed bypasses (#37)", () => {
         // printf
         `printf 'rm architecture.js'"on" | sh`,
         "X=$(printf 'architecture.%s' json); rm $X",
-        "X=$(printf 'a.%s' txt); rm $X",
         "printf -v X 'architecture.%s' json; rm $X",
         'X=$(printf "docs"); rm -rf "$X"',
       ],
@@ -1689,6 +1686,782 @@ describe("guard decision: constructed bypasses (#37)", () => {
         "git switch @{-1}",
         "X=$(printf 'a.%s' txt); echo $X architecture.json",
       ],
+    );
+  });
+});
+
+describe("guard decision: hardening follow-ups (#41)", () => {
+  const cases = (blockedCmds: string[], allowedCmds: string[]) => {
+    it.each(blockedCmds)("blocks %s", (cmd) => {
+      expect(blocked(bash(cmd)), cmd).toBeDefined();
+    });
+    it.each(allowedCmds)("allows %s", (cmd) => {
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+    });
+  };
+
+  describe("1. printf-variable check runs in linear time", () => {
+    it("decides 1,800 printf names x 2,500 arguments well under a second", () => {
+      const names = Array.from({ length: 1800 }, (_, i) => `V${i}=$(printf x)`).join("; ");
+      const args = Array.from({ length: 2500 }, (_, i) => `a${i}`).join(" ");
+      const cmd = `${names}; rm ${args}`;
+      bash(cmd); // warm up
+      const t0 = performance.now();
+      const r = bash(cmd);
+      const ms = performance.now() - t0;
+      expect(r).toEqual({ allow: true });
+      // Measured at ~1.4 s before the fix and well under 200 ms after; the bound is generous for CI.
+      expect(ms).toBeLessThan(1000);
+    });
+    cases(
+      ["X=$(printf docs); rm -rf $X", 'X=$(printf a); Y=$(printf %s "$X"); rm -rf ${Y}'],
+      ["X=$(printf a); rm a.txt"],
+    );
+  });
+
+  describe("2. git", () => {
+    describe("bare HEAD is not a rewind (relaxed)", () => {
+      cases(
+        [
+          "git checkout HEAD~1 -- .",
+          "git reset abc1234 && git checkout HEAD -- .",
+          "git checkout HEAD -- architecture.json",
+          "git restore --source=HEAD~1 .",
+          "git restore -s main .",
+        ],
+        [
+          "git checkout HEAD -- .",
+          "git checkout HEAD .",
+          "git checkout @ -- .",
+          "git checkout HEAD@{0} -- .",
+          "git restore --source=HEAD .",
+          "git restore -s @ .",
+          "git checkout HEAD -- ':!src'",
+        ],
+      );
+    });
+
+    describe("cd into a folder narrows a whole-tree restore (R3: only when it surely ran)", () => {
+      cases(
+        [
+          "cd docs && git checkout main -- .",
+          "cd src && git checkout main -- ..",
+          "cd src && git checkout main -- :/",
+          "cd src && git checkout main -- ':/*'",
+          "git checkout main -- .",
+          // `;` runs the next command even when the cd failed
+          "cd src; git checkout main -- .",
+          "cd src; git checkout main -- ..",
+          "cd zzz; git checkout main -- .",
+          "cd src && true; git checkout main -- .",
+          // a cd that may be skipped, or that runs in a subshell
+          "true || cd src; git checkout main -- .",
+          "false && cd src; git checkout main -- .",
+          "cd src || git checkout main -- .",
+          "(cd src); git checkout main -- .",
+          "(cd src && true); git checkout main -- .",
+          "(cd src && true) && git checkout main -- .",
+          // operands that are not literal paths
+          "cd src && cd - && git checkout main -- .",
+          'cd src && cd "$OLDPWD" && git checkout main -- .',
+          "cd src && cd ~- && git checkout main -- .",
+          'cd src && cd "$(git rev-parse --show-toplevel)" && git checkout main -- .',
+          "cd src && cd $(git rev-parse --show-toplevel) && git checkout main -- .",
+          'cd "$PWD" && git checkout main -- .',
+          "cd ~+ && git checkout main -- .",
+          'cd "$(pwd)" && git checkout main -- .',
+          // -C resolves cumulatively from where the cd chain got to
+          'git -C "$PWD" checkout main -- .',
+          'git -C "$(git rev-parse --show-toplevel)" checkout main -- .',
+          "git -C src -C .. checkout main -- .",
+          "cd src && git -C .. checkout main -- .",
+          // anything that can redirect a cd turns narrowing off
+          "CDPATH=..; cd proj && git checkout main -- .",
+          "ln -s . s && cd s && git checkout main -- .",
+          "pushd src && popd && git checkout main -- .",
+          // the same for rm
+          "cd src; rm -rf .",
+          "cd zzz; rm -rf .",
+          "true || cd src; rm -rf .",
+          "(cd src); rm -rf .",
+          'cd "$PWD" && rm -rf .',
+          "cd src && cd - && rm -rf .",
+          // decide() cannot see shell state (aliases, options, traps, sourced files, a cd in a function), so a whole-tree
+          // restore is never decided on where a cd or -C seems to lead. The relaxation asked for in #41 was declined for that reason.
+          "cd src && git checkout main -- .",
+          "cd src && git restore -s main .",
+          "cd src && cd lib && git checkout main -- .",
+          "git -C src checkout main -- .",
+          "git -C src -C lib checkout main -- .",
+          "cd src && git -C lib checkout main -- .",
+          "(cd src && git checkout main -- .)",
+          "cd .. && git -C proj checkout main -- .",
+        ],
+        [
+          "cd src && rm -rf .",
+          "cd src && cd .. && cd lib && rm -rf .",
+          'cd "$(pwd)/src" && rm -rf .',
+          "(cd src && rm -rf .)",
+          "pushd /tmp/x && rm -rf * && popd",
+        ],
+      );
+      it("known limit: a symlink made by an earlier call is not seen", () => {
+        // `ln -s . s` ran in a call of its own; decide() sees one call and cannot tell that `s` is the project root.
+        expect(bash("cd s && rm -rf .")).toEqual({ allow: true });
+        // A symlink made on the same line by code the guard does not read (`python3 -c "os.symlink('.', 's')"`) is the same.
+        expect(bash(`python3 -c "import os; os.symlink('.', 's')" && cd s && rm -rf .`)).toEqual({
+          allow: true,
+        });
+      });
+    });
+
+    describe("an exclusion pathspec without -- (blocked)", () => {
+      cases(
+        ["git checkout main ':!src'", "git checkout HEAD~3 ':(exclude)src'"],
+        [
+          "git checkout ':!src/x.ts' src",
+          "git checkout main src/x.ts",
+          "git checkout abc1234 src/x.ts",
+        ],
+      );
+    });
+
+    describe("upstream and reflog revisions (blocked)", () => {
+      cases(
+        [
+          "git reset --keep @{u}",
+          "git reset --hard HEAD@{1}",
+          "git reset --hard @{upstream}",
+          "git reset @{u} && git checkout -- .",
+        ],
+        [
+          "git reset --hard HEAD@{0}",
+          "git reset --keep HEAD~1",
+          "git reset --hard HEAD^",
+          "git reset --hard ORIG_HEAD",
+        ],
+      );
+    });
+
+    describe("short hex revisions (blocked, heuristic)", () => {
+      cases(
+        [
+          "git checkout abc123",
+          "git checkout ab12",
+          "git switch --detach abc123",
+          "git switch abc123",
+        ],
+        ["git checkout cafe", "git checkout 1234", "git checkout feat-1"],
+      );
+    });
+
+    it("known limits: all-letter or all-digit short names and rewinds across calls", () => {
+      // `face` / `decade` / `1234` may be branch names; telling them apart needs repo state.
+      for (const cmd of ["git checkout face", "git checkout decade", "git checkout 123456"])
+        expect(bash(cmd), cmd).toEqual({ allow: true });
+      // decide() is pure and sees one call; the reset and the whole-tree checkout are each allowed alone.
+      // Carrying state across calls would put I/O into the hook, and blocking every `checkout -- .` breaks "discard my changes".
+      expect(bash("git reset abc1234")).toEqual({ allow: true });
+      expect(bash("git checkout -- .")).toEqual({ allow: true });
+    });
+  });
+
+  describe("3. paths at or above the project root", () => {
+    cases(
+      [
+        "rm -rf ..",
+        "rm -rf /",
+        "find .. -delete",
+        "find / -delete",
+        "find / -name x -exec rm {} \\;",
+        "rsync -a --delete src/ ..",
+        "echo .. | xargs rm -rf",
+        "chmod -R 000 ..",
+        // $PWD and ~+ are the working directory
+        'rm -rf "$PWD/docs"',
+        "rm -rf ${PWD}/docs",
+        "rm -rf ~+/docs",
+        'find "$PWD" -delete',
+        "rm -rf $PWD",
+      ],
+      [
+        "rm -rf ../sibling",
+        "rm -rf /tmp/x",
+        "find /tmp/x -delete",
+        "rm -rf ~/.cache/x",
+        'rm -rf "$PWD/src/x"',
+        'cd src && find "$PWD" -delete',
+        "rsync -a src/ ..",
+        "PWD=/tmp/x; rm -rf $PWD/docs",
+      ],
+    );
+
+    it("blocks rm -rf ~ when the project lives under the home folder", () => {
+      const under = (command: string) =>
+        decide({
+          tool: "Bash",
+          input: { command },
+          contract,
+          root: "/home/u/proj",
+          home: "/home/u",
+        });
+      expect(blocked(under("rm -rf ~")), "rm -rf ~").toBeDefined();
+      expect(blocked(under("rm -rf ~/")), "rm -rf ~/").toBeDefined();
+      expect(under("rm -rf ~/.cache/x")).toEqual({ allow: true });
+      expect(under("rm -rf ~/other")).toEqual({ allow: true });
+    });
+  });
+
+  describe("4. lexer: pattern groups and decoded text", () => {
+    cases(
+      [
+        // bash extglob
+        "rm -rf d@(ocs)",
+        "rm -rf !(src)",
+        "rm -rf +(d)ocs",
+        "rm -rf *(/)",
+        // zsh patterns
+        "rm -rf (d|x)ocs",
+        "rm arch(i|x)tecture.json",
+        "rm -rf ^src",
+        "rm -rf (#i)DOCS",
+        // ANSI-C text run by a shell
+        "echo $'rm\\x20architecture.json' | sh",
+        "bash <<< $'rm\\x20architecture.json'",
+      ],
+      [
+        "(cd src && rm -rf x)",
+        "rm -rf src/@(a|b)",
+        "echo (x)",
+        "echo $'a\\tb'",
+        "echo $'a\\tb' | sh",
+        "f() { echo hi; }; f",
+        "X=(a b); echo $X",
+        "diff <(sort a) <(sort b)",
+      ],
+    );
+  });
+
+  describe("5. deletes and writes built at run time", () => {
+    describe("a-c. command substitutions in operands", () => {
+      cases(
+        [
+          "rm $(printf 'architecture.%s' json)",
+          "rm -rf $(printf docs)",
+          "rm $(echo architecture.json)",
+          'rm -rf "$(printf do)cs"',
+          "rm -rf $(echo d)*",
+          "rm -rf `printf docs`",
+          // a substitution whose output is not known, from printf or echo, in a delete
+          'rm $(printf "%s" "$f")',
+          "rm \"$(printf 'architecture.%s' json)\"",
+          // unknown variables next to name text or a glob
+          "rm -rf ${X:-d*}",
+          "rm -rf ${X:-d}*",
+          "rm -rf $X*",
+          "rm -rf ${X}d*",
+          // the substitution runs where the line has got to
+          "cd docs && echo $(rm adr/0001-package-boundaries.md)",
+        ],
+        [
+          "rm -rf $(mktemp -d)",
+          "rm $(git ls-files -d)",
+          "rm -rf $(ls -d src/*)",
+          'rm "$(git ls-files -d)"',
+          'rm "$(echo a.txt)"',
+          "rm $(printf 'a.%s' txt)",
+          "TMP=$(mktemp -d); rm -rf $TMP/*",
+          'rm -rf "$TMP"',
+          "X=src; rm -rf $X*",
+        ],
+      );
+    });
+
+    describe("d. printf variants and static values", () => {
+      cases(
+        [
+          "X=$(command printf docs); rm -rf $X",
+          "X=$(builtin printf docs); rm -rf $X",
+          "X=$(/usr/bin/printf docs); rm -rf $X",
+          "X=$(echo -e '\\x64ocs'); rm -rf $X",
+          'X=$(command printf %s "$n"); rm -rf $X',
+          // a static value is checked by the normal path rules
+          "X=$(printf 'architecture.%s' json); cp /dev/null $X",
+          "X=$(printf 'architecture.%s' json); echo > $X",
+          "X=$(printf 'architecture.%s' json); echo hi | tee $X",
+          "X=$(printf '%b' 'architecture.json'); touch $X",
+          "X=$(printf '%d.json' 5); rm $X; rm architecture.json",
+        ],
+        [
+          "X=$(printf 'a.%s' txt); rm $X",
+          "X=$(printf 'a.%s' txt); echo $X architecture.json",
+          "X=$(printf '%%'); rm a",
+        ],
+      );
+      it("known limit: a non-literal printf variable that other writers use is allowed", () => {
+        // `F=$(printf 'out-%s.log' "$n"); echo > $F` is a common legitimate pattern, and the value cannot be known.
+        expect(bash(`F=$(printf 'out-%s.log' "$n"); echo > $F`)).toEqual({ allow: true });
+        expect(bash(`F=$(printf 'out-%s.log' "$n"); cp /dev/null $F`)).toEqual({ allow: true });
+      });
+    });
+
+    describe("e. printf and echo into xargs", () => {
+      cases(
+        [
+          "printf 'architecture.json\\0' | xargs -0 rm",
+          "printf 'docs\\n' | xargs rm -rf",
+          'printf "%s\\n" "$f" | xargs rm',
+          "echo -e 'docs\\n' | xargs rm -rf",
+        ],
+        [
+          "printf 'a.txt\\0' | xargs -0 rm",
+          "echo a.txt | xargs rm",
+          'printf "%s\\n" "$f" | xargs grep x',
+        ],
+      );
+    });
+
+    describe("f. find into deleters", () => {
+      cases(
+        [
+          "find . | xargs rm",
+          "find . -print0 | xargs -0 rm -f",
+          "find . -name '*.json' | xargs rm",
+          "find . -exec sh -c 'rm \"$1\"' _ {} ;",
+          "find docs | xargs rm",
+          "find . | xargs -n 1 rm",
+          "find . -exec bash -c 'rm -f \"$0\"' {} ;",
+        ],
+        [
+          "find src | xargs rm",
+          "find src -exec sh -c 'rm \"$1\"' _ {} ;",
+          "find . -name '*.ts' | xargs grep x",
+          "find . -exec sh -c 'echo \"$1\"' _ {} ;",
+          "find . | xargs grep rm",
+        ],
+      );
+    });
+
+    describe("g. globs in other writers", () => {
+      cases(
+        [
+          "truncate -s0 arch*.json",
+          "cp /dev/null arch*.json",
+          "chmod 000 arch*.json",
+          "sed -i s/a/b/ bio*.json",
+          "touch .githooks/*",
+          // known side effect: consistent with the literal path, which is already blocked
+          "chmod +x scripts/*.mjs",
+          "cp -t arch*.json x",
+        ],
+        [
+          "cp arch*.json /tmp/",
+          "chmod +x src/*.sh",
+          "sed -i s/a/b/ src/*.ts",
+          "cp -t /tmp arch*.json",
+          "touch src/*.ts",
+        ],
+      );
+    });
+
+    it("an echo or printf that is substituted into an interpreter's code is blocked by the interpreter rule", () => {
+      for (const cmd of [
+        `python3 -c "$(echo 'import os; os.remove("architecture.json")')"`,
+        `node -e "$(echo "fs.rmSync('docs/adr/0001-package-boundaries.md')")"`,
+      ])
+        expect(blocked(bash(cmd)), cmd).toContain("protected path");
+    });
+  });
+
+  describe("review fixes (R1-R7, S2-S4)", () => {
+    describe("R1. pwd and the repository root are the working directory", () => {
+      cases(
+        [
+          'rm -rf "$(pwd)"',
+          "rm -rf $(pwd)",
+          "rm -rf $(pwd -P)",
+          'rm -rf "$(git rev-parse --show-toplevel)"',
+          'cd "$(pwd)" && rm -rf *',
+          'rm -rf "$(pwd)/docs"',
+          'rm -rf "$(command pwd)/docs"',
+          "rm -rf `pwd`/docs",
+          "rm -rf `pwd`",
+          'rm -rf "$(git rev-parse --show-toplevel)/docs"',
+          'cd src && rm -rf "$(git rev-parse --show-toplevel)/docs"',
+        ],
+        [
+          'rm -rf "$(pwd)/dist"',
+          'rm -rf "$(pwd)"/dist',
+          "rm -rf `pwd`/dist",
+          'docker run --rm -v "$(pwd)":/app node:20 ls',
+          'cd "$(git rev-parse --show-toplevel)" && pnpm test',
+          'cd src && rm -rf "$(pwd)/x"',
+        ],
+      );
+      it("expands $HOME like ~", () => {
+        const under = (command: string) =>
+          decide({
+            tool: "Bash",
+            input: { command },
+            contract,
+            root: "/home/u/proj",
+            home: "/home/u",
+          });
+        for (const c of [
+          'rm -rf "$HOME/proj/docs"',
+          "rm -rf ${HOME}/proj/docs",
+          "rm -rf $HOME",
+          'rm -rf "$HOME"',
+        ])
+          expect(blocked(under(c)), c).toBeDefined();
+        for (const c of ['rm -rf "$HOME/.cache/x"', "rm -rf ${HOME}/other"])
+          expect(under(c), c).toEqual({ allow: true });
+      });
+    });
+
+    describe("R2. a ( after time, coproc, case, ! or a function name is a subshell, not a pattern group", () => {
+      cases(
+        [
+          "time (rm -rf docs)",
+          "time ( rm -rf docs )",
+          "time -p (rm -rf docs)",
+          "time (rm -rf docs;)",
+          "case x in (x) rm -rf docs;; esac",
+          "coproc (rm -rf docs)",
+          "! (rm -rf docs)",
+          "if (rm -rf docs); then :; fi",
+          "[[ -d src ]] && (rm -rf docs)",
+          "f () (rm -rf docs); f",
+          "f() (rm -rf docs); f",
+          "function f (rm -rf docs); f",
+          // a body with a space, ; or & is a subshell wherever it stands
+          "make -C src (rm -rf docs)",
+          "echo x (rm -rf docs; true)",
+          // quotes inside a pattern group
+          'rm -rf d@(o"c"s)',
+          'rm -rf @("a b"|docs)',
+        ],
+        [
+          "time (pnpm build)",
+          "! (grep -q x file)",
+          "rm -rf src/@(')')",
+          "rm -rf src/@(a|b)",
+          "echo hi | (cat)",
+          "case $1 in (a) echo a;; esac",
+        ],
+      );
+    });
+
+    describe("R4. any move of HEAD or a branch makes a restore from HEAD a rewind", () => {
+      cases(
+        [
+          "git reset --soft abc1234 && git checkout HEAD -- .",
+          "git reset --soft abc1234 && git restore --source=HEAD --staged --worktree .",
+          "git update-ref refs/heads/main abc1234 && git checkout HEAD -- .",
+          "git update-ref HEAD abc1234 && git checkout HEAD -- .",
+          "git symbolic-ref HEAD refs/heads/other && git checkout HEAD -- .",
+          "git reset --soft abc1234 && git checkout -f",
+          "git reset --soft abc1234 && git reset --hard",
+        ],
+        [
+          "git reset --soft abc1234",
+          "git reset --soft HEAD~1 && git checkout HEAD -- .",
+          "git update-ref -d refs/heads/x && git checkout HEAD -- .",
+          "git update-ref refs/tags/v1 abc1234 && git checkout HEAD -- .",
+        ],
+      );
+    });
+
+    describe("R5. printf and echo are evaluated only when the guard models them exactly", () => {
+      cases(
+        [
+          "rm -rf \"$(printf '%b' 'docs\\cjunk')\"",
+          "rm -rf $(echo -e 'docs\\cjunk')",
+          "rm -rf $(echo -e '\\0144ocs')",
+          "rm -rf \"$(printf '%b' '\\0144ocs')\"",
+          "rm -rf \"$(printf '\\U64ocs')\"",
+          "rm -rf \"$(printf '\\u0064ocs')\"",
+          "rm -rf $(printf 'docs\\c')",
+          "X=$(printf '%b' 'docs\\cjunk'); rm -rf $X",
+          "X=$(echo -e '\\0144ocs'); rm -rf $X",
+          "X=$(printf '\\U64ocs'); rm -rf \"$X\"",
+          "X=$(printf '\\U64ocs'); rm -rf $X",
+          // an echo without -e: bash prints the backslash, zsh decodes it
+          "rm -rf $(echo '\\x64ocs')",
+          // shadowed builtins and look-alikes
+          "printf() { echo docs; }; X=$(printf safe); rm -rf $X",
+          'printf() { echo docs; }; rm -rf "$(printf safe)"',
+          'function printf { echo docs; }; rm -rf "$(printf safe)"',
+          "alias printf='echo docs'; X=$(printf safe); rm -rf $X",
+          "X=$(./printf safe); rm -rf $X",
+          'rm -rf "$(./printf safe)"',
+          'rm -rf "$(~/bin/echo safe)"',
+          // unmodelled directives
+          "rm -rf \"$(printf '%5s' safe)\"",
+          "rm -rf \"$(printf '%q' safe)\"",
+        ],
+        [
+          'rm "$(echo a.txt)"',
+          "X=$(printf 'a.%s' txt); rm $X",
+          "rm \"$(printf '%b' 'a\\tb')\"",
+          'rm "$(/usr/bin/printf a.txt)"',
+          "rm \"$(echo -e 'a\\x2etxt')\"",
+          "rm \"$(printf 'a\\056txt')\"",
+        ],
+      );
+    });
+
+    describe("R6. long inputs are decided in bounded time", () => {
+      const P = "(a=`".repeat(12_200);
+      it.each([
+        ["flat", `echo '${P}' printf`],
+        ["nested", `A=$(B=$(C=$(echo '${P}' printf)))`],
+        ["bash -c", `bash -c "bash -c \\"bash -c 'echo ${P} printf'\\""`],
+        ["unbalanced groups", `rm ${"a(".repeat(24_000)}`],
+      ])("%s", (_n, command) => {
+        const t0 = performance.now();
+        bash(command);
+        // Over 1.5 s on main for the first two; a few ms now. The bound is generous for CI.
+        expect(performance.now() - t0).toBeLessThan(3000);
+      });
+    });
+
+    describe("R7. a literal U+E000 in the input", () => {
+      it("does not crash and is checked like any other character", () => {
+        for (const c of [
+          "rm -rf \uE000$(printf docs)",
+          "rm -rf $(printf docs)\uE000",
+          "X=\uE000$(cat l); rm -rf $X",
+          "rm -rf $'\\uE000'$(printf docs)",
+          "echo \uE000",
+        ])
+          expect(() => bash(c), c).not.toThrow();
+        expect(bash("rm -rf \uE000$(printf docs)")).toEqual({ allow: true });
+        expect(blocked(bash("rm -rf $(printf docs)\uE000 docs"))).toBeDefined();
+      });
+    });
+
+    describe("S2/S3. messages say what the command does", () => {
+      it.each([
+        ["chmod -R u+w .", "change the project root"],
+        ["chown -R me .", "change the project root"],
+        ["chgrp -R me docs", "change a folder"],
+        ["mv . ../x", "delete or move the project root"],
+        ["rm -rf ..", "delete or move the project root"],
+        ["touch *", "in this write"],
+        ["chmod 644 *", "in this write"],
+        ["truncate -s0 arch*.json", "in this write"],
+        ["chmod -R u+w d*", "in this write"],
+        ["rm -rf d*", "in this delete or move"],
+      ])("%s", (cmd, text) => {
+        expect(blocked(bash(cmd)), cmd).toContain(text);
+      });
+    });
+
+    describe("S4. the name given to checkout -b / switch -c is not a revision", () => {
+      cases(
+        [
+          "git checkout -b feat abc123",
+          "git switch -c feat abc123",
+          "git checkout -B feat abc1234",
+          "git checkout -b abc123 abc1234",
+        ],
+        [
+          "git checkout -b abc123",
+          "git checkout -B abc123",
+          "git switch -c abc123",
+          "git switch -C abc123",
+          "git switch --create abc123",
+          "git checkout --orphan abc123",
+          "git checkout -b feat origin/main",
+        ],
+      );
+    });
+  });
+
+  describe("second review (E1-E2, F1-F3, L-a, L-b)", () => {
+    const a600 = "a".repeat(600);
+    describe("E1. an echo with a backslash may be decoded by zsh", () => {
+      cases(
+        ["X=$(echo 'architecture\\x2ejson'); rm $X", "X=$(echo 'docs\\x2f'); rm -rf $X"],
+        ["X=$(echo a.txt); rm $X"],
+      );
+    });
+
+    it("E2. known limits: a cd target the guard cannot resolve widens a glob to the root (fail-closed)", () => {
+      // `rm -rf *` in an unknown folder could be the project root, so these are blocked although they are often harmless.
+      for (const c of [
+        "cd $TMPDIR && rm -rf *",
+        'TMP=$(mktemp -d) && cd "$TMP" && rm -rf *',
+        'cd "$dir" && rm -rf ./*',
+      ])
+        expect(blocked(bash(c)), c).toBeDefined();
+    });
+
+    describe("F1. cd narrows only along an unbroken && chain", () => {
+      cases(
+        [
+          "true || cd src && git checkout main -- .",
+          "true || cd src && rm -rf .",
+          "false || true || cd src && git checkout main -- .",
+          "echo a; cd src && git checkout main -- .",
+          "echo a | cat && cd src && git checkout main -- .",
+          "pushd src && pushd +1 && git checkout main -- .",
+          "pushd src && pushd -n .. && pushd +1 && git checkout main -- .",
+          "cd src && cd src . && git checkout main -- .",
+          "cd src && cd /src / && git checkout main -- .",
+          "cd src && eval cd .. && git checkout main -- .",
+          "cd src && source ./x.sh && git checkout main -- .",
+          "cd src && . ./x.sh && git checkout main -- .",
+          "up(){ cd ..; }; cd src && up && git checkout main -- .",
+          "function up { cd ..; }; cd src && up && git checkout main -- .",
+          "cd src && git --work-tree=.. checkout main -- .",
+          "cd src && GIT_WORK_TREE=.. git checkout main -- .",
+        ],
+        ["echo a && cd src && rm -rf .", "cd src && cd lib && rm -rf .", "pushd src && rm -rf ."],
+      );
+    });
+
+    describe("F2. a shadowed printf, echo or pwd is not evaluated", () => {
+      cases(
+        [
+          "alias 'printf=echo docs'; X=$(printf safe); rm -rf $X",
+          "alias -- printf='echo docs'; X=$(printf safe); rm -rf $X",
+          "alias p=q printf='echo docs'; X=$(printf safe); rm -rf $X",
+          "functions[printf]='echo docs'; X=$(printf safe); rm -rf $X",
+          "\\printf() { echo docs; }; X=$(printf safe); rm -rf $X",
+          'pwd() { echo docs; }; rm -rf "$(pwd)"',
+          "echo () { echo docs; }; X=$(echo safe); rm -rf $X",
+        ],
+        ['rm "$(echo a.txt)"'],
+      );
+    });
+
+    describe("F3. after a command name a ( is a pattern, and a body that could be a command list is checked as one too", () => {
+      cases(
+        [
+          `rm -rf !(${a600}|src)`,
+          `rm -rf @(${a600}|docs)`,
+          "rm -rf (docs| x)",
+          `chmod -R 000 !(${a600}|src)`,
+          "nohup ({rm,-rf,docs})",
+          "make -C src (rm -rf docs)",
+          "echo x (rm -rf docs; true)",
+          // L-a: more words after which a ( is a subshell
+          "repeat 2 (rm -rf docs)",
+          "foreach x (rm -rf docs)",
+        ],
+        ["rm -rf src/@(a|b)", "echo (x)"],
+      );
+    });
+
+    it("L-b. known limit: a function the guard cannot see through", () => {
+      // `f` can print anything; only printf, echo, pwd and git rev-parse are evaluated, and a substitution of any other
+      // command is left as an unknown word.
+      expect(bash('f(){ echo docs; }; rm -rf "$(f)"')).toEqual({ allow: true });
+    });
+  });
+
+  describe("third review (D1, P1-P3)", () => {
+    describe("D1. a cd that is not followed by a shell the guard can see does not narrow rm -rf .", () => {
+      cases(
+        [
+          "cd src && builtin eval 'cd ..' && rm -rf .",
+          "cd src && command eval 'cd ..' && rm -rf .",
+          "x=eval && cd src && $x 'cd ..' && rm -rf .",
+          "cd src && trap 'cd ..' DEBUG && rm -rf .",
+          "pushd src && cd +1 && rm -rf .",
+          "pushd src && pushd +1 && rm -rf .",
+          "cd src && builtin source ./x && rm -rf .",
+          "cd src && command . ./x && rm -rf .",
+          "pushd src && popd && rm -rf .",
+          "cd src && eval cd .. && rm -rf .",
+        ],
+        ["cd src && rm -rf .", "pushd /tmp/x && rm -rf * && popd"],
+      );
+      it("known limit: the git relaxations of #41 were declined", () => {
+        // decide() cannot see shell state (aliases such as oh-my-zsh's `-`, options, traps, sourced files), so
+        // `cd src && git checkout main -- .` stays blocked like `git checkout main -- .`. Bare HEAD is still allowed.
+        for (const c of [
+          "cd src && git checkout main -- .",
+          "git -C src checkout main -- .",
+          "cd .. && git -C proj checkout main -- .",
+        ])
+          expect(blocked(bash(c)), c).toBeDefined();
+        expect(bash("cd src && git checkout HEAD -- .")).toEqual({ allow: true });
+      });
+    });
+
+    describe("P1. shadowing is decided from the commands of the line", () => {
+      cases(
+        [
+          "functions+=([printf]='echo docs'); X=$(printf safe); rm -rf $X",
+          "functions[printf]='echo docs'; X=$(printf safe); rm -rf $X",
+          ". ./f.sh; X=$(printf safe); rm -rf $X",
+          'source ./f.sh && rm -rf "$(printf safe)"',
+          "eval 'printf() { echo docs; }'; X=$(printf safe); rm -rf $X",
+          "alias printf='echo docs'; X=$(printf safe); rm -rf $X",
+        ],
+        [
+          'corepack enable && TMP=$(mktemp -d) && rm -rf "$TMP"',
+          'git commit -m "add alias support" && TMP=$(mktemp -d); rm -rf $TMP',
+          'cd apps/web && rm -rf * && git commit -m "call init()"',
+          'git commit -m "call echo()" && X=$(mktemp -d); rm -rf $X',
+        ],
+      );
+    });
+
+    it("P3. known limit: a cd after a ; does not narrow", () => {
+      // `nvm use` may fail and `;` runs the next command anyway, so `cd apps/web && rm -rf *` is read as a delete in the root.
+      expect(blocked(bash("nvm use; cd apps/web && rm -rf *"))).toBeDefined();
+      expect(bash("nvm use && cd apps/web && rm -rf *")).toEqual({ allow: true });
+    });
+  });
+
+  describe("fourth review (prefixes hide eval, source and alias)", () => {
+    cases(
+      [
+        // shadowing behind a prefix
+        "time source ./f.sh; X=$(printf safe); rm -rf $X",
+        "command -- source ./f.sh; X=$(printf safe); rm -rf $X",
+        "command -p alias printf='echo docs'; X=$(printf safe); rm -rf $X",
+        "noglob source ./f.sh; X=$(printf safe); rm -rf $X",
+        "- source ./f.sh; X=$(printf safe); rm -rf $X",
+        "\\alias printf='echo docs'; X=$(printf safe); rm -rf $X",
+        "builtin alias printf='echo docs'; X=$(printf safe); rm -rf $X",
+        "command -p eval 'printf(){ echo docs; }'; X=$(printf safe); rm -rf $X",
+        // narrowing behind a prefix
+        "cd src && command -p eval 'cd ..' && rm -rf .",
+        "cd src && time eval 'cd ..' && rm -rf .",
+        "cd src && noglob eval 'cd ..' && rm -rf .",
+        "cd src && - eval 'cd ..' && rm -rf .",
+        "cd src && builtin trap 'cd ..' DEBUG && rm -rf .",
+        "cd src && command . ./f && rm -rf .",
+        "cd src && cd +1 && rm -rf .",
+        "cd src && up && git checkout main -- .",
+      ],
+      [
+        "cd src && rm -rf .",
+        "cd src && rm -rf ./x",
+        'X=$(mktemp -d); rm -rf "$X"',
+        "git checkout HEAD -- .",
+        "ls . && rm -rf dist",
+      ],
+    );
+  });
+
+  describe("fifth review (autoload, fpath, mapfile -C)", () => {
+    cases(
+      [
+        "FPATH=.; autoload -Uz printf; X=$(printf safe); rm -rf $X",
+        "fpath=(.); autoload -Uz printf; X=$(printf safe); rm -rf $X",
+        'FPATH=. zsh -c "autoload printf; rm -rf \\$(printf safe)"',
+        "autoload -Uz printf; X=$(printf safe); rm -rf $X",
+        "mapfile -c 1 -C 'source ./f.sh' a < /etc/hostname; X=$(printf safe); rm -rf $X",
+        'readarray -c 1 -C "source ./f.sh" a < /etc/hostname; X=$(printf safe); rm -rf $X',
+        "cd src && mapfile -c 1 -C 'cd ..;:' a < /etc/hostname && rm -rf .",
+      ],
+      ["cd src && rm -rf ."],
     );
   });
 });
