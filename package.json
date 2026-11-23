@@ -1,8 +1,16 @@
 {
   "name": "@artisanxl/create-monorepo",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Scaffold a guard-railed TypeScript monorepo",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ArtisanXL/create-monorepo.git"
+  },
+  "homepage": "https://github.com/ArtisanXL/create-monorepo#readme",
+  "bugs": {
+    "url": "https://github.com/ArtisanXL/create-monorepo/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=24"

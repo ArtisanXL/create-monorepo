@@ -6,8 +6,6 @@
       "!templates",
       "templates/root/scripts/worktree-lib.mjs",
       "templates/root/scripts/worktree-lib.test.mjs",
-      "!scaffold-monorepo.sh",
-      "!parts",
       "!**/*.md"
     ]
   },
