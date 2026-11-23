@@ -3,7 +3,13 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { hasDirectiveLines } from "../src/blocks.ts";
-import { closureOf, type Selection } from "../src/components.ts";
+import {
+  closureOf,
+  RUNTIMES,
+  type Runtime,
+  runtimeSupportError,
+  type Selection,
+} from "../src/components.ts";
 import { scaffoldFixture } from "./support/fixture.ts";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -11,8 +17,8 @@ afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((c) => c()));
 });
 
-async function generate(selection: Selection) {
-  const { dir, cleanup } = await scaffoldFixture({ selection });
+async function generate(selection: Selection, runtime: Runtime = "node") {
+  const { dir, cleanup } = await scaffoldFixture({ selection, runtime });
   cleanups.push(cleanup);
   const read = (rel: string) => readFile(join(dir, rel), "utf8");
   const json = async (rel: string) => JSON.parse(await read(rel));
@@ -43,16 +49,25 @@ const DB_FILES = [
   "docs/adr/0004-worktree-isolation.md",
 ];
 
-describe.each([
+const SELECTIONS: [string, Selection][] = [
   ["api", API],
   ["web", WEB],
   ["worker", WORKER],
   ["library", LIBRARY],
   ["db only", { apps: [], packages: ["db"] } satisfies Selection],
   ["web + domain", { apps: ["web"], packages: ["domain"] } satisfies Selection],
-])("generated repo for %s", (_name, selection) => {
+];
+
+// The invariant sweep: every Selection x Runtime, restricted to the allowed combinations.
+const SWEEP = SELECTIONS.flatMap(([name, selection]) =>
+  RUNTIMES.filter((r) => runtimeSupportError(closureOf(selection), r) === undefined).map(
+    (runtime) => [`${name} on ${runtime}`, selection, runtime] as const,
+  ),
+);
+
+describe.each(SWEEP)("generated repo for %s", (_name, selection, runtime) => {
   it("has no leftover directives or tokens, valid JSON, and passes its own arch check", async () => {
-    const repo = await generate(selection);
+    const repo = await generate(selection, runtime);
     for (const f of await repo.files()) {
       const text = await repo.read(f);
       expect(hasDirectiveLines(text), f).toBe(false);
@@ -64,7 +79,7 @@ describe.each([
   });
 
   it("generates exactly the Closure's components and records the rest as deferred", async () => {
-    const repo = await generate(selection);
+    const repo = await generate(selection, runtime);
     const closure = closureOf(selection);
     const arch = await repo.json("architecture.json");
     const present = Object.keys(arch.packages).map((p) => p.split("/")[1]);
@@ -73,6 +88,8 @@ describe.each([
     for (const n of ["api", "web", "worker", "core", "db", "domain", "contracts"]) {
       expect(deferred.includes(n), n).toBe(!closure.has(n as never));
     }
+    // Only `cloudflare` is recorded; a missing field means node.
+    expect(arch.runtime).toBe(runtime === "cloudflare" ? "cloudflare" : undefined);
     // References to absent Components are pruned.
     const known = new Set(Object.keys(arch.packages));
     for (const entry of Object.values(arch.packages) as {
@@ -244,5 +261,28 @@ describe("review fixes: text that follows the Closure", () => {
     expect(dbOnly).toContain("worktree:setup");
     expect(dbOnly).not.toContain("PASEO_PORT");
     expect(await block(FULL)).toContain("`pnpm dev`: all apps. Postgres via");
+  });
+});
+
+describe("Runtime axis (ADR-0005)", () => {
+  it("packages-only output differs between node and cloudflare only by the runtime line", async () => {
+    const node = await generate(LIBRARY, "node");
+    const cf = await generate(LIBRARY, "cloudflare");
+    expect(await cf.files()).toEqual(await node.files());
+    for (const f of await node.files()) {
+      const a = await node.read(f);
+      const b = await cf.read(f);
+      if (f === "architecture.json") {
+        expect(b.replace('  "runtime": "cloudflare",\n', "")).toBe(a);
+        expect(b).toContain('  "runtime": "cloudflare",\n');
+      } else {
+        expect(b, f).toBe(a);
+      }
+    }
+  });
+
+  it("does not record a Runtime for node", async () => {
+    const repo = await generate(LIBRARY, "node");
+    expect(await repo.read("architecture.json")).not.toContain("runtime");
   });
 });

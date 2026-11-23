@@ -9,9 +9,12 @@ import {
   isAppName,
   isComponentName,
   isPackageName,
+  isRuntime,
   PACKAGE_NAMES,
   type PackageName,
+  RUNTIMES,
   type Runtime,
+  runtimeSupportError,
   type Selection,
   sameClosure,
   selectionOf,
@@ -20,7 +23,7 @@ import { isPmName, PM_NAMES, type PmName } from "./pm/index.ts";
 import type { Options } from "./scaffold.ts";
 
 export const USAGE =
-  "Usage: create-monorepo <target-dir> [--apps api,web,worker|none] [--packages domain,contracts,db,core] [--scope @app] [--db-prefix app] [--pm pnpm] [--no-install] [-y|--yes]";
+  "Usage: create-monorepo <target-dir> [--apps api,web,worker|none] [--packages domain,contracts,db,core] [--scope @app] [--db-prefix app] [--pm pnpm] [--runtime node|cloudflare] [--no-install] [-y|--yes]";
 
 /** A user-facing input error; the CLI maps it to a non-zero exit code. */
 export class OptionsError extends Error {
@@ -277,11 +280,64 @@ export async function resolveOptions(
   if (!isPmName(pm))
     throw new OptionsError(`Unsupported --pm '${pm}'. Supported: ${PM_NAMES.join(", ")}`);
 
+  const runtime = await resolveRuntime(values, targetPath, interactive, prompter, fsProbe);
+  const unsupported = runtimeSupportError(closureOf(selection), runtime);
+  if (unsupported) throw new OptionsError(unsupported);
+
   let install = !values["no-install"];
   if (install && interactive)
     install = uncancel(await prompter.confirm("Install dependencies?", true));
 
-  return { target: targetPath, scope, dbPrefix, pm, install, selection, runtime: DEFAULT_RUNTIME };
+  return { target: targetPath, scope, dbPrefix, pm, install, selection, runtime };
+}
+
+/** The Runtime recorded by architecture.json: only `cloudflare` is written, a missing field is node. */
+function runtimeFromArchitecture(text: string): Runtime {
+  let runtime: unknown;
+  try {
+    runtime = (JSON.parse(text) as { runtime?: unknown } | null)?.runtime;
+  } catch {
+    throw new OptionsError("architecture.json exists but cannot be read (invalid JSON)");
+  }
+  if (runtime === undefined) return DEFAULT_RUNTIME;
+  if (typeof runtime !== "string" || !isRuntime(runtime)) {
+    throw new OptionsError(
+      `architecture.json records an unknown runtime ${JSON.stringify(runtime)}. Known: ${RUNTIMES.join(", ")}.`,
+    );
+  }
+  return runtime;
+}
+
+/**
+ * The Runtime to generate. A target that already has architecture.json keeps the Runtime it
+ * records; a flag may only restate it. Otherwise: flag, then prompt (after the package manager),
+ * then `node`.
+ */
+async function resolveRuntime(
+  values: ParsedArgs["values"],
+  targetPath: string,
+  interactive: boolean,
+  prompter: Prompter,
+  fsProbe: FsProbe,
+): Promise<Runtime> {
+  const flag = values.runtime;
+  if (flag !== undefined && !isRuntime(flag)) {
+    throw new OptionsError(`Unsupported --runtime '${flag}'. Supported: ${RUNTIMES.join(", ")}`);
+  }
+  const recorded = await fsProbe.readText(resolve(targetPath, "architecture.json"));
+  if (recorded !== undefined) {
+    const existing = runtimeFromArchitecture(recorded);
+    if (flag !== undefined && flag !== existing) {
+      throw new OptionsError(
+        `--runtime ${flag} conflicts with the existing architecture.json, whose runtime is ${existing}. Changing the Runtime of an existing repo needs an accepted ADR (docs/adr/0005-runtime-cloudflare-workers.md); remove the flag to keep it.`,
+      );
+    }
+    return existing;
+  }
+  if (flag !== undefined) return flag;
+  if (!interactive) return DEFAULT_RUNTIME;
+  const answer = uncancel(await prompter.select("Runtime", RUNTIMES, DEFAULT_RUNTIME));
+  return answer as Runtime;
 }
 
 /**
@@ -364,6 +420,7 @@ function parse(argv: readonly string[]) {
       scope: { type: "string" },
       "db-prefix": { type: "string" },
       pm: { type: "string" },
+      runtime: { type: "string" },
       "no-install": { type: "boolean", default: false },
       yes: { type: "boolean", short: "y", default: false },
       help: { type: "boolean", short: "h", default: false },

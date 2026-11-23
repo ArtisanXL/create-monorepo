@@ -7,8 +7,12 @@ import {
   FULL_CONTEXT,
   FULL_SELECTION,
   isGenerated,
+  RUNTIME_OWNED_FILES,
+  RUNTIMES,
+  runtimeSupportError,
   selectionOf,
 } from "../src/components.ts";
+import { listTemplateFiles } from "../src/templates.ts";
 
 const names = (apps: string[], packages: string[] = []) => [
   ...closureOf({ apps: apps as never, packages: packages as never }),
@@ -82,5 +86,48 @@ describe("file ownership", () => {
       expect(isGenerated(f, closure), f).toBe(false);
     }
     expect(isGenerated("apps/web/src/main.tsx", closure)).toBe(true);
+  });
+});
+
+describe("Runtime ownership (ADR-0005)", () => {
+  const templates = listTemplateFiles();
+
+  it("maps only paths that exist in templates", async () => {
+    const dests = new Set((await templates).map((t) => t.dest));
+    for (const path of Object.keys(RUNTIME_OWNED_FILES)) expect(dests.has(path), path).toBe(true);
+  });
+
+  it("gives no destination path two writers under either Runtime", async () => {
+    for (const runtime of RUNTIMES) {
+      const context = contextOf(FULL_SELECTION, runtime);
+      const writers = new Map<string, number>();
+      for (const { dest } of await templates) {
+        if (isGenerated(dest, context)) writers.set(dest, (writers.get(dest) ?? 0) + 1);
+      }
+      for (const [dest, n] of writers) expect(n, `${runtime}: ${dest}`).toBe(1);
+    }
+  });
+
+  it("only generates a runtime-owned path under its Runtime", () => {
+    const owned = { ...RUNTIME_OWNED_FILES, "x/only-cf.ts": "cloudflare" } as const;
+    expect(isGenerated("x/only-cf.ts", contextOf(FULL_SELECTION, "cloudflare"), owned)).toBe(true);
+    expect(isGenerated("x/only-cf.ts", contextOf(FULL_SELECTION, "node"), owned)).toBe(false);
+  });
+});
+
+describe("Runtime support", () => {
+  it("accepts node with every Selection and cloudflare with packages only", () => {
+    expect(runtimeSupportError(FULL_CLOSURE, "node")).toBeUndefined();
+    expect(
+      runtimeSupportError(closureOf({ apps: [], packages: ["domain", "db"] }), "cloudflare"),
+    ).toBeUndefined();
+  });
+
+  it("rejects cloudflare when any App is in the Closure, as not yet supported", () => {
+    for (const app of ["api", "web", "worker"] as const) {
+      expect(runtimeSupportError(closureOf({ apps: [app], packages: [] }), "cloudflare")).toMatch(
+        new RegExp(`not yet supported.*${app}`),
+      );
+    }
   });
 });
