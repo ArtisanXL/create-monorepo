@@ -51,3 +51,13 @@ allowBuilds:
 `,
   });
 });
+
+it("pnpm allows workerd's build script only when the catalog contains wrangler", () => {
+  const withWrangler = pnpm.renderFiles({ typescript: "~5.0.0", wrangler: "^4.0.0" });
+  expect(withWrangler["pnpm-workspace.yaml"]).toContain(
+    "allowBuilds:\n  esbuild: true\n  workerd: true\n",
+  );
+  expect(pnpm.renderFiles({ typescript: "~5.0.0" })["pnpm-workspace.yaml"]).not.toContain(
+    "workerd",
+  );
+});

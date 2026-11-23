@@ -639,8 +639,17 @@ describe("resolveOptions: runtime (ADR-0005)", () => {
     expect(error.message).toMatch(/runtime/);
   });
 
-  it("rejects cloudflare with any App in the Closure as not yet supported", async () => {
-    for (const apps of ["api", "web", "worker"]) {
+  it("accepts cloudflare with the api App alone", async () => {
+    const { options } = await resolve(
+      ["proj", "--apps", "api", "--runtime", "cloudflare"],
+      {},
+      false,
+    );
+    expect(options.runtime).toBe("cloudflare");
+  });
+
+  it("rejects cloudflare with web or worker in the Closure as not yet supported", async () => {
+    for (const apps of ["web", "worker", "api,web"]) {
       const error = await failure(["proj", "--apps", apps, "--runtime", "cloudflare"]);
       expect(error).toBeInstanceOf(OptionsError);
       expect((error as Error).message).toMatch(/not yet supported/);

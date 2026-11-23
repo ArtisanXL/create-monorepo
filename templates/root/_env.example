@@ -1,5 +1,5 @@
 NODE_ENV=development
-@if api
+@if api node
 PORT=3000
 @endif
 @if db

@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { hasDirectiveLines } from "../src/blocks.ts";
 import {
+  COMPATIBILITY_DATE,
   closureOf,
+  HYPERDRIVE_BINDING,
   RUNTIMES,
   type Runtime,
   runtimeSupportError,
@@ -281,8 +283,103 @@ describe("Runtime axis (ADR-0005)", () => {
     }
   });
 
+  it("packages-only output stays equal across Runtimes when db is in the Closure", async () => {
+    const dbOnly: Selection = { apps: [], packages: ["db"] };
+    const node = await generate(dbOnly, "node");
+    const cf = await generate(dbOnly, "cloudflare");
+    expect(await cf.files()).toEqual(await node.files());
+    for (const f of await node.files()) {
+      const [a, b] = [await node.read(f), await cf.read(f)];
+      expect(f === "architecture.json" ? b.replace('  "runtime": "cloudflare",\n', "") : b, f).toBe(
+        a,
+      );
+    }
+  });
+
   it("does not record a Runtime for node", async () => {
     const repo = await generate(LIBRARY, "node");
     expect(await repo.read("architecture.json")).not.toContain("runtime");
+  });
+});
+
+describe("api as a Cloudflare Worker (ADR-0005)", () => {
+  const node = () => generate(API, "node");
+  const cf = () => generate(API, "cloudflare");
+
+  it("generates the Worker files and leaves out the Node-only ones", async () => {
+    const files = await (await cf()).files();
+    expect(files).toContain("apps/api/wrangler.jsonc");
+    expect(files).toContain("apps/api/src/cloudflare.ts");
+    expect(files).not.toContain("apps/api/src/server.ts");
+    expect(files).not.toContain("apps/api/tsdown.config.ts");
+    const nodeFiles = await (await node()).files();
+    expect(nodeFiles).toContain("apps/api/src/server.ts");
+    expect(nodeFiles).toContain("apps/api/tsdown.config.ts");
+    expect(nodeFiles).not.toContain("apps/api/wrangler.jsonc");
+    expect(nodeFiles).not.toContain("apps/api/src/cloudflare.ts");
+  });
+
+  it("configures nodejs_compat, the generator's compatibility date and a Hyperdrive placeholder", async () => {
+    const wrangler = await (await cf()).read("apps/api/wrangler.jsonc");
+    expect(wrangler).toContain('"main": "src/cloudflare.ts"');
+    expect(wrangler).toContain('"nodejs_compat"');
+    expect(wrangler).toContain(`"compatibility_date": "${COMPATIBILITY_DATE}"`);
+    expect(COMPATIBILITY_DATE).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(wrangler).toContain(`"binding": "${HYPERDRIVE_BINDING}"`);
+    expect(wrangler).toMatch(/"id": "[^"]*REPLACE[^"]*"/);
+  });
+
+  it("reads the connection string from the Hyperdrive binding, per request", async () => {
+    const repo = await cf();
+    const entry = await repo.read("apps/api/src/cloudflare.ts");
+    expect(entry).toContain("createApp");
+    expect(entry).toContain(`${HYPERDRIVE_BINDING}.connectionString`);
+    expect(entry).toContain("createDb(");
+    expect(await repo.read("apps/api/src/env.ts")).toContain(HYPERDRIVE_BINDING);
+    expect(await repo.read("apps/api/src/env.ts")).not.toContain("process.env");
+    // `db` stays Runtime-neutral: same bytes under both Runtimes, no Workers types.
+    const db = await repo.read("packages/db/src/index.ts");
+    expect(db).toBe(await (await node()).read("packages/db/src/index.ts"));
+    expect(db).not.toMatch(/cloudflare|workers/i);
+  });
+
+  it("has Worker scripts, wrangler, and no Node-only dependencies", async () => {
+    const pkg = await (await cf()).json("apps/api/package.json");
+    expect(pkg.scripts.typecheck).toBe("wrangler types && tsc -p .");
+    expect(pkg.scripts.build).toBe("wrangler deploy --dry-run --outdir dist");
+    expect(pkg.scripts.deploy).toBe("wrangler deploy");
+    expect(pkg.scripts["deploy:dry-run"]).toBe("wrangler deploy --dry-run");
+    expect(pkg.scripts.start).toBeUndefined();
+    const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+    expect(deps.wrangler).toBe("catalog:");
+    for (const d of ["@hono/node-server", "tsdown", "tsx"]) expect(deps[d], d).toBeUndefined();
+    expect(deps.hono).toBe("catalog:");
+    const root = await (await cf()).read("pnpm-workspace.yaml");
+    expect(root).toMatch(/^ {2}"wrangler": /m);
+    expect(root).not.toMatch(/node-server|tsdown|tsx/);
+    expect(root).toContain("  workerd: true\n");
+  });
+
+  it("generates Workers types before typecheck, gitignored and outside the repo's checks", async () => {
+    const repo = await cf();
+    expect(await repo.read("apps/api/tsconfig.json")).toContain("worker-configuration.d.ts");
+    expect(await repo.read(".gitignore")).toContain("worker-configuration.d.ts");
+    expect(await (await node()).read(".gitignore")).not.toContain("worker-configuration");
+    expect(await (await node()).read("apps/api/tsconfig.json")).not.toContain("worker-config");
+    // `nodejs_compat` needs @types/node.
+    expect(await repo.read("tsconfig.base.json")).toContain('"types": ["node"]');
+    expect(await repo.read("pnpm-workspace.yaml")).toContain('"@types/node"');
+  });
+
+  it("runs the dry-run in the generated CI", async () => {
+    const ci = await (await cf()).read(".github/workflows/ci.yml");
+    expect(ci).toContain("deploy:dry-run");
+    expect(await (await node()).read(".github/workflows/ci.yml")).not.toContain("dry-run");
+  });
+
+  it("leaves Node output without wrangler or workerd", async () => {
+    const repo = await node();
+    expect(await repo.read("pnpm-workspace.yaml")).not.toMatch(/wrangler|workerd/);
+    expect(await repo.read("apps/api/package.json")).not.toContain("wrangler");
   });
 });

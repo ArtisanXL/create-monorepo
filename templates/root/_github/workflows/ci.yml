@@ -13,3 +13,6 @@ __CI_SETUP__
       - run: __INSTALL_FROZEN__
       - run: __RUN__ verify
       - run: __RUN__ build
+@if cloudflare api
+      - run: __FILTER__ __SCOPE__/api deploy:dry-run
+@endif

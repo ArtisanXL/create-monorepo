@@ -4,8 +4,10 @@ import { dirname, join } from "node:path";
 import { resolveBlocks } from "./blocks.ts";
 import { claudeBlockHash, hasBlock, upsertBlock } from "./claude-md.ts";
 import {
+  COMPATIBILITY_DATE,
   contextOf,
   FULL_SELECTION,
+  HYPERDRIVE_BINDING,
   isGenerated,
   type Runtime,
   type Selection,
@@ -81,6 +83,8 @@ export const CORE_TOKENS = [
   "__RUN__",
   "__CATALOG_FILE__",
   "__CLAUDE_SHA__",
+  "__COMPATIBILITY_DATE__",
+  "__HYPERDRIVE_BINDING__",
 ] as const;
 
 const FORMAT_FLAGS = [
@@ -223,6 +227,8 @@ export function plan(g: Gathered): Plan {
     ["__PM__", pm.name],
     ["__RUN__", pm.commands.run.join(" ")],
     ["__CATALOG_FILE__", pm.catalogFile],
+    ["__COMPATIBILITY_DATE__", COMPATIBILITY_DATE],
+    ["__HYPERDRIVE_BINDING__", HYPERDRIVE_BINDING],
     ...(Object.entries(pm.tokens) as [string, string][]),
   ];
   const block = fillTemplate(g.blockText, baseValues);
