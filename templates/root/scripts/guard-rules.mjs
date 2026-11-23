@@ -631,6 +631,10 @@ function directRule(ctx, cmd, parsed) {
   const env = { contract, root, expand, fold: f, relsOf };
   const claudeMd = f("CLAUDE.md");
 
+  // One regex for every printf-built variable name on the line, built once per decision.
+  const pNames = [...new Set(printfNames(cmd))];
+  const printfRef = pNames.length ? new RegExp(`\\$(?:(?:${pNames.join("|")})\\b|\\{(?:${pNames.join("|")})[}:#%/^,@\\[+-])`) : undefined;
+
   const writeRels = [];
   for (const r of parsed.redirects) {
     const rels = relsOf([r.target], r.bases);
@@ -668,7 +672,7 @@ function directRule(ctx, cmd, parsed) {
     });
     const msg = removeRule(env, c) ?? bulkRule(env, c);
     if (msg) return msg;
-    if (DELETERS.has(c.name) && printfNames(cmd).some((n) => c.args.some((a) => new RegExp(`\\$(?:${n}\\b|\\{${n}[}:#%/^,@\\[+-])`).test(a.text)))) return MSG.printfVar;
+    if (DELETERS.has(c.name) && printfRef && c.args.some((a) => printfRef.test(a.text))) return MSG.printfVar;
   }
   const runtimeMsg = runtimeTextRule(env, cmd, parsed);
   if (runtimeMsg) return runtimeMsg;

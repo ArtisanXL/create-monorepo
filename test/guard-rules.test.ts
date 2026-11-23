@@ -1692,3 +1692,30 @@ describe("guard decision: constructed bypasses (#37)", () => {
     );
   });
 });
+
+describe("guard decision: hardening follow-ups (#41)", () => {
+  const cases = (blockedCmds: string[], allowedCmds: string[]) => {
+    it.each(blockedCmds)("blocks %s", (cmd) => {
+      expect(blocked(bash(cmd)), cmd).toBeDefined();
+    });
+    it.each(allowedCmds)("allows %s", (cmd) => {
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+    });
+  };
+
+  describe("1. printf-variable check runs in linear time", () => {
+    it("decides 1,800 printf names x 2,500 arguments well under a second", () => {
+      const names = Array.from({ length: 1800 }, (_, i) => `V${i}=$(printf x)`).join("; ");
+      const args = Array.from({ length: 2500 }, (_, i) => `a${i}`).join(" ");
+      const cmd = `${names}; rm ${args}`;
+      bash(cmd); // warm up
+      const t0 = performance.now();
+      const r = bash(cmd);
+      const ms = performance.now() - t0;
+      expect(r).toEqual({ allow: true });
+      // Measured at ~1.4 s before the fix and well under 200 ms after; the bound is generous for CI.
+      expect(ms).toBeLessThan(1000);
+    });
+    cases(["X=$(printf docs); rm -rf $X", "X=$(printf a); Y=$(printf b); rm -rf ${Y}"], ["X=$(printf a); rm a.txt"]);
+  });
+});
