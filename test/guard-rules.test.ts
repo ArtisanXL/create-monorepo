@@ -1797,7 +1797,6 @@ describe("guard decision: hardening follow-ups (#41)", () => {
           "(cd src && git checkout main -- .)",
           "cd .. && git -C proj checkout main -- .",
         ],
-        [],
         [
           "cd src && rm -rf .",
           "cd src && cd .. && cd lib && rm -rf .",
