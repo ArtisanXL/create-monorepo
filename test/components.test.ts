@@ -138,12 +138,17 @@ describe("Runtime support", () => {
     ).toBe(undefined);
   });
 
-  it("rejects cloudflare with worker, or web together with api, as not yet supported", () => {
-    for (const apps of [["worker"], ["api", "worker"], ["api", "web"]] as const) {
-      const unsupported = (apps as readonly string[]).includes("worker") ? "worker" : "web";
+  it("accepts cloudflare with web together with api", () => {
+    expect(
+      runtimeSupportError(closureOf({ apps: ["api", "web"], packages: [] }), "cloudflare"),
+    ).toBe(undefined);
+  });
+
+  it("rejects cloudflare with worker as not yet supported", () => {
+    for (const apps of [["worker"], ["api", "worker"]] as const) {
       expect(
         runtimeSupportError(closureOf({ apps: [...apps], packages: [] }), "cloudflare"),
-      ).toMatch(new RegExp(`not yet supported with ${unsupported}\\b`));
+      ).toMatch(/not yet supported with worker\b/);
     }
   });
 });

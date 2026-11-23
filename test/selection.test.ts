@@ -468,3 +468,56 @@ describe("standalone web as a static-assets Cloudflare Worker (ADR-0005)", () =>
     expect(await (await node()).read(".github/workflows/ci.yml")).not.toContain("dry-run");
   });
 });
+
+describe("connected web forwards /api/* to api over a service binding (ADR-0005)", () => {
+  const CONNECTED: Selection = { apps: ["api", "web"], packages: [] };
+  const node = () => generate(CONNECTED, "node");
+  const cf = () => generate(CONNECTED, "cloudflare");
+  /** wrangler.jsonc allows comments; the generated ones are whole-line `//` comments. */
+  const jsonc = async (repo: Awaited<ReturnType<typeof cf>>, rel: string) =>
+    JSON.parse((await repo.read(rel)).replace(/^\s*\/\/.*$/gm, ""));
+
+  it("binds web's service binding to the api Worker's name (parsed from both configs)", async () => {
+    const repo = await cf();
+    const api = await jsonc(repo, "apps/api/wrangler.jsonc");
+    const web = await jsonc(repo, "apps/web/wrangler.jsonc");
+    expect(web.services).toHaveLength(1);
+    expect(web.services[0].service).toBe(api.name);
+    expect(web.name).not.toBe(api.name);
+    // The forwarder reads the binding by the name the config declares.
+    expect(await repo.read("apps/web/src/worker.ts")).toContain(`env.${web.services[0].binding}`);
+    expect(web.main).toBe("src/worker.ts");
+    expect(web.assets.run_worker_first).toEqual(["/api/*"]);
+    expect(web.assets.not_found_handling).toBe("single-page-application");
+    expect(web.compatibility_date).toBe(api.compatibility_date);
+  });
+
+  it("writes the forwarder and service binding only for connected web on cloudflare", async () => {
+    const standalone = await generate(WEB, "cloudflare");
+    expect(await standalone.files()).not.toContain("apps/web/src/worker.ts");
+    expect(await standalone.read("apps/web/wrangler.jsonc")).not.toContain("services");
+    expect(await (await node()).files()).not.toContain("apps/web/src/worker.ts");
+  });
+
+  it("reaches api in dev through the dev registry, not a Vite proxy", async () => {
+    const vite = await (await cf()).read("apps/web/vite.config.ts");
+    expect(vite).not.toContain("proxy");
+    expect(vite).toContain("persistState: false");
+    expect(await (await node()).read("apps/web/vite.config.ts")).toContain("proxy");
+  });
+
+  it("starts api and web through the same wrapper, so they share the worktree's registry", async () => {
+    const paseo = await (await cf()).json("paseo.json");
+    const wrapper = "node scripts/cloudflare-dev.mjs -- ";
+    expect(paseo.scripts.api.command.startsWith(wrapper)).toBe(true);
+    expect(paseo.scripts.web.command.startsWith(wrapper)).toBe(true);
+    expect(paseo.scripts.web.command).not.toContain("API_URL");
+    expect((await (await node()).json("paseo.json")).scripts.web.command).toContain("API_URL");
+  });
+
+  it("runs the web dry-run in CI alongside api's", async () => {
+    const ci = await (await cf()).read(".github/workflows/ci.yml");
+    expect(ci).toContain("@acme/api deploy:dry-run");
+    expect(ci).toContain("@acme/web deploy:dry-run");
+  });
+});

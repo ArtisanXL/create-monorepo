@@ -24,6 +24,17 @@ describe("cloudflare-dev", () => {
     });
   });
 
+  it("keeps api and web of one worktree on one registry, and two worktrees apart", () => {
+    const url = "postgres://u:p@localhost:5432/app";
+    const of = (toplevel) =>
+      devEnv({ binding: "HYPERDRIVE", databaseUrl: url, toplevel }).CLOUDFLARE_DEV_REGISTRY_PATH;
+    // Every App command of a worktree runs from its toplevel, so its Workers see each other...
+    expect(of("/work/app-a")).toBe(of("/work/app-a"));
+    // ...and web never finds the api Worker of another worktree.
+    expect(of("/work/app-a")).not.toBe(of("/work/app-b"));
+    expect(of("/work/app-b").startsWith("/work/app-a")).toBe(false);
+  });
+
   it("refuses to start without a DATABASE_URL, so a worktree never falls back to another database", () => {
     expect(() => devEnv({ binding: "HYPERDRIVE", databaseUrl: undefined, toplevel: "/w" })).toThrow(
       /DATABASE_URL/,

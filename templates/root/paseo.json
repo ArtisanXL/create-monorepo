@@ -25,8 +25,11 @@
 @if web
     "web": {
       "type": "service",
-@if api
+@if node api
       "command": "API_URL=http://127.0.0.1:$PASEO_SERVICE_API_PORT __FILTER__ __SCOPE__/web dev --host $HOST --port $PASEO_PORT --strictPort"
+@endif
+@if cloudflare api
+      "command": "node scripts/cloudflare-dev.mjs -- __FILTER__ __SCOPE__/web dev --host $HOST --port $PASEO_PORT --strictPort"
 @endif
 @if !api
       "command": "__FILTER__ __SCOPE__/web dev --host $HOST --port $PASEO_PORT --strictPort"

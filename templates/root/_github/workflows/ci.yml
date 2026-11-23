@@ -16,6 +16,6 @@ __CI_SETUP__
 @if cloudflare api
       - run: __FILTER__ __SCOPE__/api deploy:dry-run
 @endif
-@if cloudflare web !api
+@if cloudflare web
       - run: __FILTER__ __SCOPE__/web deploy:dry-run
 @endif
