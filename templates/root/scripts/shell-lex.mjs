@@ -20,7 +20,7 @@ export const baseName = (w) => w.replace(/^.*[\\/]/, "");
 const MAX_LEX_LEVEL = 6;
 const MAX_GROUP = 512;
 // Words after which a `(` opens a subshell, a case pattern or a function body, not a pattern group.
-const NO_GROUP = new Set(["function", "time", "coproc", "case", "select"]);
+const NO_GROUP = new Set(["function", "time", "coproc", "case", "select", "repeat", "for", "foreach", "while"]);
 // Stands in a word's text for each `$(...)` / backtick substitution in it; the inner command strings are in `word.subst`.
 export const SUBST = "\uE000";
 const ANSI_SIMPLE = { n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?" };
@@ -226,7 +226,9 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
       else if (ch === ")" && --d === 0) break;
       else if (d > 0 && j > from) bare += ch;
     }
-    group = { end: j, ok: j < cmd.length && bare.length > 0 && !/[\s;&]/.test(bare) };
+    const closed = j < cmd.length && cmd[j] === ")";
+    // `plain`: short, closed and free of spaces, `;`, `&`, braces and `$`. Anything else may be a command list too.
+    group = { end: j, closed, plain: closed && !/[\s;&{$`]/.test(bare), ok: bare.length > 0 };
     return group.ok;
   };
   // A command substitution inside the current word: its text becomes SUBST, its command string goes to `subst`
@@ -332,11 +334,18 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
       // It stands for `*` in the word, so `d@(ocs)` is the glob `d@*`; a zsh `(#i)` flag makes the rest of the word `*`.
       const flags = cmd[i + 1] === "#";
       const w = grow();
+      // After a command name `(` cannot start a subshell, so it is a pattern. A body that could also be a command list
+      // (long, or with a space, `;` or `&`) is checked as one too: neither reading is picked over the other.
+      if (!group.plain) {
+        w.loose ??= [];
+        w.loose.push(cmd.slice(i + 1, group.end));
+      }
       // The extglob operator (`@(`, `!(`, `+(`, `*(`, `?(`) is syntax, not part of the name.
       w.text = `${w.text.replace(/[@!+*?]$/, "")}*`;
       w.glob = true;
-      if (flags) w.swallow = true;
-      i = group.end;
+      // A pattern that is too long to read, or a zsh `(#i)` flag, makes the rest of the word `*`.
+      if (flags || !group.closed) w.swallow = true;
+      i = group.closed ? group.end : group.end - 1;
     } else if (c === "(") {
       if (cur?.text.endsWith("$")) cur.dyn = true;
       depth++;
@@ -401,6 +410,31 @@ const shellSegments = (cmd) => {
   const { segments, nested } = lexShell(cmd.replaceAll(SUBST, "\uFFFD"), state);
   return { segments, nested, complex: state.complex };
 };
+
+/**
+ * Whether a `cd` / `pushd` may narrow where the commands after it run: it, and every segment before it, are joined by `&&` alone
+ * (checked by the caller), it has exactly one operand, a literal folder (`text`), and for pushd not a stack index (`+1`, `-1`).
+ */
+function narrows(c, text) {
+  const operands = splitArgs(c.args).operands;
+  return operands.length === 1 && text !== undefined && literalDir(text) && !(c.name === "pushd" && /^[+-]/.test(text));
+}
+
+/**
+ * Lines on which no `cd` narrows anything: something may change the directory in a way the guard cannot follow. `popd`, a
+ * CDPATH assignment, `ln -s`, `eval`, `source`, `.` as a command, and any function definition.
+ */
+function narrowingOff(segments, cmd, fold) {
+  if (/(?:^|[\s;&|(])(?:function\s+\S|[\w.:-]+\s*\(\s*\))|--work-tree|--git-dir|GIT_WORK_TREE|GIT_DIR/.test(cmd)) return true;
+  return segments.some((seg) => {
+    const head = seg.words.find((w) => !KEYWORDS.has(w.text) && !ASSIGNMENT.test(w.text));
+    if (head && ["eval", "source", "."].includes(head.text)) return true;
+    return seg.words.some((w, k) => {
+      const name = fold(baseName(w.text));
+      return /^CDPATH=/.test(w.text) || w.text === "CDPATH" || name === "popd" || (name === "ln" && seg.words.slice(k + 1).some((x) => /^-[A-Za-z]*s|^--symbolic/.test(x.text)));
+    });
+  });
+}
 
 /** `$PWD`, `${PWD}` and `~+` at the start of a path are the working directory: `.`. */
 export const pwdWord = (t) => t.replace(/^(?:\$PWD|\$\{PWD\}|~\+)(?=\/|$)/, ".");
@@ -592,7 +626,7 @@ function printfValue(fmt, args) {
 // printf / echo / pwd as the shell's own command: bare, or from the standard folders.
 const trusted = (text, name) => text === name || text === `/usr/bin/${name}` || text === `/bin/${name}`;
 // A function or alias named like a builtin the guard evaluates, or `enable`, on the line.
-export const SHADOWS = /(?:^|[\s;&|(])(?:function\s+(?:printf|echo|pwd|command|builtin)\b|(?:printf|echo|pwd|command|builtin)\s*\(\s*\))|\balias\s+(?:printf|echo|pwd)\b|(?:^|[\s;&|(])enable\s+-[A-Za-z]*n/;
+export const SHADOWS = /\balias\b|functions\[|\benable\b|(?:printf|echo|pwd|command|builtin)\s*\(\s*\)|\bfunction\s+(?:printf|echo|pwd|command|builtin)\b/;
 
 /**
  * What `printf` or `echo` prints when its format and arguments are all literal (no `$`, no substitution, no glob) and every
@@ -660,7 +694,8 @@ function inlineSubst(w, ctx) {
       return v;
     }
     left.push(inner);
-    if (/^\s*(?:(?:command|builtin)\s+)?(?:[^\s/(`]*\/)*(?:printf|echo)(?![\w-])/.test(inner ?? "")) printf = true;
+    // With a builtin shadowed on the line, `$(pwd)` is as unknown as a printf of run-time text.
+    if (new RegExp(`^\\s*(?:(?:command|builtin)\\s+)?(?:[^\\s/(\`]*\\/)*(?:printf|echo${ctx.shadowed ? "|pwd" : ""})(?![\\w-])`).test(inner ?? "")) printf = true;
     return SUBST;
   });
   const out = { ...w, text, subst: left.length ? left : undefined, printf: w.printf || printf };
@@ -830,17 +865,12 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer =
   if (parsed.complex) return { commands, redirects, segments, nested: [], vars, budget, tooComplex: true };
   let chain = outer.chain ?? root;
   let bases = outer.bases ? [...outer.bases] : [root];
-  // `tight` is where a command really runs, and it is conservative: a `cd` narrows it only for the commands joined to it by `&&`
-  // (a `;` after it runs even when the `cd` failed), and only to a literal folder. A `cd` that is skipped, in a subshell, in a
-  // pipe, or followed by `popd`, a CDPATH assignment or `ln -s` leaves it at the folder the line started in.
+  // `tight` is where a command really runs, and it is conservative (see narrows): when unsure it stays at the folder the line started in.
   const baseTight = outer.tight ? [...outer.tight] : [root];
   let tight = baseTight;
-  const noNarrow = parsed.segments.some((seg) =>
-    seg.words.some((w, k) => {
-      const name = fold(baseName(w.text));
-      return /^CDPATH=/.test(w.text) || w.text === "CDPATH" || name === "popd" || (name === "ln" && seg.words.slice(k + 1).some((x) => /^-[A-Za-z]*s|^--symbolic/.test(x.text)));
-    }),
-  );
+  const noNarrow = narrowingOff(parsed.segments, cmd, fold);
+  // Whether every segment so far was joined to the next by `&&` alone.
+  let allAnd = true;
   const pwdSet = parsed.segments.some((seg) => seg.words.some((w) => /^PWD\+?=/.test(w.text)));
   const pwd = (t) => (pwdSet ? t : pwdWord(t));
   const shadowed = SHADOWS.test(cmd);
@@ -853,6 +883,8 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer =
   for (const [n, seg] of parsed.segments.entries()) {
     const conditional = prevSep === "&&" || prevSep === "||";
     if (prevSep !== "&&") tight = baseTight;
+    const clean = allAnd;
+    allAnd &&= seg.sep === "&&";
     prevSep = seg.sep;
     if (!applyVars(seg, vars, budget, conditional, loops.get(n), { root, shadowed })) return { commands, redirects, segments, nested: [...parsed.nested, ...loose], vars, budget, tooComplex: true };
     for (const r of seg.redirs) redirects.push({ op: r.op, target: r.target, bases });
@@ -866,7 +898,7 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer =
       if (c.name !== "cd" && c.name !== "pushd") continue;
       const dir = splitArgs(c.args).operands[0];
       const text = dir && pwd(dir.text);
-      if (seg.sep === "&&") tight = !noNarrow && text !== undefined && literalDir(text) ? tight.map((t) => path.resolve(t, expand(text))) : baseTight;
+      if (seg.sep === "&&") tight = clean && !noNarrow && narrows(c, text) ? tight.map((t) => path.resolve(t, expand(text))) : baseTight;
       if (!dir || dir.text === "-") continue;
       if (++cds > MAX_CDS) return { commands, redirects, segments, nested: [...parsed.nested, ...loose], vars, budget, tooComplex: true };
       chain = path.resolve(chain, expand(text));

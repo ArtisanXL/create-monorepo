@@ -1803,6 +1803,10 @@ describe("guard decision: hardening follow-ups (#41)", () => {
       it("known limit: a symlink made by an earlier call is not seen", () => {
         // `ln -s . s` ran in a call of its own; decide() sees one call and cannot tell that `s` is the project root.
         expect(bash("cd s && git checkout main -- .")).toEqual({ allow: true });
+        // A symlink made on the same line by code the guard does not read (`python3 -c "os.symlink('.', 's')"`) is the same.
+        expect(
+          bash(`python3 -c "import os; os.symlink('.', 's')" && cd s && git checkout main -- .`),
+        ).toEqual({ allow: true });
       });
     });
 
@@ -2267,6 +2271,93 @@ describe("guard decision: hardening follow-ups (#41)", () => {
           "git checkout -b feat origin/main",
         ],
       );
+    });
+  });
+
+  describe("second review (E1-E2, F1-F3, L-a, L-b)", () => {
+    const a600 = "a".repeat(600);
+    describe("E1. an echo with a backslash may be decoded by zsh", () => {
+      cases(
+        ["X=$(echo 'architecture\\x2ejson'); rm $X", "X=$(echo 'docs\\x2f'); rm -rf $X"],
+        ["X=$(echo a.txt); rm $X"],
+      );
+    });
+
+    it("E2. known limits: a cd target the guard cannot resolve widens a glob to the root (fail-closed)", () => {
+      // `rm -rf *` in an unknown folder could be the project root, so these are blocked although they are often harmless.
+      for (const c of [
+        "cd $TMPDIR && rm -rf *",
+        'TMP=$(mktemp -d) && cd "$TMP" && rm -rf *',
+        'cd "$dir" && rm -rf ./*',
+      ])
+        expect(blocked(bash(c)), c).toBeDefined();
+    });
+
+    describe("F1. cd narrows only along an unbroken && chain", () => {
+      cases(
+        [
+          "true || cd src && git checkout main -- .",
+          "true || cd src && rm -rf .",
+          "false || true || cd src && git checkout main -- .",
+          "echo a; cd src && git checkout main -- .",
+          "echo a | cat && cd src && git checkout main -- .",
+          "pushd src && pushd +1 && git checkout main -- .",
+          "pushd src && pushd -n .. && pushd +1 && git checkout main -- .",
+          "cd src && cd src . && git checkout main -- .",
+          "cd src && cd /src / && git checkout main -- .",
+          "cd src && eval cd .. && git checkout main -- .",
+          "cd src && source ./x.sh && git checkout main -- .",
+          "cd src && . ./x.sh && git checkout main -- .",
+          "up(){ cd ..; }; cd src && up && git checkout main -- .",
+          "function up { cd ..; }; cd src && up && git checkout main -- .",
+          "cd src && git --work-tree=.. checkout main -- .",
+          "cd src && GIT_WORK_TREE=.. git checkout main -- .",
+        ],
+        [
+          "echo a && cd src && git checkout main -- .",
+          "cd src && cd lib && git checkout main -- .",
+          "pushd src && git checkout main -- .",
+        ],
+      );
+    });
+
+    describe("F2. a shadowed printf, echo or pwd is not evaluated", () => {
+      cases(
+        [
+          "alias 'printf=echo docs'; X=$(printf safe); rm -rf $X",
+          "alias -- printf='echo docs'; X=$(printf safe); rm -rf $X",
+          "alias p=q printf='echo docs'; X=$(printf safe); rm -rf $X",
+          "functions[printf]='echo docs'; X=$(printf safe); rm -rf $X",
+          "\\printf() { echo docs; }; X=$(printf safe); rm -rf $X",
+          'pwd() { echo docs; }; rm -rf "$(pwd)"',
+          "echo () { echo docs; }; X=$(echo safe); rm -rf $X",
+        ],
+        ['rm "$(echo a.txt)"'],
+      );
+    });
+
+    describe("F3. after a command name a ( is a pattern, and a body that could be a command list is checked as one too", () => {
+      cases(
+        [
+          `rm -rf !(${a600}|src)`,
+          `rm -rf @(${a600}|docs)`,
+          "rm -rf (docs| x)",
+          `chmod -R 000 !(${a600}|src)`,
+          "nohup ({rm,-rf,docs})",
+          "make -C src (rm -rf docs)",
+          "echo x (rm -rf docs; true)",
+          // L-a: more words after which a ( is a subshell
+          "repeat 2 (rm -rf docs)",
+          "foreach x (rm -rf docs)",
+        ],
+        ["rm -rf src/@(a|b)", "echo (x)"],
+      );
+    });
+
+    it("L-b. known limit: a function the guard cannot see through", () => {
+      // `f` can print anything; only printf, echo, pwd and git rev-parse are evaluated, and a substitution of any other
+      // command is left as an unknown word.
+      expect(bash('f(){ echo docs; }; rm -rf "$(f)"')).toEqual({ allow: true });
     });
   });
 });

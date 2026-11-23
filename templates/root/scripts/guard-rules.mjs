@@ -485,11 +485,13 @@ function findPipeRule(env, parsed, idx) {
 }
 
 /** Variables the line sets from printf: `X=$(printf ...)`, `X=`printf ...``, `printf -v X ...`. */
-function printfNames(cmd) {
+function printfNames(cmd, shadowed) {
+  // With printf / echo / pwd redefined on the line, every command-built variable is unknown.
+  if (shadowed) return [...cmd.matchAll(/(?:^|[\s;&|(])([A-Za-z_]\w*)\+?=["']?(?:\$\(|`)/g)].map((m) => m[1]);
   if (!/printf|echo/.test(cmd)) return [];
   const out = [];
-  // printf, also behind `command` / `builtin` / a path, and `echo -e` with an escape.
-  for (const m of cmd.matchAll(/(?:^|[\s;&|(])([A-Za-z_]\w*)\+?=["']?(?:\$\(|`)\s*(?:(?:command|builtin)\s+|(?:[^\s/(`]*\/)+)?(?:printf\b|echo\s+-[A-Za-z]*e\b[^)`]*\\)|\bprintf\s+-v\s*([A-Za-z_]\w*)/g)) out.push(m[1] ?? m[2]);
+  // printf, also behind `command` / `builtin` / a path, and an echo with a backslash (zsh decodes it without -e).
+  for (const m of cmd.matchAll(/(?:^|[\s;&|(])([A-Za-z_]\w*)\+?=["']?(?:\$\(|`)\s*(?:(?:command|builtin)\s+|(?:[^\s/(`]*\/)+)?(?:printf\b|echo\b[^)`]*\\)|\bprintf\s+-v\s*([A-Za-z_]\w*)/g)) out.push(m[1] ?? m[2]);
   return out;
 }
 
@@ -761,7 +763,7 @@ function directRule(ctx, cmd, parsed) {
   const claudeMd = f("CLAUDE.md");
 
   // One regex for every printf-built variable name on the line, built once per decision.
-  const pNames = [...new Set(printfNames(cmd))];
+  const pNames = [...new Set(printfNames(cmd, parsed.shadowed))];
   const printfRef = pNames.length ? new RegExp(`\\$(?:(?:${pNames.join("|")})\\b|\\{(?:${pNames.join("|")})[}:#%/^,@\\[+-])`) : undefined;
 
   const writeRels = [];
