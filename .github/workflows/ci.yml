@@ -136,7 +136,10 @@ jobs:
             node scripts/cloudflare-dev.mjs -- pnpm --filter ./apps/api dev --ip 127.0.0.1 --port 8787 > "$RUNNER_TEMP/api-dev.log" 2>&1 &
           fi
           if has web; then
-            node scripts/cloudflare-dev.mjs -- pnpm --filter ./apps/web dev --host 127.0.0.1 --port 5173 --strictPort > "$RUNNER_TEMP/web-dev.log" 2>&1 &
+            # The dev wrapper is generated only with api or worker; standalone web has no bindings.
+            wrap=
+            if has api || has worker; then wrap="node scripts/cloudflare-dev.mjs --"; fi
+            $wrap pnpm --filter ./apps/web dev --host 127.0.0.1 --port 5173 --strictPort > "$RUNNER_TEMP/web-dev.log" 2>&1 &
           fi
           if has worker; then
             node scripts/cloudflare-dev.mjs -- pnpm --filter ./apps/worker dev --ip 127.0.0.1 --port 8788 > "$RUNNER_TEMP/worker-dev.log" 2>&1 &
