@@ -78,6 +78,9 @@ describe("shell lexer", () => {
     expect(r[0].words.map((w: { text: string }) => w.text)).toEqual(["rm", "-rf", "d*", "*x"]);
     expect(r[0].words.slice(2).every((w: { glob?: boolean }) => w.glob)).toBe(true);
     // a command-position `(` is still a subshell
-    expect(r.slice(1).map((s) => s.words.map((w: { text: string }) => w.text))).toEqual([["cd", "s"], ["ls"]]);
+    expect(r.slice(1).map((s) => s.words.map((w: { text: string }) => w.text))).toEqual([
+      ["cd", "s"],
+      ["ls"],
+    ]);
   });
 });

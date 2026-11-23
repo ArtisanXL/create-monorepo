@@ -18,6 +18,8 @@ const READ_ONLY_GIT = new Set(["log", "grep", "show", "diff", "status", "blame",
 export const baseName = (w) => w.replace(/^.*[\\/]/, "");
 
 const MAX_LEX_LEVEL = 6;
+// Stands in a word's text for each `$(...)` / backtick substitution in it; the inner command strings are in `word.subst`.
+export const SUBST = "\uE000";
 const ANSI_SIMPLE = { n: "\n", t: "\t", r: "\r", a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?" };
 
 // The `$'...'` string whose body starts at i: escapes are skipped (so `\'` does not end it) and decoded.
@@ -160,6 +162,8 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
     if (pending) {
       const p = pending;
       pending = null;
+      // The target of a redirect has no segment of its own: its substitutions are checked as nested strings.
+      if (w.loose) nested.push(...w.loose);
       if (p.op === "<" || p.op === "<<<") inputs.push({ op: p.op, target: w.text, dyn: w.dyn });
       else if (!(p.amp && /^(\d+|-)$/.test(w.text))) redirs.push({ op: p.op, target: w.text });
     } else words.push(w);
@@ -186,6 +190,7 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
   // Arithmetic (`$((..))`, `$[..]`) and backticks are scanned for commands; returns the new index.
   const expansion = (i) => {
     grow().dyn = true;
+    cur.opaque = true;
     if (cmd[i + 2] === "(") {
       const e = closeArith(cmd, i + 3);
       nested.push(cmd.slice(i + 3, e));
@@ -200,6 +205,18 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
   const inArgs = () => {
     const lead = words.find((w) => !KEYWORDS.has(w.text) && !ASSIGNMENT.test(w.text));
     return lead !== undefined && lead.text !== "function";
+  };
+  // A command substitution inside the current word: its text becomes SUBST, its command string goes to `subst`
+  // (and, outside double quotes, to `loose`, which the segmenter checks with the directories the word is in).
+  const substitute = (inner, loose) => {
+    grow().dyn = true;
+    cur.subst ??= [];
+    cur.subst.push(inner);
+    if (loose) {
+      cur.loose ??= [];
+      cur.loose.push(inner);
+    }
+    cur.text += SUBST;
   };
   let i = from;
   for (; i < cmd.length; i++) {
@@ -221,6 +238,10 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
     } else if (c === "$" && ((cmd[i + 1] === "(" && cmd[i + 2] === "(") || cmd[i + 1] === "[")) {
       i = expansion(i);
       grow().text += "0";
+    } else if (c === "$" && cmd[i + 1] === "(") {
+      const e = closeParen(cmd, i + 1, state, level);
+      substitute(cmd.slice(i + 2, e), true);
+      i = e;
     } else if (c === "'") {
       const e = cmd.indexOf("'", i + 1);
       const stop = e < 0 ? cmd.length : e;
@@ -239,14 +260,14 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
         } else if (cmd[i] === "$" && cmd[i + 1] === "(") {
           const e = closeParen(cmd, i + 1, state, level);
           nested.push(cmd.slice(i + 2, e));
-          cur.dyn = true;
+          substitute(cmd.slice(i + 2, e), false);
           i = e;
           continue;
         } else if (cmd[i] === "`") {
           let e = i + 1;
           while (e < cmd.length && cmd[e] !== "`") e += cmd[e] === "\\" ? 2 : 1;
           nested.push(cmd.slice(i + 1, e));
-          cur.dyn = true;
+          substitute(cmd.slice(i + 1, e), false);
           i = e;
           continue;
         }
@@ -309,9 +330,11 @@ function lexShell(cmd, state, from = 0, stopAtClose = false, level = 0) {
       depth = Math.max(0, depth - 1);
       end(";");
     } else if (c === "`") {
-      // An unquoted backtick ends the word but leaves its value to run time (`X=`cmd``).
-      if (cur !== null) cur.dyn = true;
-      end(";");
+      // An unquoted backtick is a substitution like `$(...)`: part of the word, its value left to run time (`X=`cmd``).
+      let e = i + 1;
+      while (e < cmd.length && cmd[e] !== "`") e += cmd[e] === "\\" ? 2 : 1;
+      substitute(cmd.slice(i + 1, e), true);
+      i = e;
     } else if (c === "\n" || c === ";") end(";");
     else if (c === "&" && cmd[i + 1] !== ">") {
       const sep = cmd[i + 1] === "&" ? "&&" : "&";
@@ -467,6 +490,118 @@ const ASSIGN_WORD = /^([A-Za-z_]\w*)(\+?)=/;
 // Commands that set the variables named by their bare arguments.
 const SETTERS = new Set(["read", "getopts", "mapfile", "readarray", "unset", "printf", "select", "for"]);
 
+// printf / echo escapes: \n \t \\ \xHH \uHHHH \NNN \0 ...
+function decodeEscapes(t) {
+  let out = "";
+  for (let i = 0; i < t.length; i++) {
+    if (t[i] !== "\\" || i + 1 >= t.length) {
+      out += t[i];
+      continue;
+    }
+    const n = t[++i];
+    if (Object.hasOwn(ANSI_SIMPLE, n)) out += ANSI_SIMPLE[n];
+    else if (n === "x" || n === "u" || n === "U") {
+      const m = new RegExp(`^[0-9a-fA-F]{1,${n === "x" ? 2 : n === "u" ? 4 : 8}}`).exec(t.slice(i + 1, i + 9));
+      const code = m ? Number.parseInt(m[0], 16) : Number.NaN;
+      if (m && code <= 0x10ffff) out += String.fromCodePoint(code);
+      else out += `\\${n}${m ? m[0] : ""}`;
+      i += m ? m[0].length : 0;
+    } else if (/[0-7]/.test(n)) {
+      const m = /^[0-7]{1,3}/.exec(t.slice(i, i + 3));
+      out += String.fromCharCode(Number.parseInt(m[0], 8) & 255);
+      i += m[0].length - 1;
+    } else out += `\\${n}`;
+  }
+  return out;
+}
+
+/** `printf FORMAT ARGS...` with %s %b %d %%; undefined for anything else (width, %q, ...). The format is reused while arguments remain. */
+function printfValue(fmt, args) {
+  let out = "";
+  let used = 0;
+  do {
+    let took = false;
+    for (let i = 0; i < fmt.length; i++) {
+      if (fmt[i] === "\\") {
+        const m = /^\\(?:x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|[0-7]{1,3}|.)/s.exec(fmt.slice(i));
+        out += decodeEscapes(m[0]);
+        i += m[0].length - 1;
+      } else if (fmt[i] !== "%") out += fmt[i];
+      else {
+        const conv = fmt[++i];
+        if (conv === "%") out += "%";
+        else if (conv === "s") out += args[used++] ?? "";
+        else if (conv === "b") out += decodeEscapes(args[used++] ?? "");
+        else if (conv === "d") {
+          const a = args[used++] ?? "0";
+          if (!/^-?\d+$/.test(a)) return undefined;
+          out += String(Number.parseInt(a, 10));
+        } else return undefined;
+        took = true;
+      }
+    }
+    if (!took) break;
+  } while (used < args.length);
+  return out;
+}
+
+/**
+ * What `printf` or `echo` prints when its format and arguments are all literal (no `$`, no substitution, no glob);
+ * undefined otherwise. Behind `command` / `builtin` / a path. `echo` decodes escapes (zsh does by default, bash with -e).
+ */
+export function staticOutput(words) {
+  let k = 0;
+  while (words[k] && (words[k].text === "command" || words[k].text === "builtin") && !words[k].quoted) k++;
+  const name = words[k] ? baseName(words[k].text) : "";
+  if ((name !== "printf" && name !== "echo") || words.slice(k).some((w) => w.dyn || w.glob || w.subst || /[$`]/.test(w.text))) return undefined;
+  const args = words.slice(k + 1).map((w) => w.text);
+  if (name === "echo") {
+    while (/^-[neE]+$/.test(args[0] ?? "")) args.shift();
+    return decodeEscapes(args.join(" "));
+  }
+  if (args[0] === "--") args.shift();
+  if (!args.length || args[0].startsWith("-")) return undefined;
+  return printfValue(args[0], args.slice(1));
+}
+
+/** The value of a command substitution `printf ...` / `echo ...` (trailing newlines stripped), or undefined. */
+function substValue(inner) {
+  const state = { complex: false };
+  const { segments, nested } = lexShell(inner, state);
+  if (state.complex || nested.length || segments.length !== 1 || segments[0].redirs.length || segments[0].inputs.length) return undefined;
+  const v = staticOutput(segments[0].words);
+  return v === undefined ? undefined : v.replace(/\n+$/, "");
+}
+
+/**
+ * Replaces the substitutions of a word whose output is known (printf / echo of literals) by their value. The rest stay as SUBST;
+ * `printf` is set when one of them is a printf or echo whose output is not known.
+ */
+function inlineSubst(w) {
+  if (!w.subst || w.opaque) return w;
+  const left = [];
+  let printf = false;
+  let k = 0;
+  const text = w.text.replace(new RegExp(SUBST, "g"), () => {
+    const inner = w.subst[k++];
+    const v = substValue(inner);
+    if (v !== undefined) {
+      // printf / echo of literals writes nothing, so it needs no check of its own.
+      if (w.loose) w.loose = w.loose.filter((x) => x !== inner);
+      return v;
+    }
+    left.push(inner);
+    if (/^\s*(?:(?:command|builtin)\s+)?(?:\S*\/)?(?:printf|echo)(?![\w-])/.test(inner)) printf = true;
+    return SUBST;
+  });
+  const out = { ...w, text, subst: left.length ? left : undefined, printf: w.printf || printf };
+  if (!left.length) {
+    out.dyn = false;
+    if (/[*?[]/.test(text) && !w.quoted) out.glob = true;
+  }
+  return out;
+}
+
 /** `$NAME` / `${NAME}` replaced by the value assigned earlier in the line; `$IFS` / `${IFS}` become a space. */
 function expandVars(text, vars, budget) {
   const spend = (v) => {
@@ -539,7 +674,9 @@ function applyVars(seg, vars, budget, conditional = false, loopInput = undefined
   const lead = seg.words.slice(from);
   const rest = lead.length && ASSIGNING.has(lead[0].text) ? lead.slice(1) : lead;
   if (rest.length && rest.every((w) => ASSIGN_WORD.test(w.text))) {
-    for (const w of rest) {
+    for (let w of rest) {
+      // `X=$(printf ...)` with literal arguments is a known value.
+      if (w.subst) w = inlineSubst(w);
       const m = ASSIGN_WORD.exec(w.text);
       const raw = w.text.slice(m[0].length);
       const value = expandVars(raw, vars, budget);
@@ -559,6 +696,11 @@ function applyVars(seg, vars, budget, conditional = false, loopInput = undefined
   if (setter)
     for (const w of seg.words.slice(at + 1)) if (/^[A-Za-z_]\w*$/.test(w.text)) vars.delete(w.text);
   seg.words = seg.words.flatMap((w) => {
+    if (w.subst) {
+      w = inlineSubst(w);
+      // An unquoted word that now has a known value splits on whitespace like an expanded variable.
+      if (!w.subst && !w.quoted && /\s/.test(w.text)) return w.text.split(/\s+/).filter(Boolean).map((t) => ({ ...w, text: t, fromVar: true, glob: w.glob || /[*?[]/.test(t) }));
+    }
     if (!w.text.includes("$")) return [w];
     const text = expandVars(w.text, vars, budget);
     if (text === w.text || budget.left < 0) return [w];
@@ -604,8 +746,9 @@ function loopInputs(segments) {
  * @param {string} root
  * @param {(t: string) => string} [expand] applied to every path word (home, case folding)
  * @param {(t: string) => string} [fold] applied to command names
- * @param {{ vars: Map<string, string>, budget: { left: number } }} [outer] variables assigned before this string
- *   runs (`X=a; bash -c 'rm $X'`) and the substitution budget shared with the strings around it
+ * @param {{ vars: Map<string, string>, budget: { left: number }, bases?: string[], tight?: string[], chain?: string }} [outer]
+ *   variables assigned before this string runs (`X=a; bash -c 'rm $X'`), the substitution budget shared with the strings
+ *   around it, and, for a `$(...)` in the middle of a line, the directories it runs in
  */
 export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer = { vars: new Map(), budget: { left: MAX_EXPANSION } }) {
   const vars = new Map(outer.vars);
@@ -616,9 +759,11 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer =
   if (cmd.length > MAX_COMMAND_LENGTH || budget.left < 0) return { commands, redirects, segments, nested: [], vars, budget, tooComplex: true };
   const parsed = shellSegments(cmd);
   if (parsed.complex) return { commands, redirects, segments, nested: [], vars, budget, tooComplex: true };
-  let chain = root;
-  let bases = [root];
-  let tight = [root];
+  let chain = outer.chain ?? root;
+  let bases = outer.bases ? [...outer.bases] : [root];
+  let tight = outer.tight ? [...outer.tight] : [root];
+  // Substitutions outside double quotes, each with the directories it runs in.
+  const loose = [];
   let cds = 0;
   let pipeStart = 0;
   let prevSep = "";
@@ -626,8 +771,9 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer =
   for (const [n, seg] of parsed.segments.entries()) {
     const conditional = prevSep === "&&" || prevSep === "||";
     prevSep = seg.sep;
-    if (!applyVars(seg, vars, budget, conditional, loops.get(n))) return { commands, redirects, segments, nested: parsed.nested, vars, budget, tooComplex: true };
+    if (!applyVars(seg, vars, budget, conditional, loops.get(n))) return { commands, redirects, segments, nested: [...parsed.nested, ...loose], vars, budget, tooComplex: true };
     for (const r of seg.redirs) redirects.push({ op: r.op, target: r.target, bases });
+    for (const w of seg.words) if (w.loose) for (const text of w.loose) loose.push({ text, bases, tight, chain });
     const found = commandsOf(seg.words, fold);
     const bodies = seg.heredocs.map((h) => h.body);
     segments.push({ words: seg.words, redirs: seg.redirs, inputs: seg.inputs, procSub: seg.procSub, pipeStart, bases, tight, name: found[0]?.name, sep: seg.sep, bodies });
@@ -637,7 +783,7 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer =
       if (c.name !== "cd" && c.name !== "pushd") continue;
       const dir = splitArgs(c.args).operands[0];
       if (!dir || dir.text === "-") continue;
-      if (++cds > MAX_CDS) return { commands, redirects, segments, nested: parsed.nested, vars, budget, tooComplex: true };
+      if (++cds > MAX_CDS) return { commands, redirects, segments, nested: [...parsed.nested, ...loose], vars, budget, tooComplex: true };
       chain = path.resolve(chain, expand(dir.text));
       bases = [...new Set([...bases, chain, path.resolve(root, expand(dir.text))])];
       if (seg.sep === "&&" || seg.sep === ";") tight = [chain];
@@ -669,5 +815,5 @@ export function targetsOf(cmd, root, expand = (t) => t, fold = (t) => t, outer =
     const interp = [seg, ...pipe].some((x) => x.words.some((w) => !w.quoted && INTERPRETERS.test(fold(baseName(w.text)))));
     if (interp) seg.codeBodies = seg.bodies;
   }
-  return { commands, redirects, segments, nested: parsed.nested, checked, vars, budget, tooComplex: false };
+  return { commands, redirects, segments, nested: [...parsed.nested, ...loose], checked, vars, budget, tooComplex: false };
 }
