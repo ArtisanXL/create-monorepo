@@ -8,11 +8,9 @@
 //     exit codes block, plus an explicit `timeout` (seconds; command hooks default to 600) above LIMIT_MS.
 //     The hook uses the documented exec form (`command: "node"` + `args`, no shell) so it also runs on
 //     Windows without Git Bash, where `$CLAUDE_PROJECT_DIR` is not expanded.
-//     UNVERIFIED RISK on old versions: the docs do not say which version added `args`, nor whether older
-//     versions ignore or reject unknown hook keys (`args`, `onFailure`). If a version ignores `args`, it
-//     would run a bare `node` (reads stdin as JS, exits 1 = non-blocking) and this guard would fail open;
-//     if it rejects the entry or the file, the guard would not run at all. Use a current Claude Code
-//     (v2.1.295+); CI arch-check remains the backstop.
+//     Requires Claude Code v2.1.295+: hook `args` (exec form) arrived in v2.1.139, and older versions
+//     ignore it, run a bare `node` (exit 1, non-blocking) and fail open. `onFailure` arrived in v2.1.295;
+//     whether v2.1.139-2.1.294 ignore that unknown key is unverified (believed ignored).
 //  2. This file is a supervisor for older versions and for a clear message: it runs the real decision
 //     (guard-worker.mjs → scripts/guard-rules.mjs) in a child Node process with a wall-clock limit and a
 //     heap cap, and maps every outcome except a clean exit 0 / exit 2 to a block.

@@ -190,6 +190,7 @@ describe("generated guard hook", () => {
       );
       expect(r.code).toBe(2);
       expect(r.stderr).toContain("The guard hook failed");
+      expect(r.stderr).toContain("ENOBUFS");
     });
 
     it("exit 2 with no stderr blocks with a reason", async () => {
