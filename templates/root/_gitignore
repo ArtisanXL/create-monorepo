@@ -6,7 +6,7 @@ coverage
 .env.*
 !.env.example
 *.tsbuildinfo
-@if cloudflare api
+@if cloudflare api|worker
 worker-configuration.d.ts
 .wrangler
 .dev.vars

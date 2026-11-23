@@ -69,6 +69,7 @@ describe("file ownership", () => {
     expect(componentsNeededBy("apps/web/src/lib/api.ts")).toEqual(["web", "api"]);
     expect(componentsNeededBy("compose.yaml")).toEqual(["db"]);
     expect(componentsNeededBy("docs/adr/0003-job-queue-pg-boss.md")).toEqual(["worker"]);
+    expect(componentsNeededBy("docs/adr/0003-job-queue-cloudflare-queues.md")).toEqual(["worker"]);
     expect(componentsNeededBy("turbo.json")).toEqual([]);
   });
 
@@ -129,8 +130,26 @@ describe("Runtime support", () => {
     );
   });
 
-  it("rejects cloudflare with web or worker in the Closure, as not yet supported", () => {
-    for (const app of ["web", "worker"] as const) {
+  it("accepts cloudflare with worker, alone or with api", () => {
+    for (const apps of [["worker"], ["api", "worker"]] as const) {
+      expect(runtimeSupportError(closureOf({ apps: [...apps], packages: [] }), "cloudflare")).toBe(
+        undefined,
+      );
+    }
+  });
+
+  it("generates the cloudflare-dev wrapper for api or worker, and for neither without them", () => {
+    for (const apps of [["api"], ["worker"], ["api", "worker"]] as const) {
+      const context = contextOf({ apps: [...apps], packages: [] }, "cloudflare");
+      expect(isGenerated("scripts/cloudflare-dev.mjs", context), apps.join()).toBe(true);
+      expect(isGenerated("scripts/cloudflare-dev.test.mjs", context), apps.join()).toBe(true);
+    }
+    const none = contextOf({ apps: [], packages: ["db"] }, "cloudflare");
+    expect(isGenerated("scripts/cloudflare-dev.mjs", none)).toBe(false);
+  });
+
+  it("rejects cloudflare with web in the Closure, as not yet supported", () => {
+    for (const app of ["web"] as const) {
       for (const apps of [[app], ["api", app]] as const) {
         expect(
           runtimeSupportError(closureOf({ apps: [...apps], packages: [] }), "cloudflare"),

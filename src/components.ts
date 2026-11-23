@@ -104,10 +104,18 @@ const OWNED_FILES: Readonly<Record<string, ComponentName>> = {
   "scripts/worktree.mjs": "db",
   "scripts/worktree-lib.mjs": "db",
   "scripts/worktree-lib.test.mjs": "db",
-  "scripts/cloudflare-dev.mjs": "api",
-  "scripts/cloudflare-dev.test.mjs": "api",
   "docs/adr/0003-job-queue-pg-boss.md": "worker",
+  "docs/adr/0003-job-queue-cloudflare-queues.md": "worker",
   "docs/adr/0004-worktree-isolation.md": "db",
+};
+
+/**
+ * Template files that exist when any one of these Components is in the Closure: the dev wrapper
+ * serves every App that runs on `wrangler dev`.
+ */
+const OWNED_BY_ANY: Readonly<Record<string, readonly ComponentName[]>> = {
+  "scripts/cloudflare-dev.mjs": ["api", "worker"],
+  "scripts/cloudflare-dev.test.mjs": ["api", "worker"],
 };
 
 /** Components a generated path needs in the Closure; empty for files every repo gets. */
@@ -130,6 +138,13 @@ export const RUNTIME_OWNED_FILES: Readonly<Record<string, Runtime>> = {
   "apps/api/src/server.ts": "node",
   "apps/api/tsdown.config.ts": "node",
   "apps/api/.dev.vars.example": "cloudflare",
+  "apps/worker/wrangler.jsonc": "cloudflare",
+  "apps/worker/src/cloudflare.ts": "cloudflare",
+  "apps/worker/src/worker.ts": "node",
+  "apps/worker/tsdown.config.ts": "node",
+  "apps/worker/.dev.vars.example": "cloudflare",
+  "docs/adr/0003-job-queue-pg-boss.md": "node",
+  "docs/adr/0003-job-queue-cloudflare-queues.md": "cloudflare",
   "scripts/cloudflare-dev.mjs": "cloudflare",
   "scripts/cloudflare-dev.test.mjs": "cloudflare",
   "docs/adr/0005-runtime-cloudflare-workers.md": "cloudflare",
@@ -153,11 +168,12 @@ export const isGenerated = (
   runtimeOwned: Readonly<Record<string, Runtime>> = RUNTIME_OWNED_FILES,
 ): boolean =>
   componentsNeededBy(dest).every((c) => closure.has(c)) &&
+  (OWNED_BY_ANY[dest]?.some((c) => closure.has(c)) ?? true) &&
   (!NEEDS_AN_APP.has(dest) || APP_NAMES.some((a) => closure.has(a))) &&
   (runtimeOwned[dest] ?? runtime) === runtime;
 
-/** Apps that already run on Cloudflare; later tickets add `worker` and `web`. */
-const CLOUDFLARE_APPS: readonly AppName[] = ["api"];
+/** Apps that already run on Cloudflare; a later ticket adds `web`. */
+const CLOUDFLARE_APPS: readonly AppName[] = ["api", "worker"];
 
 /**
  * Why `runtime` cannot generate `closure` yet, or undefined when the combination is supported.

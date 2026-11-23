@@ -36,7 +36,12 @@
 @if worker
     "worker": {
       "type": "service",
+@if node
       "command": "__FILTER__ __SCOPE__/worker dev"
+@endif
+@if cloudflare
+      "command": "node scripts/cloudflare-dev.mjs -- __FILTER__ __SCOPE__/worker dev --ip 127.0.0.1 --port $PASEO_PORT"
+@endif
     },
 @endif
     "test": { "command": "__RUN__ test" },
