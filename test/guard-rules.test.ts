@@ -1779,4 +1779,44 @@ describe("guard decision: hardening follow-ups (#41)", () => {
       expect(bash("git checkout -- .")).toEqual({ allow: true });
     });
   });
+
+  describe("3. paths at or above the project root", () => {
+    cases(
+      [
+        "rm -rf ..",
+        "rm -rf /",
+        "find .. -delete",
+        "find / -delete",
+        "find / -name x -exec rm {} \\;",
+        "rsync -a --delete src/ ..",
+        "echo .. | xargs rm -rf",
+        "chmod -R 000 ..",
+        // $PWD and ~+ are the working directory
+        'rm -rf "$PWD/docs"',
+        "rm -rf ${PWD}/docs",
+        "rm -rf ~+/docs",
+        'find "$PWD" -delete',
+        "rm -rf $PWD",
+      ],
+      [
+        "rm -rf ../sibling",
+        "rm -rf /tmp/x",
+        "find /tmp/x -delete",
+        "rm -rf ~/.cache/x",
+        'rm -rf "$PWD/src/x"',
+        'cd src && find "$PWD" -delete',
+        "rsync -a src/ ..",
+        "PWD=/tmp/x; rm -rf $PWD/docs",
+      ],
+    );
+
+    it("blocks rm -rf ~ when the project lives under the home folder", () => {
+      const under = (command: string) =>
+        decide({ tool: "Bash", input: { command }, contract, root: "/home/u/proj", home: "/home/u" });
+      expect(blocked(under("rm -rf ~")), "rm -rf ~").toBeDefined();
+      expect(blocked(under("rm -rf ~/")), "rm -rf ~/").toBeDefined();
+      expect(under("rm -rf ~/.cache/x")).toEqual({ allow: true });
+      expect(under("rm -rf ~/other")).toEqual({ allow: true });
+    });
+  });
 });

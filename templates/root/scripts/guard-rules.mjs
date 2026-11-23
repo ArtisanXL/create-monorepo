@@ -136,6 +136,7 @@ const MSG = {
   protected: "Command touches a protected path; only humans may change it.",
   git: "Command touches a protected path via git; only humans may change it.",
   folder: "Command would delete or move a folder that contains protected paths; only humans may change them.",
+  ancestor: "Command would delete or move the project root or a folder above it, which covers protected paths; only humans may do that.",
   oneLiner:
     "Command touches a protected path through interpreter code; only humans may change it. Code that only reads a protected file is blocked too: read it with cat instead.",
   assignmentHint: "If this is a commit or PR message, pass it with `git commit -F -` or `gh ... --body-file -` and a heredoc instead of a variable.",
@@ -386,6 +387,8 @@ function removeRule(env, c) {
   const sources = c.name !== "mv" || byTarget ? operands : operands.slice(0, -1);
   const holds = env.relsOf(sources, c.bases).some((r) => holdsProtected(env.contract, r));
   if (holds || (c.name === "rm" && env.relsOf(sources, c.tight, true).includes(""))) return MSG.folder;
+  // The project root sits inside a source: `rm -rf ..`, `rm -rf /`, `rm -rf ~`.
+  if (env.coversRoot(sources, c.tight)) return MSG.ancestor;
   // A glob (`rm -rf d*`) is resolved against the directory the command really runs in, not every `cd` that might have failed.
   // Only unquoted metacharacters glob; a quoted `'*'` is a literal name.
   const recursiveRm = c.name !== "rm" || flags.some((x) => /^-[A-Za-z]*[rR]|^--recursive$/.test(x));
@@ -417,6 +420,7 @@ function bulkRule(env, c) {
     if (!deletes) return undefined;
     // The search covers every protected path when it starts at the project root (or nowhere: the default is `.`).
     if (relsOf(start.length ? start : ["."], c.tight, true).includes("")) return MSG.findRoot;
+    if (env.coversRoot(start, c.tight)) return MSG.ancestor;
     if (relsOf(start, c.bases).some((r) => isProtectedOrDir(contract, r) || holdsProtected(contract, r))) return MSG.folder;
     return relsOf(start.filter((w) => w.glob), c.tight).some((r) => shellGlobHits(contract, r, true)) ? MSG.glob : undefined;
   }
@@ -424,7 +428,9 @@ function bulkRule(env, c) {
     const { flags, operands } = splitArgs(c.args);
     const dest = relsOf(operands.slice(-1), c.bases);
     if (dest.some((r) => isProtectedOrDir(contract, r))) return MSG.protected;
-    return flags.some((x) => /^--(?:delete|remove-source-files)/.test(x)) && dest.some((r) => holdsProtected(contract, r)) ? MSG.folder : undefined;
+    const wipes = flags.some((x) => /^--(?:delete|remove-source-files)/.test(x));
+    if (wipes && env.coversRoot(operands.slice(-1), c.bases)) return MSG.ancestor;
+    return wipes && dest.some((r) => holdsProtected(contract, r)) ? MSG.folder : undefined;
   }
   return undefined;
 }
@@ -630,21 +636,35 @@ function directRule(ctx, cmd, parsed) {
   if (parsed.tooComplex) return MSG.complex;
   // Root-relative paths of the words, against each base; paths outside the project are ignored.
   // Every lookup spends from the shared budget; once it is gone nothing is resolved and the call is blocked.
+  // `$PWD`, `${PWD}` and `~+` are the working directory, so they resolve like `.` (unless the line assigns PWD itself).
+  const pwdSet = parsed.vars.has("PWD") || parsed.segments.some((s) => s.words.some((w) => /^PWD\+?=/.test(w.text)));
+  const pwd = (t) => (pwdSet ? t : t.replace(/^(?:\$PWD|\$\{PWD\}|~\+)(?=\/|$)/, "."));
+  const spend = (n) => {
+    budget.left -= n;
+    if (budget.over || budget.left < 0) budget.over = true;
+    return budget.over;
+  };
+  /** Whether the project root is one of the words or inside one (`..`, `/`, `~` when the project is under home). */
+  const coversRoot = (words, bases) => {
+    if (spend(words.length * bases.length)) return false;
+    return words.some((w) =>
+      bases.some((b) => {
+        const r = toPosix(path.relative(path.resolve(b, expand(pwd(typeof w === "string" ? w : w.text))), root));
+        return !r.startsWith("..") && !path.isAbsolute(r);
+      }),
+    );
+  };
   const relsOf = (words, bases, keepRoot = false) => {
-    budget.left -= words.length * bases.length;
-    if (budget.over || budget.left < 0) {
-      budget.over = true;
-      return [];
-    }
+    if (spend(words.length * bases.length)) return [];
     return words.flatMap((w) => {
-      const e = expand(typeof w === "string" ? w : w.text);
+      const e = expand(pwd(typeof w === "string" ? w : w.text));
       return bases.flatMap((b) => {
         const r = toPosix(path.relative(root, path.resolve(b, e)));
         return (keepRoot || r) && !r.startsWith("..") && !path.isAbsolute(r) ? [r] : [];
       });
     });
   };
-  const env = { contract, root, expand, fold: f, relsOf };
+  const env = { contract, root, expand, fold: f, relsOf, coversRoot };
   const claudeMd = f("CLAUDE.md");
 
   // One regex for every printf-built variable name on the line, built once per decision.
@@ -750,7 +770,7 @@ export function decide({ tool, input, contract, root, home = "~", claudeMdText, 
   const ti = input ?? {};
   const ci = CASE_INSENSITIVE.has(platform);
   const f = ci ? lower : (s) => s;
-  const expand = (t) => f(t.replace(/^~(?=\/)/, home));
+  const expand = (t) => f(t.replace(/^~(?=\/|$)/, home));
   const ctx = { contract: ci ? foldContract(contract) : contract, root: f(root), f, expand, budget: { left: WORK_BUDGET, over: false } };
   let message;
   if (["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(tool))
