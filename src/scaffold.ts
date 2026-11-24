@@ -3,7 +3,15 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { resolveBlocks } from "./blocks.ts";
 import { claudeBlockHash, hasBlock, upsertBlock } from "./claude-md.ts";
-import { closureOf, FULL_SELECTION, isGenerated, type Selection } from "./components.ts";
+import {
+  COMPATIBILITY_DATE,
+  contextOf,
+  FULL_SELECTION,
+  HYPERDRIVE_BINDING,
+  isGenerated,
+  type Runtime,
+  type Selection,
+} from "./components.ts";
 import type { Command, PackageManagerAdapter } from "./pm/types.ts";
 import { catalogPackagesOf, listTemplateFiles, TEMPLATES_DIR } from "./templates.ts";
 
@@ -15,6 +23,8 @@ export interface Options {
   nodeMajor: number;
   /** What to generate the Closure from; defaults to every Component. */
   selection?: Selection;
+  /** The Runtime to generate for; defaults to `node`. */
+  runtime?: Runtime;
 }
 
 export interface Deps {
@@ -65,6 +75,7 @@ export type PlanAdapter = Omit<PackageManagerAdapter, "version">;
 /** Tokens whose values core derives; adapter tokens live in pm/types.ts. */
 export const CORE_TOKENS = [
   "__DB_PREFIX__",
+  "__NAME_PREFIX__",
   "__SCOPE_RE__",
   "__SCOPE__",
   "__NODE_MAJOR__",
@@ -73,6 +84,8 @@ export const CORE_TOKENS = [
   "__RUN__",
   "__CATALOG_FILE__",
   "__CLAUDE_SHA__",
+  "__COMPATIBILITY_DATE__",
+  "__HYPERDRIVE_BINDING__",
 ] as const;
 
 const FORMAT_FLAGS = [
@@ -134,19 +147,20 @@ export async function gather(
   view: TargetView,
 ): Promise<Gathered> {
   const { pm } = deps;
-  const closure = closureOf(options.selection ?? FULL_SELECTION);
+  const context = contextOf(options.selection ?? FULL_SELECTION, options.runtime);
+  const { closure } = context;
   // Only the Closure's files exist, and their `@if` blocks are resolved here, before anything
   // else reads the text (the catalog, the token filling).
   const templates = (await listTemplateFiles())
-    .filter(({ dest }) => isGenerated(dest, closure))
+    .filter(({ dest }) => isGenerated(dest, context))
     .map(({ dest, text, executable }) => ({
       dest,
-      text: resolveBlocks(text, closure, dest),
+      text: resolveBlocks(text, context, dest),
       executable,
     }));
   const blockText = resolveBlocks(
     await readFile(join(TEMPLATES_DIR, "claude-md", "block.md"), "utf8"),
-    closure,
+    context,
     "claude-md/block.md",
   );
 
@@ -207,6 +221,7 @@ export function plan(g: Gathered): Plan {
   // without `__CLAUDE_SHA__`, hashed, and only then is the hash added for everything else.
   const baseValues: Values = [
     ["__DB_PREFIX__", dbPrefix],
+    ["__NAME_PREFIX__", dbPrefix.replaceAll("_", "-")],
     ["__SCOPE_RE__", escapeRegex(scope)],
     ["__SCOPE__", scope],
     ["__NODE_MAJOR__", String(nodeMajor)],
@@ -214,6 +229,8 @@ export function plan(g: Gathered): Plan {
     ["__PM__", pm.name],
     ["__RUN__", pm.commands.run.join(" ")],
     ["__CATALOG_FILE__", pm.catalogFile],
+    ["__COMPATIBILITY_DATE__", COMPATIBILITY_DATE],
+    ["__HYPERDRIVE_BINDING__", HYPERDRIVE_BINDING],
     ...(Object.entries(pm.tokens) as [string, string][]),
   ];
   const block = fillTemplate(g.blockText, baseValues);

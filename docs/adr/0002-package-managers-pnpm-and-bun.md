@@ -1,6 +1,6 @@
 # 2. Support pnpm and bun only; runtime stays Node
 
-Status: accepted (2026-11-16); runtime clause to be partially superseded by ADR-0005 (proposed)
+Status: accepted (2026-11-16); the "runtime stays Node" clause is partially superseded by ADR-0005 (accepted): a repo may choose the cloudflare Runtime. Package managers and bun-as-script-runner are unchanged.
 
 ## Context
 

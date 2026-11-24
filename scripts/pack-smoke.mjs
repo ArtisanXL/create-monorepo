@@ -14,7 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { closureOf, FULL_SELECTION, isGenerated } from "../src/components.ts";
+import { contextOf, FULL_SELECTION, isGenerated } from "../src/components.ts";
 import { listTemplateFiles } from "../src/templates.ts";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -66,10 +66,10 @@ try {
     run("npx", ["--no-install", "create-monorepo", target, "-y", ...args], consumer);
     return target;
   };
-  const checkFiles = (target, selection) => {
-    const closure = closureOf(selection);
+  const checkFiles = (target, selection, runtime = "node") => {
+    const context = contextOf(selection, runtime);
     const files = [
-      ...expected.filter((f) => isGenerated(f, closure)),
+      ...expected.filter((f) => isGenerated(f, context)),
       "pnpm-workspace.yaml",
       "CLAUDE.md",
     ];
@@ -84,6 +84,14 @@ try {
 
   // The default Selection: files only (the repo's own CI runs the full verify on it).
   checkFiles(generate("default", ["--no-install"]), FULL_SELECTION);
+
+  // cloudflare x default Selection: files only (no install, so wrangler and workerd are not downloaded).
+  checkFiles(
+    generate("cloudflare", ["--no-install", "--runtime", "cloudflare"]),
+    FULL_SELECTION,
+    "cloudflare",
+  );
+  console.log("files OK: cloudflare x default");
 
   // The Selections without a database: a real install and `verify` (scaffold runs both).
   for (const [name, args, selection] of [

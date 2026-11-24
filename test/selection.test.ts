@@ -3,7 +3,15 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { hasDirectiveLines } from "../src/blocks.ts";
-import { closureOf, type Selection } from "../src/components.ts";
+import {
+  COMPATIBILITY_DATE,
+  closureOf,
+  HYPERDRIVE_BINDING,
+  JOB_QUEUE_ADR,
+  RUNTIMES,
+  type Runtime,
+  type Selection,
+} from "../src/components.ts";
 import { scaffoldFixture } from "./support/fixture.ts";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -11,8 +19,8 @@ afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((c) => c()));
 });
 
-async function generate(selection: Selection) {
-  const { dir, cleanup } = await scaffoldFixture({ selection });
+async function generate(selection: Selection, runtime: Runtime = "node") {
+  const { dir, cleanup } = await scaffoldFixture({ selection, runtime });
   cleanups.push(cleanup);
   const read = (rel: string) => readFile(join(dir, rel), "utf8");
   const json = async (rel: string) => JSON.parse(await read(rel));
@@ -43,16 +51,24 @@ const DB_FILES = [
   "docs/adr/0004-worktree-isolation.md",
 ];
 
-describe.each([
+const SELECTIONS: [string, Selection][] = [
   ["api", API],
   ["web", WEB],
   ["worker", WORKER],
+  ["api + worker", { apps: ["api", "worker"], packages: [] } satisfies Selection],
   ["library", LIBRARY],
   ["db only", { apps: [], packages: ["db"] } satisfies Selection],
   ["web + domain", { apps: ["web"], packages: ["domain"] } satisfies Selection],
-])("generated repo for %s", (_name, selection) => {
+];
+
+// The invariant sweep: every Selection x Runtime.
+const SWEEP = SELECTIONS.flatMap(([name, selection]) =>
+  RUNTIMES.map((runtime) => [`${name} on ${runtime}`, selection, runtime] as const),
+);
+
+describe.each(SWEEP)("generated repo for %s", (_name, selection, runtime) => {
   it("has no leftover directives or tokens, valid JSON, and passes its own arch check", async () => {
-    const repo = await generate(selection);
+    const repo = await generate(selection, runtime);
     for (const f of await repo.files()) {
       const text = await repo.read(f);
       expect(hasDirectiveLines(text), f).toBe(false);
@@ -64,7 +80,7 @@ describe.each([
   });
 
   it("generates exactly the Closure's components and records the rest as deferred", async () => {
-    const repo = await generate(selection);
+    const repo = await generate(selection, runtime);
     const closure = closureOf(selection);
     const arch = await repo.json("architecture.json");
     const present = Object.keys(arch.packages).map((p) => p.split("/")[1]);
@@ -73,6 +89,8 @@ describe.each([
     for (const n of ["api", "web", "worker", "core", "db", "domain", "contracts"]) {
       expect(deferred.includes(n), n).toBe(!closure.has(n as never));
     }
+    // Only `cloudflare` is recorded; a missing field means node.
+    expect(arch.runtime).toBe(runtime === "cloudflare" ? "cloudflare" : undefined);
     // References to absent Components are pruned.
     const known = new Set(Object.keys(arch.packages));
     for (const entry of Object.values(arch.packages) as {
@@ -244,5 +262,355 @@ describe("review fixes: text that follows the Closure", () => {
     expect(dbOnly).toContain("worktree:setup");
     expect(dbOnly).not.toContain("PASEO_PORT");
     expect(await block(FULL)).toContain("`pnpm dev`: all apps. Postgres via");
+  });
+});
+
+/** architecture.json minus what legitimately follows the Runtime: the field and `deferred` deps. */
+const withoutRuntimeParts = (text: string) => {
+  const arch = JSON.parse(text);
+  arch.runtime = undefined;
+  for (const d of arch.deferred) d.deps = undefined;
+  return arch;
+};
+
+describe("Runtime axis (ADR-0005)", () => {
+  it("packages-only output differs between node and cloudflare only by the runtime line", async () => {
+    const node = await generate(LIBRARY, "node");
+    const cf = await generate(LIBRARY, "cloudflare");
+    expect(await cf.files()).toEqual(await node.files());
+    for (const f of await node.files()) {
+      const a = await node.read(f);
+      const b = await cf.read(f);
+      if (f === "architecture.json") {
+        // Only the runtime line and the Runtime-specific `deferred` deps differ.
+        expect(b).toContain('  "runtime": "cloudflare",\n');
+        expect(withoutRuntimeParts(b)).toEqual(withoutRuntimeParts(a));
+      } else {
+        expect(b, f).toBe(a);
+      }
+    }
+  });
+
+  it("packages-only output stays equal across Runtimes when db is in the Closure", async () => {
+    const dbOnly: Selection = { apps: [], packages: ["db"] };
+    const node = await generate(dbOnly, "node");
+    const cf = await generate(dbOnly, "cloudflare");
+    expect(await cf.files()).toEqual(await node.files());
+    for (const f of await node.files()) {
+      const [a, b] = [await node.read(f), await cf.read(f)];
+      if (f === "architecture.json") expect(withoutRuntimeParts(b)).toEqual(withoutRuntimeParts(a));
+      else expect(b, f).toBe(a);
+    }
+  });
+
+  it("does not record a Runtime for node", async () => {
+    const repo = await generate(LIBRARY, "node");
+    expect(await repo.read("architecture.json")).not.toContain("runtime");
+  });
+});
+
+describe("worker as a Cloudflare Worker (ADR-0005)", () => {
+  const WORKERS: Selection = { apps: ["api", "worker"], packages: [] };
+  const node = () => generate(WORKERS, "node");
+  const cf = () => generate(WORKERS, "cloudflare");
+
+  it("generates the Worker files and leaves out the Node-only ones", async () => {
+    const files = await (await cf()).files();
+    for (const f of [
+      "apps/worker/wrangler.jsonc",
+      "apps/worker/src/cloudflare.ts",
+      "apps/worker/.dev.vars.example",
+      JOB_QUEUE_ADR.cloudflare,
+    ]) {
+      expect(files, f).toContain(f);
+    }
+    for (const f of [
+      "apps/worker/src/worker.ts",
+      "apps/worker/tsdown.config.ts",
+      JOB_QUEUE_ADR.node,
+    ]) {
+      expect(files, f).not.toContain(f);
+    }
+    const nodeFiles = await (await node()).files();
+    expect(nodeFiles).toContain("apps/worker/src/worker.ts");
+    expect(nodeFiles).toContain(JOB_QUEUE_ADR.node);
+    expect(nodeFiles).not.toContain("apps/worker/wrangler.jsonc");
+    expect(nodeFiles).not.toContain("apps/worker/.dev.vars.example");
+    expect(nodeFiles).not.toContain(JOB_QUEUE_ADR.cloudflare);
+  });
+
+  it("produces to and consumes from its own queue, creating the db client per invocation", async () => {
+    const repo = await cf();
+    const wrangler = await repo.read("apps/worker/wrangler.jsonc");
+    expect(wrangler).toContain('"main": "src/cloudflare.ts"');
+    expect(wrangler).toContain('"crons": ["*/5 * * * *"]');
+    const entry = await repo.read("apps/worker/src/cloudflare.ts");
+    expect(entry).toContain("scheduled(");
+    expect(entry).toContain("queue(");
+    expect(entry).toContain("createDb(");
+    // The api never enqueues, matching node.
+    expect(await repo.read("apps/api/wrangler.jsonc")).not.toContain("queues");
+  });
+
+  it("has Worker scripts, wrangler, and no pg-boss", async () => {
+    const repo = await cf();
+    const pkg = await repo.json("apps/worker/package.json");
+    expect(pkg.scripts.dev).toBe("wrangler dev --test-scheduled");
+    expect(pkg.scripts.typecheck).toBe("wrangler types && tsc -p .");
+    expect(pkg.scripts["deploy:dry-run"]).toBe("wrangler deploy --dry-run");
+    expect(pkg.scripts.start).toBeUndefined();
+    const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+    expect(deps.wrangler).toBe("catalog:");
+    for (const d of ["pg-boss", "tsdown", "tsx"]) expect(deps[d], d).toBeUndefined();
+    expect(await repo.read("pnpm-workspace.yaml")).not.toContain("pg-boss");
+    expect(await repo.read("apps/worker/tsconfig.json")).toContain("worker-configuration.d.ts");
+  });
+
+  it("runs worker dev through the cloudflare-dev wrapper on the paseo port", async () => {
+    const repo = await cf();
+    expect((await repo.json("paseo.json")).scripts.worker.command).toBe(
+      "node scripts/cloudflare-dev.mjs -- pnpm --filter @acme/worker dev --ip 127.0.0.1 --port $PASEO_PORT",
+    );
+    expect((await (await node()).json("paseo.json")).scripts.worker.command).not.toContain(
+      "cloudflare-dev",
+    );
+  });
+
+  it("gets the dev wrapper and the CI dry-run without api", async () => {
+    const repo = await generate(WORKER, "cloudflare");
+    expect(await repo.files()).toContain("scripts/cloudflare-dev.mjs");
+    expect(await repo.read(".github/workflows/ci.yml")).toContain(
+      "pnpm --filter @acme/worker deploy:dry-run",
+    );
+    expect(await (await node()).read(".github/workflows/ci.yml")).not.toContain("dry-run");
+  });
+
+  it("writes the job-queue ADR under the Cloudflare Queues name, and architecture.json points to it", async () => {
+    const repo = await cf();
+    const arch = await repo.json("architecture.json");
+    expect(arch.packages["apps/worker"].adr).toBe(JOB_QUEUE_ADR.cloudflare);
+    const adr = await repo.read(JOB_QUEUE_ADR.cloudflare);
+    expect(adr).toMatch(/^# 0003\. Cloudflare Queues for background jobs/);
+    expect(adr).not.toContain("pg-boss");
+    const nodeArch = await (await node()).json("architecture.json");
+    expect(nodeArch.packages["apps/worker"].adr).toBe(JOB_QUEUE_ADR.node);
+  });
+
+  it("keeps node output on pg-boss", async () => {
+    const pkg = await (await node()).json("apps/worker/package.json");
+    expect(pkg.dependencies["pg-boss"]).toBe("catalog:");
+    expect(pkg.scripts.dev).toContain("tsx watch");
+  });
+});
+
+describe("api as a Cloudflare Worker (ADR-0005)", () => {
+  const node = () => generate(API, "node");
+  const cf = () => generate(API, "cloudflare");
+
+  it("generates the Worker files and leaves out the Node-only ones", async () => {
+    const files = await (await cf()).files();
+    expect(files).toContain("apps/api/wrangler.jsonc");
+    expect(files).toContain("apps/api/src/cloudflare.ts");
+    expect(files).not.toContain("apps/api/src/server.ts");
+    expect(files).not.toContain("apps/api/tsdown.config.ts");
+    const nodeFiles = await (await node()).files();
+    expect(nodeFiles).toContain("apps/api/src/server.ts");
+    expect(nodeFiles).toContain("apps/api/tsdown.config.ts");
+    expect(nodeFiles).not.toContain("apps/api/wrangler.jsonc");
+    expect(nodeFiles).not.toContain("apps/api/src/cloudflare.ts");
+  });
+
+  it("configures nodejs_compat, the generator's compatibility date and a Hyperdrive placeholder", async () => {
+    const wrangler = await (await cf()).read("apps/api/wrangler.jsonc");
+    expect(wrangler).toContain('"main": "src/cloudflare.ts"');
+    expect(wrangler).toContain('"nodejs_compat"');
+    expect(wrangler).toContain(`"compatibility_date": "${COMPATIBILITY_DATE}"`);
+    expect(COMPATIBILITY_DATE).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(wrangler).toContain(`"binding": "${HYPERDRIVE_BINDING}"`);
+    expect(wrangler).toMatch(/"id": "[^"]*REPLACE[^"]*"/);
+  });
+
+  it("reads the connection string from the Hyperdrive binding, per request", async () => {
+    const repo = await cf();
+    const entry = await repo.read("apps/api/src/cloudflare.ts");
+    expect(entry).toContain("createApp");
+    expect(entry).toContain(`${HYPERDRIVE_BINDING}.connectionString`);
+    expect(entry).toContain("createDb(");
+    expect(await repo.read("apps/api/src/env.ts")).toContain(HYPERDRIVE_BINDING);
+    expect(await repo.read("apps/api/src/env.ts")).not.toContain("process.env");
+    // `db` stays Runtime-neutral: same bytes under both Runtimes, no Workers types.
+    const db = await repo.read("packages/db/src/index.ts");
+    expect(db).toBe(await (await node()).read("packages/db/src/index.ts"));
+    expect(db).not.toMatch(/cloudflare|workers/i);
+  });
+
+  it("has Worker scripts, wrangler, and no Node-only dependencies", async () => {
+    const pkg = await (await cf()).json("apps/api/package.json");
+    expect(pkg.scripts.typecheck).toBe("wrangler types && tsc -p .");
+    expect(pkg.scripts.build).toBe("wrangler deploy --dry-run --outdir dist");
+    expect(pkg.scripts.deploy).toBe("wrangler deploy");
+    expect(pkg.scripts["deploy:dry-run"]).toBe("wrangler deploy --dry-run");
+    expect(pkg.scripts.start).toBeUndefined();
+    const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+    expect(deps.wrangler).toBe("catalog:");
+    for (const d of ["@hono/node-server", "tsdown", "tsx"]) expect(deps[d], d).toBeUndefined();
+    expect(deps.hono).toBe("catalog:");
+    const root = await (await cf()).read("pnpm-workspace.yaml");
+    expect(root).toMatch(/^ {2}"wrangler": /m);
+    expect(root).not.toMatch(/node-server|tsdown|tsx/);
+    expect(root).toContain("  workerd: true\n");
+  });
+
+  it("generates Workers types before typecheck, gitignored and outside the repo's checks", async () => {
+    const repo = await cf();
+    expect(await repo.read("apps/api/tsconfig.json")).toContain("worker-configuration.d.ts");
+    expect(await repo.read(".gitignore")).toContain("worker-configuration.d.ts");
+    expect(await (await node()).read(".gitignore")).not.toContain("worker-configuration");
+    expect(await (await node()).read("apps/api/tsconfig.json")).not.toContain("worker-config");
+    // `nodejs_compat` needs @types/node.
+    expect(await repo.read("tsconfig.base.json")).toContain('"types": ["node"]');
+    expect(await repo.read("pnpm-workspace.yaml")).toContain('"@types/node"');
+  });
+
+  it("runs the dry-run in the generated CI", async () => {
+    const ci = await (await cf()).read(".github/workflows/ci.yml");
+    expect(ci).toContain("deploy:dry-run");
+    expect(await (await node()).read(".github/workflows/ci.yml")).not.toContain("dry-run");
+  });
+
+  it("runs api dev on wrangler dev with the worktree's Hyperdrive connection and dev registry", async () => {
+    const repo = await cf();
+    const pkg = await repo.json("apps/api/package.json");
+    expect(pkg.scripts.dev).toBe("wrangler dev");
+    const paseo = await repo.json("paseo.json");
+    // Ports still come from paseo; the two worktree values come from the cloudflare-dev wrapper.
+    expect(paseo.scripts.api.command).toBe(
+      "node scripts/cloudflare-dev.mjs -- pnpm --filter @acme/api dev --ip 127.0.0.1 --port $PASEO_PORT",
+    );
+    const files = await repo.files();
+    for (const f of ["scripts/cloudflare-dev.mjs", "scripts/cloudflare-dev.test.mjs"]) {
+      expect(files).toContain(f);
+    }
+    expect(await repo.read("scripts/cloudflare-dev.mjs")).toContain(`"${HYPERDRIVE_BINDING}"`);
+    expect(await repo.read("apps/api/.dev.vars.example")).toMatch(/^#/);
+    expect(await repo.read(".gitignore")).toMatch(/^\.wrangler$/m);
+    expect(await repo.read(".gitignore")).toMatch(/^\.dev\.vars$/m);
+    const nodeFiles = await (await node()).files();
+    expect(nodeFiles).not.toContain("scripts/cloudflare-dev.mjs");
+    expect(nodeFiles).not.toContain("apps/api/.dev.vars.example");
+    expect((await (await node()).json("paseo.json")).scripts.api.command).toContain(
+      "PORT=$PASEO_PORT",
+    );
+  });
+
+  it("leaves Node output without wrangler or workerd", async () => {
+    const repo = await node();
+    expect(await repo.read("pnpm-workspace.yaml")).not.toMatch(/wrangler|workerd/);
+    expect(await repo.read("apps/api/package.json")).not.toContain("wrangler");
+  });
+});
+
+describe("standalone web as a static-assets Cloudflare Worker (ADR-0005)", () => {
+  const node = () => generate(WEB, "node");
+  const cf = () => generate(WEB, "cloudflare");
+
+  it("generates an assets-only wrangler.jsonc in SPA mode, with no Worker code or bindings", async () => {
+    const repo = await cf();
+    const wrangler = await repo.read("apps/web/wrangler.jsonc");
+    expect(wrangler).toContain(`"compatibility_date": "${COMPATIBILITY_DATE}"`);
+    expect(wrangler).toContain('"not_found_handling": "single-page-application"');
+    for (const k of ["main", "hyperdrive", "services", "binding", "nodejs_compat"]) {
+      expect(wrangler, k).not.toContain(`"${k}"`);
+    }
+    const files = await repo.files();
+    expect(files.filter((f) => f.startsWith("apps/web/src/"))).toEqual(["apps/web/src/main.tsx"]);
+    expect(await (await node()).files()).not.toContain("apps/web/wrangler.jsonc");
+  });
+
+  it("runs dev on the Cloudflare Vite plugin, resolved through the catalog", async () => {
+    const repo = await cf();
+    expect(await repo.read("apps/web/vite.config.ts")).toMatch(/@cloudflare\/vite-plugin/);
+    // vitest loads this config; persisted state would leave empty folders the arch check rejects.
+    expect(await repo.read("apps/web/vite.config.ts")).toContain("persistState: false");
+    expect(await (await node()).read("apps/web/vite.config.ts")).not.toMatch(/cloudflare/);
+    const pkg = await repo.json("apps/web/package.json");
+    expect(pkg.scripts.dev).toBe("vite");
+    expect(pkg.devDependencies["@cloudflare/vite-plugin"]).toBe("catalog:");
+    expect(pkg.devDependencies.wrangler).toBe("catalog:");
+    const ws = await repo.read("pnpm-workspace.yaml");
+    expect(ws).toMatch(/^ {2}"@cloudflare\/vite-plugin": /m);
+    expect(ws).toMatch(/^ {2}"wrangler": /m);
+    expect(ws).toContain("  workerd: true\n");
+  });
+
+  it("ignores wrangler's local state so biome and the arch check skip it", async () => {
+    expect(await (await cf()).read(".gitignore")).toMatch(/^\.wrangler$/m);
+    expect(await (await node()).read(".gitignore")).not.toContain(".wrangler");
+  });
+
+  it("has build, deploy and dry-run scripts, and the dry-run in the generated CI", async () => {
+    const repo = await cf();
+    const pkg = await repo.json("apps/web/package.json");
+    expect(pkg.scripts.build).toBe("vite build");
+    expect(pkg.scripts.deploy).toBe("vite build && wrangler deploy");
+    expect(pkg.scripts["deploy:dry-run"]).toBe("wrangler deploy --dry-run");
+    expect(await repo.read(".github/workflows/ci.yml")).toContain("@acme/web deploy:dry-run");
+    const nodePkg = await (await node()).json("apps/web/package.json");
+    expect(nodePkg.scripts["deploy:dry-run"]).toBeUndefined();
+    expect(JSON.stringify(nodePkg)).not.toMatch(/wrangler|cloudflare/);
+    expect(await (await node()).read(".github/workflows/ci.yml")).not.toContain("dry-run");
+  });
+});
+
+describe("connected web forwards /api/* to api over a service binding (ADR-0005)", () => {
+  const CONNECTED: Selection = { apps: ["api", "web"], packages: [] };
+  const node = () => generate(CONNECTED, "node");
+  const cf = () => generate(CONNECTED, "cloudflare");
+  /** wrangler.jsonc allows comments; the generated ones are whole-line `//` comments. */
+  const jsonc = async (repo: Awaited<ReturnType<typeof cf>>, rel: string) =>
+    JSON.parse((await repo.read(rel)).replace(/^\s*\/\/.*$/gm, ""));
+
+  it("binds web's service binding to the api Worker's name (parsed from both configs)", async () => {
+    const repo = await cf();
+    const api = await jsonc(repo, "apps/api/wrangler.jsonc");
+    const web = await jsonc(repo, "apps/web/wrangler.jsonc");
+    expect(web.services).toHaveLength(1);
+    expect(web.services[0].service).toBe(api.name);
+    expect(web.name).not.toBe(api.name);
+    // The forwarder reads the binding by the name the config declares.
+    expect(await repo.read("apps/web/src/worker.ts")).toContain(`env.${web.services[0].binding}`);
+    expect(web.main).toBe("src/worker.ts");
+    expect(web.assets.run_worker_first).toEqual(["/api/*"]);
+    expect(web.assets.not_found_handling).toBe("single-page-application");
+    expect(web.compatibility_date).toBe(api.compatibility_date);
+  });
+
+  it("writes the forwarder and service binding only for connected web on cloudflare", async () => {
+    const standalone = await generate(WEB, "cloudflare");
+    expect(await standalone.files()).not.toContain("apps/web/src/worker.ts");
+    expect(await standalone.read("apps/web/wrangler.jsonc")).not.toContain("services");
+    expect(await (await node()).files()).not.toContain("apps/web/src/worker.ts");
+  });
+
+  it("reaches api in dev through the dev registry, not a Vite proxy", async () => {
+    const vite = await (await cf()).read("apps/web/vite.config.ts");
+    expect(vite).not.toContain("proxy");
+    expect(vite).toContain("persistState: false");
+    expect(await (await node()).read("apps/web/vite.config.ts")).toContain("proxy");
+  });
+
+  it("starts api and web through the same wrapper, so they share the worktree's registry", async () => {
+    const paseo = await (await cf()).json("paseo.json");
+    const wrapper = "node scripts/cloudflare-dev.mjs -- ";
+    expect(paseo.scripts.api.command.startsWith(wrapper)).toBe(true);
+    expect(paseo.scripts.web.command.startsWith(wrapper)).toBe(true);
+    expect(paseo.scripts.web.command).not.toContain("API_URL");
+    expect((await (await node()).json("paseo.json")).scripts.web.command).toContain("API_URL");
+  });
+
+  it("runs the web dry-run in CI alongside api's", async () => {
+    const ci = await (await cf()).read(".github/workflows/ci.yml");
+    expect(ci).toContain("@acme/api deploy:dry-run");
+    expect(ci).toContain("@acme/web deploy:dry-run");
   });
 });

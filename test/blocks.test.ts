@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { checkBlocks, hasDirectiveLines, resolveBlocks } from "../src/blocks.ts";
-import { closureOf, FULL_CLOSURE } from "../src/components.ts";
+import { contextOf, FULL_CONTEXT } from "../src/components.ts";
 
-const web = closureOf({ apps: ["web"], packages: [] });
+const web = contextOf({ apps: ["web"], packages: [] });
 
 describe("resolveBlocks", () => {
   it("returns text without directives untouched", () => {
@@ -11,7 +11,7 @@ describe("resolveBlocks", () => {
 
   it("keeps a block when its component is in the Closure and drops it otherwise", () => {
     const text = "x\n@if api\nA\n@endif\n@if web\nW\n@endif\ny\n";
-    expect(resolveBlocks(text, FULL_CLOSURE)).toBe("x\nA\nW\ny\n");
+    expect(resolveBlocks(text, FULL_CONTEXT)).toBe("x\nA\nW\ny\n");
     expect(resolveBlocks(text, web)).toBe("x\nW\ny\n");
   });
 
@@ -19,7 +19,7 @@ describe("resolveBlocks", () => {
     const text =
       "@if !api\nN\n@endif\n@if api web\nAW\n@else\nnot-both\n@endif\n@if web\n@if db\nD\n@endif\n@endif\n";
     expect(resolveBlocks(text, web)).toBe("N\nnot-both\n");
-    expect(resolveBlocks(text, FULL_CLOSURE)).toBe("AW\nD\n");
+    expect(resolveBlocks(text, FULL_CONTEXT)).toBe("AW\nD\n");
   });
 
   it("allows indented directives and removes the whole line", () => {
@@ -40,13 +40,13 @@ describe("resolveBlocks", () => {
     expect(out).toContain('"y, ]"');
     expect(JSON.parse(out)).toEqual({ a: "x,}", b: ["y, ]"] });
     // Nothing is dropped, nothing is touched.
-    expect(JSON.parse(resolveBlocks(text, FULL_CLOSURE, "x.json"))).toMatchObject({ d: 1 });
+    expect(JSON.parse(resolveBlocks(text, FULL_CONTEXT, "x.json"))).toMatchObject({ d: 1 });
   });
 
   it("supports alternatives with | and negated alternatives", () => {
     const text = "@if api|worker\nany\n@endif\n@if !api|worker\nnone\n@endif\n";
     expect(resolveBlocks(text, web)).toBe("none\n");
-    expect(resolveBlocks(text, closureOf({ apps: ["worker"], packages: [] }))).toBe("any\n");
+    expect(resolveBlocks(text, contextOf({ apps: ["worker"], packages: [] }))).toBe("any\n");
   });
 
   it("recognises CRLF directive lines", () => {
@@ -60,6 +60,33 @@ describe("resolveBlocks", () => {
     expect(() => resolveBlocks("x\n@endif\n", web, "f")).toThrow(/f:2: @endif without/);
     expect(() => resolveBlocks("@if nope\n@endif\n", web, "f")).toThrow(/unknown component 'nope'/);
     expect(() => resolveBlocks("@if web\n@else\n@else\n@endif\n", web, "f")).toThrow(/twice/);
+  });
+});
+
+describe("Runtime terms", () => {
+  const cf = (apps: ("api" | "web" | "worker")[]) =>
+    contextOf({ apps, packages: [] }, "cloudflare");
+  const node = (apps: ("api" | "web" | "worker")[]) => contextOf({ apps, packages: [] });
+
+  it("keeps @if cloudflare / @if node blocks by the context's Runtime", () => {
+    const text = "@if cloudflare\nCF\n@endif\n@if node\nN\n@endif\n@if !cloudflare\nNOT\n@endif\n";
+    expect(resolveBlocks(text, cf(["web"]))).toBe("CF\n");
+    expect(resolveBlocks(text, node(["web"]))).toBe("N\nNOT\n");
+  });
+
+  it("combines with Component terms, negation and alternatives", () => {
+    const text = "@if cloudflare api\nCF-API\n@endif\n@if !node|web\nX\n@endif\n";
+    expect(resolveBlocks(text, cf(["api"]))).toBe("CF-API\nX\n");
+    expect(resolveBlocks(text, node(["api"]))).toBe("");
+    // !node|web: true when the Runtime is not node and web is absent
+    expect(resolveBlocks(text, cf(["web"]))).toBe("");
+    expect(resolveBlocks(text, cf(["worker"]))).toBe("X\n");
+    expect(resolveBlocks(text, node(["worker"]))).toBe("");
+  });
+
+  it("rejects an unknown Runtime, naming the valid ones", () => {
+    expect(checkBlocks("@if deno\n@endif\n")[0]?.message).toMatch(/unknown.*'deno'.*cloudflare/);
+    expect(() => resolveBlocks("@if !deno|web\n@endif\n", web, "f")).toThrow(/'deno'/);
   });
 });
 

@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { FULL_CONTEXT, isGenerated } from "../src/components.ts";
 import { createPnpmAdapter } from "../src/pm/pnpm.ts";
 import { type Deps, type Options, scaffold } from "../src/scaffold.ts";
 import { listTemplateFiles } from "../src/templates.ts";
@@ -64,7 +65,9 @@ describe("scaffold: fresh run", () => {
     const result = await scaffold(options(), deps());
 
     const expected = [
-      ...(await listTemplateFiles()).map((f) => f.dest),
+      ...(await listTemplateFiles())
+        .map((f) => f.dest)
+        .filter((dest) => isGenerated(dest, FULL_CONTEXT)),
       "pnpm-workspace.yaml",
       "CLAUDE.md",
     ].sort();

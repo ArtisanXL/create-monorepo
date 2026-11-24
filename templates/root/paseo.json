@@ -14,14 +14,22 @@
 @if api
     "api": {
       "type": "service",
+@if node
       "command": "PORT=$PASEO_PORT __FILTER__ __SCOPE__/api dev"
+@endif
+@if cloudflare
+      "command": "node scripts/cloudflare-dev.mjs -- __FILTER__ __SCOPE__/api dev --ip 127.0.0.1 --port $PASEO_PORT"
+@endif
     },
 @endif
 @if web
     "web": {
       "type": "service",
-@if api
+@if node api
       "command": "API_URL=http://127.0.0.1:$PASEO_SERVICE_API_PORT __FILTER__ __SCOPE__/web dev --host $HOST --port $PASEO_PORT --strictPort"
+@endif
+@if cloudflare api
+      "command": "node scripts/cloudflare-dev.mjs -- __FILTER__ __SCOPE__/web dev --host $HOST --port $PASEO_PORT --strictPort"
 @endif
 @if !api
       "command": "__FILTER__ __SCOPE__/web dev --host $HOST --port $PASEO_PORT --strictPort"
@@ -31,7 +39,12 @@
 @if worker
     "worker": {
       "type": "service",
+@if node
       "command": "__FILTER__ __SCOPE__/worker dev"
+@endif
+@if cloudflare
+      "command": "node scripts/cloudflare-dev.mjs -- __FILTER__ __SCOPE__/worker dev --ip 127.0.0.1 --port $PASEO_PORT"
+@endif
     },
 @endif
     "test": { "command": "__RUN__ test" },

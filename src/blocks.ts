@@ -1,8 +1,11 @@
 import {
-  type Closure,
   COMPONENT_NAMES,
   type ComponentName,
   isComponentName,
+  isRuntime,
+  type ResolutionContext,
+  RUNTIMES,
+  type Runtime,
 } from "./components.ts";
 
 /**
@@ -11,6 +14,8 @@ import {
  *     @if api          kept when `api` is in the Closure
  *     @if !api         kept when `api` is not in the Closure
  *     @if api web      kept when every term holds (`@if api !web` is allowed too)
+ *     @if cloudflare   kept when the Runtime is `cloudflare` (`node` likewise); Runtime terms
+ *                      combine with Component terms, negation and alternatives
  *     @if api|web      a term may list alternatives: true when any of them is present
  *                      (`@if !api|web` is true when none is)
  *     @else            the opposite branch of the nearest open @if
@@ -26,9 +31,9 @@ export interface BlockError {
   message: string;
 }
 
-/** A term holds when any of `names` is in the Closure (or, negated, when none is). */
+/** A term holds when any of `names` is in the Closure or is the Runtime (negated: when none is). */
 interface Term {
-  names: ComponentName[];
+  names: (ComponentName | Runtime)[];
   negate: boolean;
 }
 
@@ -73,19 +78,20 @@ function parse(text: string): Parsed {
     const terms: Term[] = [];
     for (const raw of arg.split(/\s+/).filter(Boolean)) {
       const negate = raw.startsWith("!");
-      const names: ComponentName[] = [];
+      const names: Term["names"] = [];
       for (const name of (negate ? raw.slice(1) : raw).split("|")) {
-        if (isComponentName(name)) names.push(name);
+        if (isComponentName(name) || isRuntime(name)) names.push(name);
         else {
           errors.push({
             line: n,
-            message: `@if names unknown component '${name}' (known: ${COMPONENT_NAMES.join(", ")})`,
+            message: `@if names unknown component '${name}' (known: ${COMPONENT_NAMES.join(", ")}; runtimes: ${RUNTIMES.join(", ")})`,
           });
         }
       }
       terms.push({ names, negate });
     }
-    if (terms.length === 0) errors.push({ line: n, message: "@if needs a component name" });
+    if (terms.length === 0)
+      errors.push({ line: n, message: "@if needs a component or runtime name" });
     stack.push({ terms, inElse: false, line: n });
   });
   for (const open of stack) errors.push({ line: open.line, message: "@if is never closed" });
@@ -99,19 +105,20 @@ export const checkBlocks = (text: string): BlockError[] => parse(text).errors;
 export const hasDirectiveLines = (text: string): boolean =>
   text.split("\n").some((l) => DIRECTIVE.test(l));
 
-const holds = (frame: Frame, closure: Closure): boolean => {
+const holds = (frame: Frame, { closure, runtime }: ResolutionContext): boolean => {
   const all = frame.terms.every(
-    ({ names, negate }) => names.some((n) => closure.has(n)) !== negate,
+    ({ names, negate }) =>
+      names.some((n) => (isRuntime(n) ? n === runtime : closure.has(n))) !== negate,
   );
   return all !== frame.inElse;
 };
 
 /**
- * Resolves the blocks for `closure`. In JSON files, when removed lines are followed by a line
+ * Resolves the blocks for `context`. In JSON files, when removed lines are followed by a line
  * that closes an object or array, the comma ending the last kept line before them is dropped, so
  * templates need no per-entry comma blocks. The fix-up is line-based and never reads string values.
  */
-export function resolveBlocks(text: string, closure: Closure, file = ""): string {
+export function resolveBlocks(text: string, context: ResolutionContext, file = ""): string {
   if (!hasDirectiveLines(text)) return text;
   const { lines, errors } = parse(text);
   if (errors.length) {
@@ -122,7 +129,7 @@ export function resolveBlocks(text: string, closure: Closure, file = ""): string
   const kept: string[] = [];
   let droppedSinceKept = false;
   for (const { text: line, frames } of lines) {
-    if (!frames.every((f) => holds(f, closure))) {
+    if (!frames.every((f) => holds(f, context))) {
       droppedSinceKept = true;
       continue;
     }

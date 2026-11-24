@@ -1,4 +1,9 @@
 {
   "extends": "../../tsconfig.base.json",
+@if node
   "include": ["src", "*.config.ts"]
+@endif
+@if cloudflare
+  "include": ["src", "worker-configuration.d.ts"]
+@endif
 }

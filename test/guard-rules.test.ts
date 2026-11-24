@@ -2465,3 +2465,143 @@ describe("guard decision: hardening follow-ups (#41)", () => {
     );
   });
 });
+
+describe("guard decision: wrangler (every Runtime)", () => {
+  const forms = (rest: string) => [
+    `wrangler ${rest}`,
+    `npx wrangler ${rest}`,
+    `npx -y wrangler@latest ${rest}`,
+    `pnpm exec wrangler ${rest}`,
+    `pnpm --filter @acme/api exec wrangler ${rest}`,
+    `pnpm dlx wrangler ${rest}`,
+    `bunx wrangler ${rest}`,
+    `bun x wrangler ${rest}`,
+    `./node_modules/.bin/wrangler ${rest}`,
+    `cd apps/api && pnpm exec wrangler ${rest}`,
+    `pnpm exec --filter x wrangler ${rest}`,
+    `pnpm exec -C apps/api wrangler ${rest}`,
+    `pnpm dlx --package wrangler@4 wrangler ${rest}`,
+    `pnpm dlx -p wrangler wrangler ${rest}`,
+    `npx --package wrangler wrangler ${rest}`,
+    `npx -p wrangler@4 wrangler ${rest}`,
+    `pnpm wrangler ${rest}`,
+    `pnpm --filter @acme/api wrangler ${rest}`,
+    `pnpm run wrangler ${rest}`,
+    `pnpx wrangler ${rest}`,
+    `yarn wrangler ${rest}`,
+    `yarn run wrangler ${rest}`,
+    `bun wrangler ${rest}`,
+    `bun run wrangler ${rest}`,
+  ];
+  const mutating = [
+    "deploy",
+    "deploy --env production",
+    "deploy --dry-run=false",
+    "--config wrangler.jsonc deploy",
+    "versions upload",
+    "versions deploy",
+    "rollback",
+    "login",
+    "secret put API_KEY",
+    "secret delete API_KEY",
+    "queues create jobs",
+    "queues delete jobs",
+    "queues consumer add jobs api",
+    "queues consumer remove jobs api",
+    "hyperdrive create db --connection-string x",
+    "hyperdrive delete id",
+    "hyperdrive update id --origin-host h",
+  ];
+  const cases = mutating.flatMap((rest) => forms(rest).map((cmd) => [cmd] as const));
+
+  it.each(cases)("blocks %s", (cmd) => {
+    expect(blocked(bash(cmd))).toContain("wrangler");
+  });
+
+  it.each(
+    forms("deploy --dry-run")
+      .concat(forms("deploy --dry-run=true"))
+      .map((c) => [c]),
+  )("allows %s", (cmd) => {
+    expect(bash(cmd)).toEqual({ allow: true });
+  });
+
+  it.each([
+    "wrangler dev",
+    "wrangler types",
+    "wrangler secret list",
+    "wrangler queues list",
+    "wrangler hyperdrive list",
+    "wrangler versions list",
+    "wrangler whoami",
+    "pnpm exec wrangler dev --port 8787",
+    "echo wrangler deploy",
+  ])("allows %s", (cmd) => {
+    expect(bash(cmd)).toEqual({ allow: true });
+  });
+
+  it("blocks a deploy behind any flag-with-value of an exec-like runner", () => {
+    for (const cmd of [
+      "pnpm exec --filter x wrangler deploy",
+      "pnpm --filter x exec --filter y wrangler deploy",
+    ]) {
+      expect(blocked(bash(cmd)), cmd).toContain("wrangler");
+    }
+  });
+
+  it("allows the shorthand and flag-value forms for non-mutating wrangler commands", () => {
+    for (const cmd of [
+      "pnpm exec --filter x wrangler dev",
+      "pnpm wrangler types",
+      "yarn wrangler whoami",
+      "pnpx wrangler dev",
+      "bun run wrangler dev",
+      "pnpm exec --filter x vitest deploy",
+    ]) {
+      expect(bash(cmd), cmd).toEqual({ allow: true });
+    }
+  });
+
+  it("applies under the node Runtime too", () => {
+    expect(blocked(bash("npx wrangler deploy"))).toContain("wrangler");
+  });
+});
+
+describe("guard decision: deploy script (cloudflare Runtime only)", () => {
+  const cloudflare = { ...contract, runtime: "cloudflare" };
+  const run = (command: string, c = cloudflare) =>
+    decide({
+      tool: "Bash",
+      input: { command },
+      contract: c,
+      root,
+      home: "/home/u",
+      claudeMdText: CLAUDE_MD,
+    });
+  const scripts = [
+    "pnpm run deploy",
+    "pnpm --filter @acme/api run deploy",
+    "pnpm -r run deploy",
+    "bun run deploy",
+    "turbo run deploy",
+    "turbo run deploy --filter=@acme/api",
+    "npm run deploy",
+    "yarn deploy",
+  ];
+
+  it.each(scripts)("blocks %s with a cloudflare contract", (cmd) => {
+    const r = run(cmd);
+    expect(r.allow).toBe(false);
+    expect(blocked(r)).toContain("deploy");
+  });
+
+  it.each(scripts)("allows %s with a contract that has no runtime", (cmd) => {
+    expect(run(cmd, contract)).toEqual({ allow: true });
+  });
+
+  it("does not block other scripts under cloudflare", () => {
+    expect(run("pnpm run build")).toEqual({ allow: true });
+    expect(run("pnpm run dev")).toEqual({ allow: true });
+    expect(run("pnpm run predeploy-check")).toEqual({ allow: true });
+  });
+});

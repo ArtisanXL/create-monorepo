@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "__NAME_PREFIX__-worker",
+  "main": "src/cloudflare.ts",
+  "compatibility_date": "__COMPATIBILITY_DATE__",
+  "compatibility_flags": ["nodejs_compat"],
+  // Fixed debugger port for a plain `wrangler dev`: left to itself, Workers started together all probe
+  // from 9229 and one dies with "Address already in use". scripts/cloudflare-dev.mjs overrides it per server.
+  "dev": { "inspector_port": 9231 },
+  "hyperdrive": [
+    {
+      "binding": "__HYPERDRIVE_BINDING__",
+      // Placeholder: create the Hyperdrive config yourself (`wrangler hyperdrive create`) and put its id here.
+      "id": "REPLACE_WITH_YOUR_HYPERDRIVE_ID"
+    }
+  ],
+  // The worker produces to its own queue (from `scheduled()`) and consumes from it (`queue()`).
+  // Create the queue yourself (`wrangler queues create __NAME_PREFIX__-jobs`).
+  "queues": {
+    "producers": [{ "binding": "JOBS", "queue": "__NAME_PREFIX__-jobs" }],
+    "consumers": [{ "queue": "__NAME_PREFIX__-jobs" }]
+  },
+  // One cron per job that has a `cron` in src/jobs/. Keep them in sync (a test checks it).
+  "triggers": { "crons": ["*/5 * * * *"] }
+}

@@ -52,6 +52,35 @@ export function closureOf(selection: Selection): Closure {
 
 export const FULL_CLOSURE: Closure = closureOf(FULL_SELECTION);
 
+/** The Runtime a generated repo targets (ADR-0005). */
+export const RUNTIMES = ["node", "cloudflare"] as const;
+export type Runtime = (typeof RUNTIMES)[number];
+export const DEFAULT_RUNTIME: Runtime = "node";
+export const isRuntime = (s: string): s is Runtime => (RUNTIMES as readonly string[]).includes(s);
+
+/**
+ * The `compatibility_date` written into every `wrangler.jsonc`. A constant of the generator,
+ * bumped per release: not the scaffold date, so goldens stay deterministic and a generated repo
+ * never gets a date newer than the workerd its install resolves.
+ */
+export const COMPATIBILITY_DATE = "2026-11-01";
+
+/** The Hyperdrive binding name in `wrangler.jsonc`, the entry and `loadEnv`. */
+export const HYPERDRIVE_BINDING = "HYPERDRIVE";
+
+/** What block resolution, file inclusion and ownership checks read: the Closure and the Runtime. */
+export interface ResolutionContext {
+  closure: Closure;
+  runtime: Runtime;
+}
+
+export const contextOf = (
+  selection: Selection,
+  runtime: Runtime = DEFAULT_RUNTIME,
+): ResolutionContext => ({ closure: closureOf(selection), runtime });
+
+export const FULL_CONTEXT: ResolutionContext = { closure: FULL_CLOSURE, runtime: DEFAULT_RUNTIME };
+
 /** Components outside the Closure, which become `deferred`. */
 export const absentFrom = (closure: Closure): ComponentName[] =>
   COMPONENT_NAMES.filter((n) => !closure.has(n));
@@ -70,13 +99,24 @@ export const sameClosure = (a: Closure, b: Closure): boolean =>
 /** Template files that only exist with a Component other than the one whose folder holds them. */
 const OWNED_FILES: Readonly<Record<string, ComponentName>> = {
   "apps/web/src/lib/api.ts": "api",
+  "apps/web/src/worker.ts": "api",
   "compose.yaml": "db",
   ".worktreeinclude": "db",
   "scripts/worktree.mjs": "db",
   "scripts/worktree-lib.mjs": "db",
   "scripts/worktree-lib.test.mjs": "db",
   "docs/adr/0003-job-queue-pg-boss.md": "worker",
+  "docs/adr/0003-job-queue-cloudflare-queues.md": "worker",
   "docs/adr/0004-worktree-isolation.md": "db",
+};
+
+/**
+ * Template files that exist when any one of these Components is in the Closure: the dev wrapper
+ * serves every App that runs on `wrangler dev`.
+ */
+const OWNED_BY_ANY: Readonly<Record<string, readonly ComponentName[]>> = {
+  "scripts/cloudflare-dev.mjs": ["api", "worker"],
+  "scripts/cloudflare-dev.test.mjs": ["api", "worker"],
 };
 
 /** Components a generated path needs in the Closure; empty for files every repo gets. */
@@ -89,5 +129,48 @@ export function componentsNeededBy(dest: string): ComponentName[] {
   return needed;
 }
 
-export const isGenerated = (dest: string, closure: Closure): boolean =>
-  componentsNeededBy(dest).every((c) => closure.has(c));
+/**
+ * Template files that exist under one Runtime only (ADR-0005). With the Component ownership
+ * above, no path has two writers.
+ */
+export const RUNTIME_OWNED_FILES: Readonly<Record<string, Runtime>> = {
+  "apps/api/wrangler.jsonc": "cloudflare",
+  "apps/api/src/cloudflare.ts": "cloudflare",
+  "apps/api/src/server.ts": "node",
+  "apps/api/tsdown.config.ts": "node",
+  "apps/web/wrangler.jsonc": "cloudflare",
+  "apps/web/src/worker.ts": "cloudflare",
+  "apps/api/.dev.vars.example": "cloudflare",
+  "apps/worker/wrangler.jsonc": "cloudflare",
+  "apps/worker/src/cloudflare.ts": "cloudflare",
+  "apps/worker/src/worker.ts": "node",
+  "apps/worker/tsdown.config.ts": "node",
+  "apps/worker/.dev.vars.example": "cloudflare",
+  "docs/adr/0003-job-queue-pg-boss.md": "node",
+  "docs/adr/0003-job-queue-cloudflare-queues.md": "cloudflare",
+  "scripts/cloudflare-dev.mjs": "cloudflare",
+  "scripts/cloudflare-dev.test.mjs": "cloudflare",
+  "docs/adr/0005-runtime-cloudflare-workers.md": "cloudflare",
+};
+
+/**
+ * The job-queue ADR file by Runtime (ADR-0005): ADR-0003 keeps its number, the name follows the
+ * queue. `architecture.json` points `apps/worker` at the file of the Runtime.
+ */
+export const JOB_QUEUE_ADR: Readonly<Record<Runtime, string>> = {
+  node: "docs/adr/0003-job-queue-pg-boss.md",
+  cloudflare: "docs/adr/0003-job-queue-cloudflare-queues.md",
+};
+
+/** Runtime-owned docs that describe the Apps, so they are not written without any App. */
+const NEEDS_AN_APP: ReadonlySet<string> = new Set(["docs/adr/0005-runtime-cloudflare-workers.md"]);
+
+export const isGenerated = (
+  dest: string,
+  { closure, runtime }: ResolutionContext,
+  runtimeOwned: Readonly<Record<string, Runtime>> = RUNTIME_OWNED_FILES,
+): boolean =>
+  componentsNeededBy(dest).every((c) => closure.has(c)) &&
+  (OWNED_BY_ANY[dest]?.some((c) => closure.has(c)) ?? true) &&
+  (!NEEDS_AN_APP.has(dest) || APP_NAMES.some((a) => closure.has(a))) &&
+  (runtimeOwned[dest] ?? runtime) === runtime;

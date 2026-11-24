@@ -64,12 +64,43 @@ jobs:
       - run: pnpm smoke:pack
 
   e2e:
-    name: E2E scaffold + install + verify
+    name: E2E scaffold + install + verify (${{ matrix.pm }}, ${{ matrix.runtime }}${{ matrix.cloudflare-apps && format(', {0}', matrix.cloudflare-apps) || '' }})
     runs-on: ubuntu-latest
     needs: test
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     strategy:
+      fail-fast: false
       matrix:
-        pm: [pnpm]
+        include:
+          - pm: pnpm
+            runtime: node
+            scaffold-args: ""
+          # The cloudflare entries: the default Selection (every App), then smaller ones.
+          - pm: pnpm
+            runtime: cloudflare
+            scaffold-args: "--runtime cloudflare"
+            cloudflare-apps: "api web worker"
+          - pm: pnpm
+            runtime: cloudflare
+            scaffold-args: "--apps api --runtime cloudflare"
+            cloudflare-apps: "api"
+          - pm: pnpm
+            runtime: cloudflare
+            scaffold-args: "--apps web --runtime cloudflare"
+            cloudflare-apps: "web"
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -82,7 +113,75 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - name: Scaffold a real repo (runs ${{ matrix.pm }} install)
-        run: node dist/cli.mjs "$RUNNER_TEMP/generated" -y --pm ${{ matrix.pm }}
+        run: node dist/cli.mjs "$RUNNER_TEMP/generated" -y --pm ${{ matrix.pm }} ${{ matrix.scaffold-args }}
       - name: Verify the generated repo
         working-directory: ${{ runner.temp }}/generated
         run: pnpm verify
+      - name: Build, then dry-run each Worker deploy
+        if: matrix.runtime == 'cloudflare'
+        working-directory: ${{ runner.temp }}/generated
+        run: |
+          for app in ${{ matrix.cloudflare-apps }}; do
+            (cd "apps/$app" && pnpm run build && pnpm exec wrangler deploy --dry-run)
+          done
+      - name: Boot every Worker locally and call each
+        if: matrix.runtime == 'cloudflare'
+        working-directory: ${{ runner.temp }}/generated
+        env:
+          CF_APPS: ${{ matrix.cloudflare-apps }}
+        run: |
+          echo "DATABASE_URL=postgres://app:app@localhost:5432/app" > .env
+          has() { case " $CF_APPS " in *" $1 "*) return 0;; esac; return 1; }
+          if has api; then
+            node scripts/cloudflare-dev.mjs -- pnpm --filter ./apps/api dev --ip 127.0.0.1 --port 8787 > "$RUNNER_TEMP/api-dev.log" 2>&1 &
+          fi
+          if has web; then
+            # The dev wrapper is generated only with api or worker; standalone web has no bindings.
+            wrap=
+            if has api || has worker; then wrap="node scripts/cloudflare-dev.mjs --"; fi
+            $wrap pnpm --filter ./apps/web dev --host 127.0.0.1 --port 5173 --strictPort > "$RUNNER_TEMP/web-dev.log" 2>&1 &
+          fi
+          if has worker; then
+            node scripts/cloudflare-dev.mjs -- pnpm --filter ./apps/worker dev --ip 127.0.0.1 --port 8788 > "$RUNNER_TEMP/worker-dev.log" 2>&1 &
+          fi
+          fail() { cat "$RUNNER_TEMP"/*-dev.log; exit 1; }
+          if has api; then
+            ok=
+            for i in $(seq 1 60); do
+              if body=$(curl -fsS http://127.0.0.1:8787/api/health); then
+                echo "api: $body"; echo "$body" | grep -q '"db":"up"' && ok=1; break
+              fi
+              sleep 2
+            done
+            [ -n "$ok" ] || fail
+          fi
+          if has api && has web; then
+            # web forwards /api/* to the api Worker over a service binding.
+            ok=
+            for i in $(seq 1 60); do
+              if body=$(curl -fsS http://127.0.0.1:5173/api/health); then
+                echo "web -> api: $body"; echo "$body" | grep -q '"db":"up"' && ok=1; break
+              fi
+              sleep 2
+            done
+            [ -n "$ok" ] || fail
+          fi
+          if has web && ! has api; then
+            curl -fsS --retry 30 --retry-delay 2 --retry-connrefused http://127.0.0.1:5173/ > /dev/null || fail
+          fi
+          if has worker; then
+            # The scheduled endpoint answers once the Worker is up. The cron is the one in wrangler.jsonc.
+            ok=
+            for i in $(seq 1 60); do
+              if curl -fsS "http://127.0.0.1:8788/cdn-cgi/local/scheduled?cron=*/5+*+*+*+*"; then
+                # The message was only sent; the job ran when the queue() handler logs its result.
+                for j in $(seq 1 30); do
+                  if grep -q "healthcheck { status: 'ok', db: 'up' }" "$RUNNER_TEMP/worker-dev.log"; then ok=1; break; fi
+                  sleep 1
+                done
+                break
+              fi
+              sleep 2
+            done
+            [ -n "$ok" ] || fail
+          fi

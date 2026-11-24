@@ -24,7 +24,7 @@ ${entries}
 # Packages allowed to run install scripts
 allowBuilds:
   esbuild: true
-`;
+${"wrangler" in catalog ? "  workerd: true\n" : ""}`;
 }
 
 export function createPnpmAdapter(

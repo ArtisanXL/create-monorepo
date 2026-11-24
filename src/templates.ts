@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveBlocks } from "./blocks.ts";
-import { FULL_CLOSURE } from "./components.ts";
+import { FULL_CONTEXT } from "./components.ts";
 
 export const TEMPLATES_DIR = fileURLToPath(new URL("../templates/", import.meta.url));
 
@@ -90,7 +90,7 @@ export async function catalogPackages(templatesDir = TEMPLATES_DIR): Promise<str
   return catalogPackagesOf(
     (await listTemplateFiles(templatesDir)).map(({ dest, text }) => ({
       dest,
-      text: resolveBlocks(text, FULL_CLOSURE, dest),
+      text: resolveBlocks(text, FULL_CONTEXT, dest),
     })),
   );
 }

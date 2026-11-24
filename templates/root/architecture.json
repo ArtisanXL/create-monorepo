@@ -2,6 +2,9 @@
   "$comment": "Single source of truth. Humans only (agent hook + CODEOWNERS). Every change requires an accepted ADR.",
   "scope": "__SCOPE__",
   "package_manager": "__PM__",
+@if cloudflare
+  "runtime": "cloudflare",
+@endif
   "test_allow": ["vitest"],
   "packages": {
 @if domain
@@ -38,14 +41,23 @@
 @if api
     "apps/api": {
       "adr": "docs/adr/0001-package-boundaries.md",
+@if cloudflare
+      "role": "Hono HTTP layer, run as a Cloudflare Worker: validation + core calls. No business rules.",
+@else
       "role": "Hono HTTP layer: validation + core calls. No business rules.",
+@endif
       "may_depend_on": ["packages/core", "packages/contracts", "packages/domain", "packages/db"]
     },
 @endif
 @if worker
     "apps/worker": {
+@if cloudflare
+      "adr": "docs/adr/0003-job-queue-cloudflare-queues.md",
+      "role": "Cloudflare Queues and Cron Triggers background jobs: core calls only. No business rules.",
+@else
       "adr": "docs/adr/0003-job-queue-pg-boss.md",
       "role": "pg-boss background jobs: core calls only. No business rules.",
+@endif
       "may_depend_on": ["packages/core", "packages/domain", "packages/db"]
     },
 @endif
@@ -53,12 +65,20 @@
     "apps/web": {
       "adr": "docs/adr/0001-package-boundaries.md",
 @if api
+@if cloudflare
+      "role": "React SPA served by a Cloudflare Worker. Talks to the API only through the hc<AppType> client.",
+@else
       "role": "React SPA. Talks to the API only through the hc<AppType> client.",
+@endif
       "may_depend_on": ["packages/contracts", "packages/domain"],
       "type_only": ["apps/api"]
 @endif
 @if !api
+@if cloudflare
+      "role": "React SPA served by a Cloudflare Worker. No API client.",
+@else
       "role": "React SPA. No API client.",
+@endif
       "may_depend_on": []
 @endif
     }
@@ -70,7 +90,11 @@
       "name": "api",
       "path": "apps/api",
       "trigger": "When the first HTTP endpoint is needed.",
+@if cloudflare
+      "deps": ["hono", "@hono/zod-validator"]
+@else
       "deps": ["hono", "@hono/node-server", "@hono/zod-validator"]
+@endif
     },
 @endif
 @if !web
@@ -78,7 +102,11 @@
       "name": "web",
       "path": "apps/web",
       "trigger": "When a UI is needed.",
+@if cloudflare
+      "deps": ["react", "react-dom", "vite", "@vitejs/plugin-react", "@tanstack/react-query", "@cloudflare/vite-plugin"]
+@else
       "deps": ["react", "react-dom", "vite", "@vitejs/plugin-react", "@tanstack/react-query"]
+@endif
     },
 @endif
 @if !worker
@@ -86,7 +114,11 @@
       "name": "worker",
       "path": "apps/worker",
       "trigger": "When the first background job is needed.",
+@if cloudflare
+      "deps": []
+@else
       "deps": ["pg-boss"]
+@endif
     },
 @endif
 @if !core
