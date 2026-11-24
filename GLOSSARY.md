@@ -45,3 +45,9 @@ _Avoid_: platform, target, edge
 Cloudflare's unit of deployment, always written in full. A bare "worker" means only the `worker`
 App, which on the `cloudflare` Runtime is itself deployed as a Cloudflare Worker.
 _Avoid_: Worker (alone), edge function
+
+**Database engine**:
+The kind of database the generated repo's `db` Package targets: `postgres`, `mysql`, `sqlite` or
+`d1`. One per generated repo; the default is `postgres`. Which engines are valid depends on the
+Runtime.
+_Avoid_: dialect, driver, database type, flavor
