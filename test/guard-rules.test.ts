@@ -2605,3 +2605,26 @@ describe("guard decision: deploy script (cloudflare Runtime only)", () => {
     expect(run("pnpm run predeploy-check")).toEqual({ allow: true });
   });
 });
+
+describe("guard decision: adr:review", () => {
+  it.each([
+    "pnpm adr:review",
+    "pnpm run adr:review",
+    "npm run adr:review",
+    "yarn adr:review",
+    "bun run adr:review",
+    "turbo run adr:review",
+    "node scripts/adr.mjs review",
+    "node ./scripts/adr.mjs",
+    "cd scripts && node adr.mjs review",
+  ])("blocks %s", (cmd) => {
+    expect(blocked(bash(cmd)), cmd).toContain("adr:review");
+  });
+
+  it.each(["pnpm adr:list", "pnpm run adr:list", "node scripts/adr.mjs list", "echo adr:review"])(
+    "allows %s",
+    (cmd) => {
+      expect(bash(cmd)).toEqual({ allow: true });
+    },
+  );
+});

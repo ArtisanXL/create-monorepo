@@ -738,6 +738,9 @@ const WRANGLER_MSG =
 const DEPLOY_SCRIPT_MSG =
   "The deploy script runs `wrangler deploy` against the Cloudflare account; only humans deploy. Use `wrangler deploy --dry-run` to check a build.";
 
+const ADR_REVIEW_MSG =
+  "adr:review accepts or rejects ADR drafts (it moves files under the protected docs/adr/); only humans run it, in a terminal. `adr:list` reads the drafts and is allowed.";
+
 const RUNNERS = ["pnpm", "npm", "yarn", "bun"];
 const isWrangler =(text) => /^wrangler(?:@[^/]*)?$/.test(baseName(text));
 
@@ -795,6 +798,15 @@ function deployScriptRule(c) {
   }
   if ((c.name === "yarn" || c.name === "bun") && own.find((a) => !a.startsWith("-")) === "deploy") return DEPLOY_SCRIPT_MSG;
   return undefined;
+}
+
+/** `<pm> run adr:review`, `npx adr:review`, `node scripts/adr.mjs review` (anything but `list`). */
+function adrReviewRule(c) {
+  if (![...RUNNERS, ...LAUNCHERS, "turbo", "node", "bun"].includes(c.name)) return undefined;
+  const args = c.args.map((a) => a.text);
+  if (args.includes("adr:review")) return ADR_REVIEW_MSG;
+  const k = args.findIndex((a) => baseName(a) === "adr.mjs");
+  return k >= 0 && args[k + 1] !== "list" ? ADR_REVIEW_MSG : undefined;
 }
 
 function directRule(ctx, cmd, parsed) {
@@ -884,6 +896,7 @@ function directRule(ctx, cmd, parsed) {
       removeRule(env, c) ??
       bulkRule(env, c) ??
       wranglerRule(c) ??
+      adrReviewRule(c) ??
       (contract.runtime === "cloudflare" ? deployScriptRule(c) : undefined);
     if (msg) return msg;
     if (DELETERS.has(c.name) && printfRef && c.args.some((a) => printfRef.test(a.text))) return MSG.printfVar;
