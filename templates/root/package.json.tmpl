@@ -14,6 +14,8 @@
     "format": "biome check --write .",
     "arch": "node scripts/arch-check.mjs",
     "verify": "__RUN__ arch && __RUN__ lint && __RUN__ typecheck && __RUN__ test",
+    "adr:list": "node scripts/adr.mjs list",
+    "adr:review": "node scripts/adr.mjs review",
 @if db
     "db:generate": "__FILTER__ __SCOPE__/db generate",
     "db:migrate": "__FILTER__ __SCOPE__/db migrate",

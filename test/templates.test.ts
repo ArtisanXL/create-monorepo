@@ -80,6 +80,7 @@ describe("listTemplateFiles", () => {
       ".claude/hooks/guard.mjs",
       ".claude/hooks/stop-check.mjs",
       ".githooks/pre-commit",
+      "scripts/adr.mjs",
       "scripts/arch-check.mjs",
       "scripts/worktree.mjs",
     ]);
