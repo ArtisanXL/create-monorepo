@@ -207,9 +207,8 @@ export function checkDraft(root, name) {
   if (!HEADING.test(text)) warnings.push("the first heading should be `# NNNN. Title`, so accepting can number it");
   if (!STATUS.test(text)) warnings.push("missing a `- Status:` line");
   if (!DATE.test(text)) warnings.push("missing a `- Date:` line");
-  for (const s of REQUIRED_SECTIONS) {
-    if (!new RegExp(`^## ${s.replace(/\./g, "\\.")}\\b`, "m").test(text)) warnings.push(`missing the \`## ${s}\` section`);
-  }
+  const headings = new Set(text.split("\n").map((l) => l.trim()));
+  for (const s of REQUIRED_SECTIONS) if (!headings.has(`## ${s}`)) warnings.push(`missing the \`## ${s}\` section`);
   return { errors, warnings };
 }
 

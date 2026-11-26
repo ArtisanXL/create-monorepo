@@ -574,7 +574,7 @@ catalog:
 allowBuilds:
   esbuild: true
 
-=== scripts/adr-lib.mjs (12304 bytes) ===
+=== scripts/adr-lib.mjs (12321 bytes) ===
 // Pure ADR draft handling for scripts/adr.mjs: no prompts, no process state.
 // Drafts live in docs/adr/proposed/; accepting moves one to docs/adr/ under the next number,
 // rejecting moves it to docs/adr/rejected/ with the reason. Accepting also applies the draft's
@@ -784,9 +784,8 @@ export function checkDraft(root, name) {
   if (!HEADING.test(text)) warnings.push("the first heading should be `# NNNN. Title`, so accepting can number it");
   if (!STATUS.test(text)) warnings.push("missing a `- Status:` line");
   if (!DATE.test(text)) warnings.push("missing a `- Date:` line");
-  for (const s of REQUIRED_SECTIONS) {
-    if (!new RegExp(`^## ${s.replace(/\./g, "\\.")}\\b`, "m").test(text)) warnings.push(`missing the \`## ${s}\` section`);
-  }
+  const headings = new Set(text.split("\n").map((l) => l.trim()));
+  for (const s of REQUIRED_SECTIONS) if (!headings.has(`## ${s}`)) warnings.push(`missing the \`## ${s}\` section`);
   return { errors, warnings };
 }
 
