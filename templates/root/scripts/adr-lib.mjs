@@ -45,10 +45,23 @@ export function rejectedText(text, date, reason) {
   return withStatus(text, `rejected (${date}): ${reason.replace(/\s+/g, " ").trim()}`, date).replace(HEADING, "# ");
 }
 
-/** The body of the draft's `## architecture.json change` section (the architecture patch), or undefined when it holds no JSON. */
+const CHANGE_SECTION = /^## architecture\.json change[^\n]*\n([\s\S]*?)(?=^## |(?![\s\S]))/m;
+const FENCE = /^```([^\n`]*)\n([\s\S]*?)^```[ \t]*$/gm;
+
+/**
+ * The architecture patch of a draft: the inside of the one ```json (or bare ```) block in its
+ * `## architecture.json change` section, or undefined when there is none or it is empty. Prose
+ * around the block is ignored. Throws when the section has more than one such block, or a line
+ * outside any block that looks like JSON (a patch someone forgot to fence would otherwise be dropped).
+ */
 export function architectureChange(text) {
-  const m = /^## architecture\.json change[^\n]*\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(text);
-  const body = m?.[1].replace(/```(?:json)?/g, "").trim();
+  const section = CHANGE_SECTION.exec(text)?.[1];
+  if (section === undefined) return undefined;
+  const fences = [...section.matchAll(FENCE)];
+  const patches = fences.filter((f) => ["", "json"].includes(f[1].trim()));
+  if (patches.length > 1) throw new Error(`the architecture.json change must hold one \`\`\`json block, found ${patches.length}`);
+  if (/^\s*[[{]/m.test(section.replace(FENCE, ""))) throw new Error("the architecture.json change has JSON outside a ```json block; put the patch inside the block");
+  const body = patches[0]?.[2].trim();
   return body ? body : undefined;
 }
 
@@ -174,6 +187,34 @@ export function prepareAccept(root, name, date) {
     assertContract(after);
   }
   return { name, file, adrText: acceptedText(text, number, date), before, after };
+}
+
+const REQUIRED_SECTIONS = ["Context", "Decision", "Consequences", "architecture.json change"];
+
+/**
+ * Checks a draft without writing anything. `errors` are exactly what would make `adr:review` refuse
+ * to accept it (a dry run of the accept); `warnings` are parts of TEMPLATE.md that are missing but do not block acceptance.
+ */
+export function checkDraft(root, name) {
+  const errors = [];
+  try {
+    prepareAccept(root, name, "0000-00-00");
+  } catch (e) {
+    errors.push(e.message);
+  }
+  const text = readDraft(root, name);
+  const warnings = [];
+  if (!HEADING.test(text)) warnings.push("the first heading should be `# NNNN. Title`, so accepting can number it");
+  if (!STATUS.test(text)) warnings.push("missing a `- Status:` line");
+  if (!DATE.test(text)) warnings.push("missing a `- Date:` line");
+  const headings = new Set(text.split("\n").map((l) => l.trim()));
+  for (const s of REQUIRED_SECTIONS) if (!headings.has(`## ${s}`)) warnings.push(`missing the \`## ${s}\` section`);
+  return { errors, warnings };
+}
+
+/** `checkDraft` for every draft in docs/adr/proposed/, in listing order. */
+export function checkDrafts(root) {
+  return listDrafts(root).map((name) => ({ name, ...checkDraft(root, name) }));
 }
 
 /** Writes a prepared accept: architecture.json first, then the ADR, then the draft is removed. */

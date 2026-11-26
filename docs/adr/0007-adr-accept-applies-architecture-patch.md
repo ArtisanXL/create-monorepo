@@ -50,3 +50,9 @@ cannot run `adr:review`, so applying the change inside `adr:review` keeps the hu
 - `TEMPLATE.md`, `proposed/README.md` and the generated ADR-0002 describe the patch format.
 - Golden files that include these templates change.
 - Existing drafts with free-form change text must be rewritten before they can be accepted.
+- Only the inside of the section's single ```` ```json ```` (or bare ```` ``` ````) block is the patch;
+  prose around it, such as `TEMPLATE.md`'s own explanation, is ignored. More than one such block, or a
+  JSON-looking line outside it, is an error, so an unfenced patch is never silently dropped.
+- `adr:check` runs the same validation as accepting, without writing, and also warns about missing
+  template parts. Agents may run it, and `verify` includes it, so a draft that cannot be accepted
+  fails `verify` until it is fixed or rebased on the current `architecture.json`.

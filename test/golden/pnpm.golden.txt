@@ -217,7 +217,7 @@ coverage
 === .worktreeinclude (5 bytes) ===
 .env
 
-=== CLAUDE.md (2516 bytes) ===
+=== CLAUDE.md (2600 bytes) ===
 <!-- scaffold:begin — managed by @artisanxl/create-monorepo -->
 # Project rules
 
@@ -227,7 +227,7 @@ This block is protected by `.claude/hooks/guard.mjs` and `pnpm arch`. Anything o
 Chat with the user in the user's language. Everything else — code, comments, docs, ADRs, commit messages, PR text, log and error messages — is written in English.
 
 ## Commands
-- `pnpm verify`: architecture, lint, typecheck and tests. **Work is done only when this passes.**
+- `pnpm verify`: architecture, ADR drafts, lint, typecheck and tests. **Work is done only when this passes.**
 - `pnpm dev`: all apps. Postgres via `docker compose up -d`.
 - `pnpm arch`: architecture check only.
 - `pnpm worktree:setup` / `worktree:info`: per-worktree `.env` + database (Paseo runs setup automatically; see `paseo.json`). Never hard-code ports; services get `$PASEO_PORT`.
@@ -248,7 +248,7 @@ Dependency direction and package roles: `architecture.json` and `docs/adr/0001-p
 
 ## Hard rules
 1. **No new packages or folders.** Only the packages in `architecture.json` may exist under `apps/` and `packages/`.
-2. **Deferred work stays deferred.** Packages and dependencies under `architecture.json > deferred` are not added before their trigger. If you think one is needed, **stop**, write a draft under `docs/adr/proposed/` following `docs/adr/TEMPLATE.md`, and ask the user, who reviews it with `pnpm adr:review`. You may read drafts with `pnpm adr:list`, but never run `adr:review` yourself.
+2. **Deferred work stays deferred.** Packages and dependencies under `architecture.json > deferred` are not added before their trigger. If you think one is needed, **stop**, write a draft under `docs/adr/proposed/` following `docs/adr/TEMPLATE.md`, and ask the user, who reviews it with `pnpm adr:review`. After writing a draft, run `pnpm adr:check` and fix it until it passes. You may read drafts with `pnpm adr:list`, but never run `adr:review` yourself.
 3. **Protected files are not changed:** `architecture.json > protected_paths` and this block. Humans only.
 4. Never silence checks: `@ts-ignore`, `@ts-nocheck`, `--no-verify` are forbidden. Every `biome-ignore` needs a reason.
 5. Money is always the `Money` type from `domain` (`bigint` + currency); never `number`.
@@ -736,7 +736,7 @@ export default defineConfig({
     "$comment": "The scaffold block in CLAUDE.md is protected; everything outside it is free. If a human changes the block, update sha256 (pnpm arch --claude-hash).",
     "begin": "<!-- scaffold:begin",
     "end": "<!-- scaffold:end -->",
-    "sha256": "8009e5ab844aee97a89f9dd4bba00d3995c3372d312405986100646d392913b7"
+    "sha256": "a66f355544a224ea2e03ecac2c55bf23f1a8663d47586677c2b6e499e9fe47f8"
   }
 }
 
@@ -799,7 +799,7 @@ worker ──▶ core, db, domain
 source imports, deferred dependencies, `@ts-ignore`/`@ts-nocheck`, empty placeholder files and the
 CLAUDE.md scaffold block. Runs in the pre-commit hook, CI and the Claude Code Stop hook.
 
-=== docs/adr/0002-deferred-packages.md (1047 bytes) ===
+=== docs/adr/0002-deferred-packages.md (1141 bytes) ===
 # 0002. Packages deferred until needed
 
 - Status: accepted
@@ -814,7 +814,7 @@ until their trigger condition is met and an ADR is accepted. Empty placeholder f
 ## Process
 1. An agent or developer notices the need.
 2. They write a draft under `docs/adr/proposed/NNNN-title.md` following `TEMPLATE.md` (the only ADR path agents may write).
-3. A human runs `pnpm adr:review` (interactive; `pnpm adr:list` shows the drafts). Accepting moves the draft to `docs/adr/` under the next number and applies its `architecture.json change` (a JSON Patch) to `architecture.json` after showing the diff and asking for confirmation; if the patch does not apply, nothing changes. Rejecting asks for a reason and moves the draft to `docs/adr/rejected/`. Agents cannot run `adr:review`.
+3. A human runs `pnpm adr:review` (interactive; `pnpm adr:list` shows the drafts). Accepting moves the draft to `docs/adr/` under the next number and applies its `architecture.json change` (a JSON Patch) to `architecture.json` after showing the diff and asking for confirmation; if the patch does not apply, nothing changes. Rejecting asks for a reason and moves the draft to `docs/adr/rejected/`. Agents cannot run `adr:review`; `pnpm adr:check` (also part of `verify`) reports what would stop a draft from being accepted.
 4. Only then is the package/dependency added.
 
 === docs/adr/0003-job-queue-pg-boss.md (313 bytes) ===
@@ -852,7 +852,7 @@ Sharing one database or fixed ports between them causes collisions.
 ## Consequences
 Worktrees removed outside Paseo leave databases behind; `pnpm worktree:gc --yes` drops them.
 
-=== docs/adr/TEMPLATE.md (364 bytes) ===
+=== docs/adr/TEMPLATE.md (471 bytes) ===
 # NNNN. Title
 
 - Status: proposed | accepted | superseded by NNNN
@@ -864,15 +864,17 @@ Worktrees removed outside Paseo leave databases behind; `pnpm worktree:gc --yes`
 ## architecture.json change
 A JSON Patch (RFC 6902: `add`, `remove`, `replace`, `test`) applied to `architecture.json` when a human
 accepts the draft. Use `{{adr}}` for this ADR's own path. Leave the block empty for no change.
+Only the inside of the block is read; text outside it is ignored. Run `adr:check` after writing the draft.
 ```json
 ```
 
-=== docs/adr/proposed/README.md (250 bytes) ===
+=== docs/adr/proposed/README.md (356 bytes) ===
 ADR **drafts** written by agents and developers go here. Nothing in this folder is accepted, and
 `architecture.json` may not reference it.
 Its `## architecture.json change` section is a JSON Patch (see `TEMPLATE.md`); accepting the draft applies it.
+Run `adr:check` after writing a draft: it reports anything that would stop the draft from being accepted.
 
-=== package.json (1149 bytes) ===
+=== package.json (1214 bytes) ===
 {
   "name": "@acme/root",
   "private": true,
@@ -888,8 +890,9 @@ Its `## architecture.json change` section is a JSON Patch (see `TEMPLATE.md`); a
     "lint": "biome check .",
     "format": "biome check --write .",
     "arch": "node scripts/arch-check.mjs",
-    "verify": "pnpm arch && pnpm lint && pnpm typecheck && pnpm test",
+    "verify": "pnpm arch && pnpm adr:check && pnpm lint && pnpm typecheck && pnpm test",
     "adr:list": "node scripts/adr.mjs list",
+    "adr:check": "node scripts/adr.mjs check",
     "adr:review": "node scripts/adr.mjs review",
     "db:generate": "pnpm --filter @acme/db generate",
     "db:migrate": "pnpm --filter @acme/db migrate",
@@ -1223,7 +1226,7 @@ catalog:
 allowBuilds:
   esbuild: true
 
-=== scripts/adr-lib.mjs (10276 bytes) ===
+=== scripts/adr-lib.mjs (12321 bytes) ===
 // Pure ADR draft handling for scripts/adr.mjs: no prompts, no process state.
 // Drafts live in docs/adr/proposed/; accepting moves one to docs/adr/ under the next number,
 // rejecting moves it to docs/adr/rejected/ with the reason. Accepting also applies the draft's
@@ -1271,10 +1274,23 @@ export function rejectedText(text, date, reason) {
   return withStatus(text, `rejected (${date}): ${reason.replace(/\s+/g, " ").trim()}`, date).replace(HEADING, "# ");
 }
 
-/** The body of the draft's `## architecture.json change` section (the architecture patch), or undefined when it holds no JSON. */
+const CHANGE_SECTION = /^## architecture\.json change[^\n]*\n([\s\S]*?)(?=^## |(?![\s\S]))/m;
+const FENCE = /^```([^\n`]*)\n([\s\S]*?)^```[ \t]*$/gm;
+
+/**
+ * The architecture patch of a draft: the inside of the one ```json (or bare ```) block in its
+ * `## architecture.json change` section, or undefined when there is none or it is empty. Prose
+ * around the block is ignored. Throws when the section has more than one such block, or a line
+ * outside any block that looks like JSON (a patch someone forgot to fence would otherwise be dropped).
+ */
 export function architectureChange(text) {
-  const m = /^## architecture\.json change[^\n]*\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(text);
-  const body = m?.[1].replace(/```(?:json)?/g, "").trim();
+  const section = CHANGE_SECTION.exec(text)?.[1];
+  if (section === undefined) return undefined;
+  const fences = [...section.matchAll(FENCE)];
+  const patches = fences.filter((f) => ["", "json"].includes(f[1].trim()));
+  if (patches.length > 1) throw new Error(`the architecture.json change must hold one \`\`\`json block, found ${patches.length}`);
+  if (/^\s*[[{]/m.test(section.replace(FENCE, ""))) throw new Error("the architecture.json change has JSON outside a ```json block; put the patch inside the block");
+  const body = patches[0]?.[2].trim();
   return body ? body : undefined;
 }
 
@@ -1402,6 +1418,34 @@ export function prepareAccept(root, name, date) {
   return { name, file, adrText: acceptedText(text, number, date), before, after };
 }
 
+const REQUIRED_SECTIONS = ["Context", "Decision", "Consequences", "architecture.json change"];
+
+/**
+ * Checks a draft without writing anything. `errors` are exactly what would make `adr:review` refuse
+ * to accept it (a dry run of the accept); `warnings` are parts of TEMPLATE.md that are missing but do not block acceptance.
+ */
+export function checkDraft(root, name) {
+  const errors = [];
+  try {
+    prepareAccept(root, name, "0000-00-00");
+  } catch (e) {
+    errors.push(e.message);
+  }
+  const text = readDraft(root, name);
+  const warnings = [];
+  if (!HEADING.test(text)) warnings.push("the first heading should be `# NNNN. Title`, so accepting can number it");
+  if (!STATUS.test(text)) warnings.push("missing a `- Status:` line");
+  if (!DATE.test(text)) warnings.push("missing a `- Date:` line");
+  const headings = new Set(text.split("\n").map((l) => l.trim()));
+  for (const s of REQUIRED_SECTIONS) if (!headings.has(`## ${s}`)) warnings.push(`missing the \`## ${s}\` section`);
+  return { errors, warnings };
+}
+
+/** `checkDraft` for every draft in docs/adr/proposed/, in listing order. */
+export function checkDrafts(root) {
+  return listDrafts(root).map((name) => ({ name, ...checkDraft(root, name) }));
+}
+
 /** Writes a prepared accept: architecture.json first, then the ADR, then the draft is removed. */
 export function commitAccept(root, plan) {
   if (plan.after) writeFileSync(join(root, ARCHITECTURE_FILE), `${JSON.stringify(plan.after, null, 2)}\n`);
@@ -1443,16 +1487,19 @@ export function rejectDraft(root, name, date, reason) {
   return { file: `${REJECTED_DIR}/${target}` };
 }
 
-=== scripts/adr-lib.test.mjs (8488 bytes) ===
+=== scripts/adr-lib.test.mjs (12360 bytes) ===
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   acceptedText,
   applyPatch,
   architectureChange,
   assertContract,
+  checkDraft,
+  checkDrafts,
   commitAccept,
   diffLines,
   listDrafts,
@@ -1463,6 +1510,8 @@ import {
   rejectedText,
   slugOf,
 } from "./adr-lib.mjs";
+
+const here = dirname(fileURLToPath(import.meta.url));
 
 const DRAFT = `# NNNN. Use Redis
 
@@ -1514,6 +1563,72 @@ describe("text rewriting", () => {
     expect(architectureChange(DRAFT)).toContain('"op": "add"');
     expect(architectureChange("# x\n\n## architecture.json change\n```json\n```\n")).toBeUndefined();
     expect(architectureChange("# x\n")).toBeUndefined();
+  });
+  it("reads only the fenced block, so TEMPLATE.md copied as-is has no change", () => {
+    const template = readFileSync(join(here, "../docs/adr/TEMPLATE.md"), "utf8");
+    expect(architectureChange(template)).toBeUndefined();
+    expect(architectureChange(`## architecture.json change\nSome prose.\n\`\`\`json\n[1]\n\`\`\`\nMore prose.\n`)).toBe("[1]");
+    expect(architectureChange("## architecture.json change\n```\n[2]\n```\n")).toBe("[2]");
+    expect(architectureChange("## architecture.json change\nNone.\n## Other\n```json\n[3]\n```\n")).toBeUndefined();
+  });
+  it("ignores fences in other languages", () => {
+    expect(architectureChange("## architecture.json change\n```text\n[1]\n```\n```json\n[2]\n```\n")).toBe("[2]");
+  });
+  it("rejects a patch outside a fence and more than one json block", () => {
+    expect(() => architectureChange('## architecture.json change\n[{ "op": "add" }]\n')).toThrow(/```json block/);
+    expect(() => architectureChange("## architecture.json change\n```json\n```\n{\n")).toThrow(/```json block/);
+    expect(() => architectureChange("## architecture.json change\n```json\n[]\n```\n```json\n[]\n```\n")).toThrow(/one/);
+  });
+});
+
+describe("checking drafts", () => {
+  let root;
+  const setup = (draft) => {
+    root = mkdtempSync(join(tmpdir(), "adr-check-"));
+    mkdirSync(join(root, "docs/adr/proposed"), { recursive: true });
+    writeFileSync(join(root, "docs/adr/0001-a.md"), "# 0001. A\n");
+    writeFileSync(join(root, "docs/adr/proposed/README.md"), "drafts\n");
+    writeFileSync(join(root, "architecture.json"), ARCH);
+    if (draft !== undefined) writeFileSync(join(root, "docs/adr/proposed/NNNN-x.md"), draft);
+  };
+  afterEach(() => root && rmSync(root, { recursive: true, force: true }));
+
+  const FULL = `# NNNN. X\n\n- Status: proposed\n- Date: 2026-01-02\n\n## Context\nc\n## Decision\nd\n## Consequences\ne\n## architecture.json change\nprose\n\`\`\`json\n\`\`\`\n`;
+
+  it("passes a complete draft and the template itself", () => {
+    setup(FULL);
+    expect(checkDraft(root, "NNNN-x.md")).toEqual({ errors: [], warnings: [] });
+    writeFileSync(join(root, "docs/adr/proposed/NNNN-x.md"), readFileSync(join(here, "../docs/adr/TEMPLATE.md"), "utf8"));
+    expect(checkDraft(root, "NNNN-x.md")).toEqual({ errors: [], warnings: [] });
+  });
+
+  it("reports what would block acceptance as errors, and changes nothing", () => {
+    setup(FULL.replace("```json\n```", '```json\n[{ "op": "test", "path": "/scope", "value": "@other" }]\n```'));
+    const { errors } = checkDraft(root, "NNNN-x.md");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatch(/does not match/);
+    expect(readFileSync(join(root, "architecture.json"), "utf8")).toBe(ARCH);
+    expect(listDrafts(root)).toEqual(["NNNN-x.md"]);
+    expect(readdirSync(join(root, "docs/adr"))).toEqual(["0001-a.md", "proposed"]);
+  });
+
+  it("warns about template parts that do not block acceptance", () => {
+    setup("# X\n\nSome text.\n");
+    const { errors, warnings } = checkDraft(root, "NNNN-x.md");
+    expect(errors).toEqual([]);
+    expect(warnings.join("\n")).toMatch(/NNNN\. Title/);
+    expect(warnings.join("\n")).toMatch(/Status/);
+    expect(warnings.join("\n")).toMatch(/Date/);
+    for (const s of ["Context", "Decision", "Consequences", "architecture.json change"]) expect(warnings.join("\n")).toContain(`## ${s}`);
+  });
+
+  it("checks every draft", () => {
+    setup(FULL);
+    writeFileSync(join(root, "docs/adr/proposed/NNNN-y.md"), `${FULL}{ "op": "add" }\n`);
+    const results = checkDrafts(root);
+    expect(results.map((r) => r.name)).toEqual(["NNNN-x.md", "NNNN-y.md"]);
+    expect(results[0].errors).toEqual([]);
+    expect(results[1].errors[0]).toMatch(/```json block/);
   });
 });
 
@@ -1633,19 +1748,20 @@ describe("contract and diff", () => {
   });
 });
 
-=== scripts/adr.mjs (3269 bytes) ===
+=== scripts/adr.mjs (4546 bytes) ===
 #!/usr/bin/env node
 /**
  * Review the ADR drafts agents and developers leave in docs/adr/proposed/ (see docs/adr/0002-deferred-packages.md).
  *   pnpm adr:list    list the drafts (read-only)
+ *   pnpm adr:check   check the drafts (or the named ones) the way accepting would; exits 1 on an error (read-only)
  *   pnpm adr:review  go through the drafts: accept, reject (with a reason), skip. Humans only: needs a terminal.
  * Accepting moves the draft to docs/adr/ under the next number and applies its `architecture.json change`
  * (a JSON Patch) to architecture.json, after showing the diff and asking for confirmation. All or nothing.
  */
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
-import { commitAccept, diffLines, listDrafts, PROPOSED_DIR, prepareAccept, readDraft, rejectDraft, summaryOf } from "./adr-lib.mjs";
+import { checkDraft, checkDrafts, commitAccept, diffLines, listDrafts, PROPOSED_DIR, prepareAccept, readDraft, rejectDraft, summaryOf } from "./adr-lib.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const today = () => new Date().toISOString().slice(0, 10);
@@ -1655,8 +1771,31 @@ function list() {
   if (drafts.length === 0) return console.log(`No drafts in ${PROPOSED_DIR}/.`);
   for (const name of drafts) {
     const { title, status } = summaryOf(readDraft(root, name));
-    console.log(`${name}\n  ${title}\n  Status: ${status}`);
+    console.log(`${name}\n  ${title}\n  Status: ${status}\n  Check: ${checkLine(checkDraft(root, name))}`);
   }
+}
+
+function checkLine({ errors, warnings }) {
+  if (errors.length > 0) return `error: ${errors[0]}`;
+  if (warnings.length > 0) return `ok, ${warnings.length} warning(s); run adr:check`;
+  return "ok";
+}
+
+function check(names) {
+  const drafts = listDrafts(root);
+  const unknown = names.filter((n) => !drafts.includes(n));
+  if (unknown.length > 0) {
+    console.error(`Not a draft in ${PROPOSED_DIR}/: ${unknown.join(", ")}`);
+    process.exit(1);
+  }
+  const results = names.length > 0 ? names.map((name) => ({ name, ...checkDraft(root, name) })) : checkDrafts(root);
+  if (results.length === 0) return console.log(`No drafts in ${PROPOSED_DIR}/.`);
+  for (const { name, errors, warnings } of results) {
+    console.log(`${name}: ${errors.length > 0 ? "cannot be accepted" : "ok"}`);
+    for (const e of errors) console.log(`  error: ${e}`);
+    for (const w of warnings) console.log(`  warning: ${w}`);
+  }
+  if (results.some((r) => r.errors.length > 0)) process.exit(1);
 }
 
 async function review() {
@@ -1710,9 +1849,10 @@ async function review() {
 
 const command = process.argv[2];
 if (command === "list") list();
+else if (command === "check") check(process.argv.slice(3).map((a) => basename(a)));
 else if (command === "review") await review();
 else {
-  console.error("Usage: node scripts/adr.mjs list | review");
+  console.error("Usage: node scripts/adr.mjs list | check [draft...] | review");
   process.exit(1);
 }
 
@@ -2092,7 +2232,7 @@ export function check(snapshot) {
   return errors;
 }
 
-=== scripts/guard-rules.mjs (57281 bytes) ===
+=== scripts/guard-rules.mjs (57327 bytes) ===
 // The guard hook's decision, free of I/O: no stdin, env, filesystem or exit. The first matching
 // rule wins, so each message stays the same as it always was. Imported by .claude/hooks/guard.mjs.
 import path from "node:path";
@@ -2834,7 +2974,7 @@ const DEPLOY_SCRIPT_MSG =
   "The deploy script runs `wrangler deploy` against the Cloudflare account; only humans deploy. Use `wrangler deploy --dry-run` to check a build.";
 
 const ADR_REVIEW_MSG =
-  "adr:review accepts or rejects ADR drafts (it moves files under the protected docs/adr/); only humans run it, in a terminal. `adr:list` reads the drafts and is allowed.";
+  "adr:review accepts or rejects ADR drafts (it moves files under the protected docs/adr/); only humans run it, in a terminal. `adr:list` and `adr:check` read the drafts and are allowed.";
 
 const RUNNERS = ["pnpm", "npm", "yarn", "bun"];
 const isWrangler =(text) => /^wrangler(?:@[^/]*)?$/.test(baseName(text));
@@ -2895,13 +3035,13 @@ function deployScriptRule(c) {
   return undefined;
 }
 
-/** `<pm> run adr:review`, `npx adr:review`, `node scripts/adr.mjs review` (anything but `list`). */
+/** `<pm> run adr:review`, `npx adr:review`, `node scripts/adr.mjs review` (anything but `list` and `check`). */
 function adrReviewRule(c) {
   if (![...RUNNERS, ...LAUNCHERS, "turbo", "node", "bun"].includes(c.name)) return undefined;
   const args = c.args.map((a) => a.text);
   if (args.includes("adr:review")) return ADR_REVIEW_MSG;
   const k = args.findIndex((a) => baseName(a) === "adr.mjs");
-  return k >= 0 && args[k + 1] !== "list" ? ADR_REVIEW_MSG : undefined;
+  return k >= 0 && !["list", "check"].includes(args[k + 1]) ? ADR_REVIEW_MSG : undefined;
 }
 
 function directRule(ctx, cmd, parsed) {
