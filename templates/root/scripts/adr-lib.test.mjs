@@ -1,12 +1,15 @@
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   acceptedText,
   applyPatch,
   architectureChange,
   assertContract,
+  checkDraft,
+  checkDrafts,
   commitAccept,
   diffLines,
   listDrafts,
@@ -17,6 +20,8 @@ import {
   rejectedText,
   slugOf,
 } from "./adr-lib.mjs";
+
+const here = dirname(fileURLToPath(import.meta.url));
 
 const DRAFT = `# NNNN. Use Redis
 
@@ -68,6 +73,72 @@ describe("text rewriting", () => {
     expect(architectureChange(DRAFT)).toContain('"op": "add"');
     expect(architectureChange("# x\n\n## architecture.json change\n```json\n```\n")).toBeUndefined();
     expect(architectureChange("# x\n")).toBeUndefined();
+  });
+  it("reads only the fenced block, so TEMPLATE.md copied as-is has no change", () => {
+    const template = readFileSync(join(here, "../docs/adr/TEMPLATE.md"), "utf8");
+    expect(architectureChange(template)).toBeUndefined();
+    expect(architectureChange(`## architecture.json change\nSome prose.\n\`\`\`json\n[1]\n\`\`\`\nMore prose.\n`)).toBe("[1]");
+    expect(architectureChange("## architecture.json change\n```\n[2]\n```\n")).toBe("[2]");
+    expect(architectureChange("## architecture.json change\nNone.\n## Other\n```json\n[3]\n```\n")).toBeUndefined();
+  });
+  it("ignores fences in other languages", () => {
+    expect(architectureChange("## architecture.json change\n```text\n[1]\n```\n```json\n[2]\n```\n")).toBe("[2]");
+  });
+  it("rejects a patch outside a fence and more than one json block", () => {
+    expect(() => architectureChange('## architecture.json change\n[{ "op": "add" }]\n')).toThrow(/```json block/);
+    expect(() => architectureChange("## architecture.json change\n```json\n```\n{\n")).toThrow(/```json block/);
+    expect(() => architectureChange("## architecture.json change\n```json\n[]\n```\n```json\n[]\n```\n")).toThrow(/one/);
+  });
+});
+
+describe("checking drafts", () => {
+  let root;
+  const setup = (draft) => {
+    root = mkdtempSync(join(tmpdir(), "adr-check-"));
+    mkdirSync(join(root, "docs/adr/proposed"), { recursive: true });
+    writeFileSync(join(root, "docs/adr/0001-a.md"), "# 0001. A\n");
+    writeFileSync(join(root, "docs/adr/proposed/README.md"), "drafts\n");
+    writeFileSync(join(root, "architecture.json"), ARCH);
+    if (draft !== undefined) writeFileSync(join(root, "docs/adr/proposed/NNNN-x.md"), draft);
+  };
+  afterEach(() => root && rmSync(root, { recursive: true, force: true }));
+
+  const FULL = `# NNNN. X\n\n- Status: proposed\n- Date: 2026-01-02\n\n## Context\nc\n## Decision\nd\n## Consequences\ne\n## architecture.json change\nprose\n\`\`\`json\n\`\`\`\n`;
+
+  it("passes a complete draft and the template itself", () => {
+    setup(FULL);
+    expect(checkDraft(root, "NNNN-x.md")).toEqual({ errors: [], warnings: [] });
+    writeFileSync(join(root, "docs/adr/proposed/NNNN-x.md"), readFileSync(join(here, "../docs/adr/TEMPLATE.md"), "utf8"));
+    expect(checkDraft(root, "NNNN-x.md")).toEqual({ errors: [], warnings: [] });
+  });
+
+  it("reports what would block acceptance as errors, and changes nothing", () => {
+    setup(FULL.replace("```json\n```", '```json\n[{ "op": "test", "path": "/scope", "value": "@other" }]\n```'));
+    const { errors } = checkDraft(root, "NNNN-x.md");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatch(/does not match/);
+    expect(readFileSync(join(root, "architecture.json"), "utf8")).toBe(ARCH);
+    expect(listDrafts(root)).toEqual(["NNNN-x.md"]);
+    expect(readdirSync(join(root, "docs/adr"))).toEqual(["0001-a.md", "proposed"]);
+  });
+
+  it("warns about template parts that do not block acceptance", () => {
+    setup("# X\n\nSome text.\n");
+    const { errors, warnings } = checkDraft(root, "NNNN-x.md");
+    expect(errors).toEqual([]);
+    expect(warnings.join("\n")).toMatch(/NNNN\. Title/);
+    expect(warnings.join("\n")).toMatch(/Status/);
+    expect(warnings.join("\n")).toMatch(/Date/);
+    for (const s of ["Context", "Decision", "Consequences", "architecture.json change"]) expect(warnings.join("\n")).toContain(`## ${s}`);
+  });
+
+  it("checks every draft", () => {
+    setup(FULL);
+    writeFileSync(join(root, "docs/adr/proposed/NNNN-y.md"), `${FULL}{ "op": "add" }\n`);
+    const results = checkDrafts(root);
+    expect(results.map((r) => r.name)).toEqual(["NNNN-x.md", "NNNN-y.md"]);
+    expect(results[0].errors).toEqual([]);
+    expect(results[1].errors[0]).toMatch(/```json block/);
   });
 });
 

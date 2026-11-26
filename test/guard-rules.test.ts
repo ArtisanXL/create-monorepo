@@ -2621,10 +2621,16 @@ describe("guard decision: adr:review", () => {
     expect(blocked(bash(cmd)), cmd).toContain("adr:review");
   });
 
-  it.each(["pnpm adr:list", "pnpm run adr:list", "node scripts/adr.mjs list", "echo adr:review"])(
-    "allows %s",
-    (cmd) => {
-      expect(bash(cmd)).toEqual({ allow: true });
-    },
-  );
+  it.each([
+    "pnpm adr:list",
+    "pnpm run adr:list",
+    "node scripts/adr.mjs list",
+    "pnpm adr:check",
+    "npm run adr:check",
+    "node scripts/adr.mjs check",
+    "node scripts/adr.mjs check NNNN-x.md",
+    "echo adr:review",
+  ])("allows %s", (cmd) => {
+    expect(bash(cmd)).toEqual({ allow: true });
+  });
 });
