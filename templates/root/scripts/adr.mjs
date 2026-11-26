@@ -3,13 +3,13 @@
  * Review the ADR drafts agents and developers leave in docs/adr/proposed/ (see docs/adr/0002-deferred-packages.md).
  *   __RUN__ adr:list    list the drafts (read-only)
  *   __RUN__ adr:review  go through the drafts: accept, reject (with a reason), skip. Humans only: needs a terminal.
- * Accepting moves the draft to docs/adr/ under the next number and prints its `architecture.json change`
- * for you to apply by hand; architecture.json is never edited by this script.
+ * Accepting moves the draft to docs/adr/ under the next number and applies its `architecture.json change`
+ * (a JSON Patch) to architecture.json, after showing the diff and asking for confirmation. All or nothing.
  */
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
-import { acceptDraft, listDrafts, PROPOSED_DIR, readDraft, rejectDraft, summaryOf } from "./adr-lib.mjs";
+import { commitAccept, diffLines, listDrafts, PROPOSED_DIR, prepareAccept, readDraft, rejectDraft, summaryOf } from "./adr-lib.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const today = () => new Date().toISOString().slice(0, 10);
@@ -39,9 +39,21 @@ async function review() {
         if (answer === "q") return;
         if (answer === "s") break;
         if (answer === "a") {
-          const { file, change } = acceptDraft(root, name, today());
-          console.log(`Accepted: ${file}`);
-          if (change) console.log(`\nApply this to architecture.json by hand:\n\n${change}\n`);
+          let plan;
+          try {
+            plan = prepareAccept(root, name, today());
+          } catch (e) {
+            console.log(`Cannot accept ${name}: ${e.message}\nNothing changed.`);
+            break;
+          }
+          if (plan.after) {
+            console.log(`\narchitecture.json change:\n\n${diffLines(plan.before, plan.after)}\n`);
+            if ((await rl.question("Apply this and accept? [y/N] ")).trim().toLowerCase() !== "y") {
+              console.log("Nothing changed.");
+              break;
+            }
+          }
+          console.log(`Accepted: ${commitAccept(root, plan).file}`);
           break;
         }
         if (answer === "r") {

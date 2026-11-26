@@ -51,3 +51,8 @@ The kind of database the generated repo's `db` Package targets: `postgres`, `mys
 `d1`. One per generated repo; the default is `postgres`. Which engines are valid depends on the
 Runtime.
 _Avoid_: dialect, driver, database type, flavor
+
+**Architecture patch**:
+The JSON Patch an ADR draft carries for the generated repo's `architecture.json`. Accepting the
+draft applies it; the draft never edits `architecture.json` any other way.
+_Avoid_: architecture change, diff, migration
